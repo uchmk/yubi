@@ -253,6 +253,7 @@ impl Engine {
             last_release_retry: None,
             haptics: None,
             step_ticks: tick::TickLimiter::default(),
+            ring_ticks: tick::RingTicks::default(),
             cfg: Config::default(),
             seen_generation: u64::MAX,
             seen_interrupts: 0,
@@ -336,6 +337,7 @@ struct Worker {
     haptics: Option<crate::haptic::Haptics>,
     /// Spaces the edge slider ticks.
     step_ticks: tick::TickLimiter,
+    ring_ticks: tick::RingTicks,
     cfg: Config,
     seen_generation: u64,
     seen_interrupts: u64,
@@ -470,10 +472,16 @@ impl Worker {
         // Start the haptics worker (it probes the driver) before the first tick needs it, but only
         // when press ticks can happen; with the press feature or its ticks off nothing is opened.
         let ticks_possible = (self.cfg.press.enabled && self.cfg.press.haptic_ticks)
-            || (self.cfg.edge.enabled && self.cfg.edge.haptic_ticks);
+            || (self.cfg.edge.enabled && self.cfg.edge.haptic_ticks)
+            || (self.cfg.ring.haptic_ticks && !self.cfg.ring_counts().is_empty());
         if ticks_possible && self.haptics.is_none() {
             self.haptics = Some(crate::haptic::Haptics::new());
         }
+        // Fetch the icons of the ring's "launch an app" items now, so the first ring has them.
+        crate::os::appicon::prefetch(self.cfg.ring.items.iter().filter_map(|i| match &i.action {
+            crate::config::Action::Launch { path, .. } => Some(path.as_str()),
+            _ => None,
+        }));
         self.dispatch.set_level_hud(self.cfg.edge.show_level);
         if self.enabled && !self.cfg.gestures_enabled {
             self.release_everything();
@@ -665,6 +673,12 @@ impl Worker {
                 }
                 continue;
             }
+            if let Some(ev) = tick::RingEvent::of(&a)
+                && !dry_run
+                && !self.dispatch.is_blocked()
+            {
+                self.ring_tick(ev);
+            }
             let th = *self.recognizer.thresholds();
             // Practice mode and the history see the action first, in the mode it will run in.
             let mode = practice::Mode {
@@ -732,6 +746,23 @@ impl Worker {
             return;
         }
         h.actuate(tick::step_strength(self.cfg.press.haptic_strength));
+    }
+
+    /// A tick for what the ring just did (see `tick::RingTicks`). Needs the permission and the
+    /// driver; without them nothing happens.
+    fn ring_tick(&mut self, ev: tick::RingEvent) {
+        use crate::haptic::{HapticStatus, Haptics};
+        if !self.cfg.ring.haptic_ticks {
+            return;
+        }
+        let Some(strength) = self.ring_ticks.strength(ev, Instant::now()) else {
+            return;
+        };
+        let h = self.haptics.get_or_insert_with(Haptics::new);
+        if h.status() != HapticStatus::Available {
+            return;
+        }
+        h.actuate(strength);
     }
 
     fn flush_recorder(&mut self) {

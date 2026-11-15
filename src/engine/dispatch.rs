@@ -61,6 +61,11 @@ pub enum Plan {
     /// Change the display brightness by this many percentage points.
     Brightness(i8),
     ToggleMute,
+    /// Start an app (an exe or a shortcut) with optional arguments.
+    Launch {
+        path: String,
+        args: String,
+    },
     /// Not implemented yet (ring menu) or "none".
     Nothing,
     /// The action cannot run; the text is for the diagnostics page.
@@ -133,6 +138,16 @@ pub fn plan_for(action: &config::Action) -> Plan {
         A::VolumeStep(n) => Plan::Volume(*n),
         A::BrightnessStep(n) => Plan::Brightness(*n),
         A::ToggleMute => Plan::ToggleMute,
+        A::Launch { path, args } => {
+            if path.trim().is_empty() {
+                Plan::Invalid("起動するアプリが選ばれていません".to_owned())
+            } else {
+                Plan::Launch {
+                    path: path.trim().trim_matches('"').to_owned(),
+                    args: args.trim().to_owned(),
+                }
+            }
+        }
         // The ring menu comes with M3c.
         // The corner resize is a live gesture of its own (`Action::CornerResize*`), not a plan.
         A::RingMenu | A::ResizeFromOpposite | A::None => Plan::Nothing,
@@ -389,7 +404,7 @@ impl RingUi {
     }
 
     #[cfg(all(windows, not(test)))]
-    fn show(&mut self, anchor: (i32, i32), labels: &[String]) {
+    fn show(&mut self, anchor: (i32, i32), labels: &[String], actions: &[config::Action]) {
         use crate::overlay::{OverlayCmd, RingSlot};
         self.warm();
         if !self.ready() {
@@ -400,9 +415,21 @@ impl RingUi {
         self.open = true;
         let items = labels
             .iter()
-            .map(|l| RingSlot {
-                label: l.clone(),
-                icon: None,
+            .enumerate()
+            .map(|(i, l)| {
+                let Some(action) = actions.get(i) else {
+                    return RingSlot {
+                        label: l.clone(),
+                        icon: None,
+                        image: None,
+                    };
+                };
+                let look = crate::ringlook::look_of(action);
+                RingSlot {
+                    label: crate::ringlook::slot_label(action, l),
+                    icon: look.glyph,
+                    image: look.image,
+                }
             })
             .collect();
         let generation = self.generation;
@@ -462,7 +489,7 @@ impl RingUi {
     fn level_hide(&mut self) {}
 
     #[cfg(not(all(windows, not(test))))]
-    fn show(&mut self, _anchor: (i32, i32), _labels: &[String]) {
+    fn show(&mut self, _anchor: (i32, i32), _labels: &[String], _actions: &[config::Action]) {
         self.generation += 1;
         self.open = true;
     }
@@ -794,7 +821,7 @@ impl Dispatcher {
             _ if self.blocked || self.dry_run => None,
             Action::Suppress(s) => self.suppression.set(*s),
             Action::EdgeStep { side, outs, .. } => self.edge_step(*side, outs, ex),
-            Action::RingOpen { labels } => {
+            Action::RingOpen { labels, actions } => {
                 let Some(anchor) = cursor() else {
                     // No position: do not open the ring at the corner. Let go of the freeze and
                     // let the engine cancel the ring through the "overlay failed" path.
@@ -805,7 +832,7 @@ impl Dispatcher {
                 // Consume a stale "pressed since last call" Esc bit: an Esc from before the ring
                 // must not cancel it.
                 let _ = escape_down();
-                self.ring.show(anchor, labels);
+                self.ring.show(anchor, labels, actions);
                 self.ring.failed_now.then(|| RING_FAILED_NOTE.to_owned())
             }
             Action::DragBegin => {
@@ -1009,9 +1036,39 @@ impl Dispatcher {
                 }
                 Err(e) => e,
             }),
+            Plan::Launch { path, args } => Some(match launch_app(&path, &args) {
+                Ok(()) => format!("{source} → {label}"),
+                Err(e) => e,
+            }),
             Plan::Nothing => Some(format!("{source} → {label}（まだ動作しません）")),
             Plan::Invalid(msg) => Some(msg),
         }
+    }
+}
+
+/// Start `path` (an exe or a .lnk) through the shell. The existence check and the shell call
+/// run on their own short thread so a slow disk or app never stalls the engine; a failure there
+/// cannot reach the diagnostics note any more, so it is logged with the path.
+fn launch_app(path: &str, args: &str) -> Result<(), String> {
+    #[cfg(all(windows, not(test)))]
+    {
+        let (path, args) = (path.to_owned(), args.to_owned());
+        std::thread::Builder::new()
+            .name("yubi-launch".into())
+            .spawn(move || {
+                if !std::path::Path::new(&path).exists() {
+                    eprintln!("yubi: app not found: {path}");
+                } else if !crate::os::appicon::shell_open(&path, &args) {
+                    eprintln!("yubi: the shell could not start {path}");
+                }
+            })
+            .map(|_| ())
+            .map_err(|e| format!("アプリを起動できません: {e}"))
+    }
+    #[cfg(not(all(windows, not(test))))]
+    {
+        let _ = (path, args);
+        Ok(())
     }
 }
 
@@ -2039,6 +2096,7 @@ mod tests {
         let mut ex = Executor::new(&mut f);
         let open = Action::RingOpen {
             labels: vec!["a".into()],
+            actions: vec![config::Action::None],
         };
         let note = d.handle(&open, &mut ex, &th, || None);
         assert_eq!(note.as_deref(), Some(NO_CURSOR_NOTE));

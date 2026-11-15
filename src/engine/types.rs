@@ -344,6 +344,8 @@ pub enum Action {
     /// Show the ring menu at the cursor.
     RingOpen {
         labels: Vec<String>,
+        /// The action of each slot (same order), for the glyph / app icon.
+        actions: Vec<config::Action>,
     },
     /// Highlight a slot (`None` = the centre).
     RingSelect(Option<usize>),
@@ -636,7 +638,7 @@ impl RingCfg {
 }
 
 /// Most slots the ring shows (more would not fit around the circle).
-pub const RING_MAX_ITEMS: usize = 12;
+pub const RING_MAX_ITEMS: usize = config::Ring::MAX_ITEMS;
 
 /// Gesture settings, read when a touch session starts (and kept while a drag outlives it).
 #[derive(Debug, Clone, Default)]

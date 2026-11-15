@@ -571,6 +571,33 @@ pub fn action_picker_with(
     kinds: &[ActionKind],
     label: fn(ActionKind) -> &'static str,
 ) {
+    action_picker_head_with(ui, t, &id, action, kinds, label);
+    if let Action::Launch { path, args } = action {
+        launch_fields(ui, t, &id, path, args);
+    }
+}
+
+/// The kind chooser and the short fields of the action; the long fields of a launch action are
+/// left to [`launch_fields`], for a row that puts them on a line of their own.
+pub fn action_picker_head(
+    ui: &mut Ui,
+    t: &Tokens,
+    id: &(impl Hash + Debug),
+    action: &mut Action,
+    kinds: &[ActionKind],
+) {
+    action_picker_head_with(ui, t, id, action, kinds, ActionKind::label);
+}
+
+/// [`action_picker_head`] with its own names for the kinds.
+pub fn action_picker_head_with(
+    ui: &mut Ui,
+    t: &Tokens,
+    id: &(impl Hash + Debug),
+    action: &mut Action,
+    kinds: &[ActionKind],
+    label: fn(ActionKind) -> &'static str,
+) {
     let mut kind = action.kind();
     if combo(ui, t, id, &mut kind, kinds, label) {
         action.set_kind(kind);
@@ -591,6 +618,99 @@ pub fn action_fields(ui: &mut Ui, t: &Tokens, action: &mut Action) {
         Action::VolumeStep(n) | Action::BrightnessStep(n) => step_field(ui, n),
         _ => {}
     }
+}
+
+/// How long the list of running apps is reused before it is read again.
+const RUNNING_TTL_S: f64 = 2.0;
+
+/// The fields of a "launch an app" action on one line: the path (typed, browsed or taken from a
+/// running app), and optional arguments.
+pub fn launch_fields(
+    ui: &mut Ui,
+    t: &Tokens,
+    id: &(impl Hash + Debug),
+    path: &mut String,
+    args: &mut String,
+) {
+    path_field(ui, path, t.text_input_w);
+    launch_buttons(ui, t, id, path);
+    args_field(ui, args, t.text_input_w * 0.75);
+}
+
+/// The same fields as one block for a roomy row: the path (taking the free width), 参照… and the
+/// running-apps list on one line, and the arguments below, left-aligned with the path.
+pub fn launch_block(
+    ui: &mut Ui,
+    t: &Tokens,
+    id: &(impl Hash + Debug),
+    path: &mut String,
+    args: &mut String,
+) {
+    let gap = ui.spacing().item_spacing.x;
+    // The browse button is about as wide as its label; the list has the standard combo width.
+    let side = 2.0 * gap + t.combo_w + 4.0 * t.fs_body + 2.0 * ui.spacing().button_padding.x;
+    let path_w = (ui.available_width() - side).max(t.text_input_w * 0.6);
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            path_field(ui, path, path_w);
+            launch_buttons(ui, t, id, path);
+        });
+        args_field(ui, args, path_w);
+    });
+}
+
+fn path_field(ui: &mut Ui, path: &mut String, width: f32) {
+    ui.add(
+        egui::TextEdit::singleline(path)
+            .hint_text("アプリ（.exe / .lnk）のパス")
+            .desired_width(width),
+    );
+}
+
+fn args_field(ui: &mut Ui, args: &mut String, width: f32) {
+    ui.add(
+        egui::TextEdit::singleline(args)
+            .hint_text("引数（省略可）")
+            .desired_width(width),
+    );
+}
+
+/// 参照… (a file dialog) and 実行中のアプリから (a list of running apps), both setting `path`.
+fn launch_buttons(ui: &mut Ui, t: &Tokens, id: &(impl Hash + Debug), path: &mut String) {
+    if button(ui, t, "参照…").clicked()
+        && let Ok(Some(p)) = crate::os::file_dialog::open_app()
+    {
+        *path = p.to_string_lossy().into_owned();
+    }
+    combo_menu(
+        ui,
+        t,
+        t.combo_w,
+        (id, "running"),
+        "実行中のアプリから",
+        |ui| {
+            let now = ui.input(|i| i.time);
+            let key = ui.make_persistent_id("yubi-launch-running");
+            let cached: Option<(f64, Vec<String>)> = ui.data(|d| d.get_temp(key));
+            let list = match cached {
+                Some((at, list)) if now - at < RUNNING_TTL_S => list,
+                _ => {
+                    let list = crate::os::running::running_exe_paths();
+                    ui.data_mut(|d| d.insert_temp(key, (now, list.clone())));
+                    list
+                }
+            };
+            if list.is_empty() {
+                ui.label(RichText::new("ウィンドウのあるアプリがありません").color(t.text_muted));
+            }
+            for p in list {
+                let name = p.rsplit(['\\', '/']).next().unwrap_or(&p).to_owned();
+                if ui.selectable_label(false, name).on_hover_text(&p).clicked() {
+                    *path = p;
+                }
+            }
+        },
+    );
 }
 
 /// The signed step of a volume or brightness action, in percentage points.

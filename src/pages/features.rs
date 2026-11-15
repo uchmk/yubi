@@ -693,21 +693,58 @@ pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
         section_header(ui, t, "メニュー項目");
         let items = &mut cfg.ring.items;
         let mut remove = None;
+        ui.label(
+            RichText::new(format!(
+                "最大 {} 個です。上から順に、リングの真上から時計回りに並びます。",
+                Ring::MAX_ITEMS
+            ))
+            .size(t.fs_small)
+            .color(t.text_muted),
+        );
+        ui.add_space(t.space_sm);
         group(ui, t, |g| {
             for (i, item) in items.iter_mut().enumerate() {
                 g.raw_row(|ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icon_button(ui, t, icons::DELETE, "削除").clicked() {
-                            remove = Some(i);
-                        }
-                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut item.label)
-                                    .hint_text("表示名")
-                                    .desired_width(t.text_input_w / 2.0),
-                            );
-                            widgets::action_picker(ui, t, ("ring-item", i), &mut item.action);
+                    ui.vertical(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if icon_button(ui, t, icons::DELETE, "削除").clicked() {
+                                remove = Some(i);
+                            }
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                let beyond = i >= Ring::MAX_ITEMS;
+                                let color = if beyond { t.accent } else { t.text_muted };
+                                ui.label(
+                                    RichText::new(format!("{}", i + 1))
+                                        .size(t.fs_small)
+                                        .color(color),
+                                )
+                                .on_hover_text(if beyond {
+                                    "最大を超えているため、リングには出ません"
+                                } else {
+                                    "リングでの順番（真上が 1、時計回り）"
+                                });
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut item.label)
+                                        .hint_text("表示名")
+                                        .desired_width(t.text_input_w / 2.0),
+                                );
+                                widgets::action_picker_head(
+                                    ui,
+                                    t,
+                                    &("ring-item", i),
+                                    &mut item.action,
+                                    &ActionKind::ALL,
+                                );
+                            });
                         });
+                        if let crate::config::Action::Launch { path, args } = &mut item.action {
+                            // The long fields get a line of their own, so a narrow window wraps
+                            // them instead of pushing the delete button out of view.
+                            ui.horizontal(|ui| {
+                                ui.add_space(t.space_lg);
+                                widgets::launch_block(ui, t, &("ring-item", i), path, args);
+                            });
+                        }
                     });
                 });
             }
@@ -723,9 +760,28 @@ pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
         if let Some(i) = remove {
             items.remove(i);
         }
-        if accent_button(ui, t, "追加").clicked() {
-            items.push(RingItem::default());
+        let full = items.len() >= Ring::MAX_ITEMS;
+        ui.add_enabled_ui(!full, |ui| {
+            if accent_button(ui, t, "追加").clicked() {
+                items.push(RingItem::default());
+            }
+        });
+        if full {
+            ui.label(
+                RichText::new(format!("項目は最大 {} 個までです。", Ring::MAX_ITEMS))
+                    .size(t.fs_small)
+                    .color(t.text_muted),
+            );
         }
+        section_header(ui, t, "フィードバック");
+        group(ui, t, |g| {
+            g.toggle_row(
+                None,
+                "触覚で知らせる",
+                "リングが開いたとき、選ぶ項目が変わるたび、項目を実行したときに、短い触覚を返します。取り消したときは返しません。使えない環境では何も起きません。",
+                &mut cfg.ring.haptic_ticks,
+            );
+        });
     });
     cmd
 }

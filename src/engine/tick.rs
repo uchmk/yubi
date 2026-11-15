@@ -55,6 +55,11 @@ pub struct TickLimiter {
 }
 
 impl TickLimiter {
+    /// Remember a tick that was given without asking (the next one waits from here).
+    pub fn reset(&mut self, now: Instant) {
+        self.last = Some(now);
+    }
+
     /// True (and remembered) when a tick at `now` is far enough from the previous one.
     pub fn allow(&mut self, now: Instant) -> bool {
         if self
@@ -68,9 +73,105 @@ impl TickLimiter {
     }
 }
 
+/// What the ring did, as far as the hand can feel it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RingEvent {
+    /// The ring appeared.
+    Open,
+    /// A different slot is highlighted.
+    Change,
+    /// An item is running.
+    Run,
+    /// The ring was cancelled.
+    Cancel,
+}
+
+impl RingEvent {
+    /// The event an engine action stands for (the recognizer only sends `RingSelect` when the
+    /// highlight really moved; moving back to the centre is not a slot change).
+    pub fn of(a: &super::types::Action) -> Option<Self> {
+        use super::types::Action;
+        match a {
+            Action::RingOpen { .. } => Some(Self::Open),
+            Action::RingSelect(Some(_)) => Some(Self::Change),
+            Action::RingClose { committed: Some(_) } => Some(Self::Run),
+            Action::RingClose { committed: None } => Some(Self::Cancel),
+            _ => None,
+        }
+    }
+}
+
+/// Which ticks the ring gives and how hard: a medium one on open, a light one per slot change
+/// (at most one per 40 ms), a firm one when an item runs, nothing on cancel.
+#[derive(Debug, Default)]
+pub struct RingTicks {
+    limiter: TickLimiter,
+}
+
+impl RingTicks {
+    pub fn strength(&mut self, ev: RingEvent, now: Instant) -> Option<Strength> {
+        match ev {
+            RingEvent::Open => {
+                self.limiter.reset(now);
+                Some(Strength::Medium)
+            }
+            RingEvent::Change => self.limiter.allow(now).then_some(Strength::Weak),
+            RingEvent::Run => {
+                self.limiter.reset(now);
+                Some(Strength::Strong)
+            }
+            RingEvent::Cancel => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ring_events_follow_the_actions() {
+        use super::super::types::Action;
+        assert_eq!(
+            RingEvent::of(&Action::RingOpen {
+                labels: vec![],
+                actions: vec![]
+            }),
+            Some(RingEvent::Open)
+        );
+        assert_eq!(
+            RingEvent::of(&Action::RingSelect(Some(2))),
+            Some(RingEvent::Change)
+        );
+        assert_eq!(RingEvent::of(&Action::RingSelect(None)), None);
+        assert_eq!(
+            RingEvent::of(&Action::RingClose { committed: Some(1) }),
+            Some(RingEvent::Run)
+        );
+        assert_eq!(
+            RingEvent::of(&Action::RingClose { committed: None }),
+            Some(RingEvent::Cancel)
+        );
+        assert_eq!(RingEvent::of(&Action::DragBegin), None);
+    }
+
+    #[test]
+    fn ring_ticks_have_strengths_and_a_rate_limit() {
+        let mut t = RingTicks::default();
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        assert_eq!(t.strength(RingEvent::Open, ms(0)), Some(Strength::Medium));
+        // A change right after the open is held back, a later one is light.
+        assert_eq!(t.strength(RingEvent::Change, ms(10)), None);
+        assert_eq!(t.strength(RingEvent::Change, ms(50)), Some(Strength::Weak));
+        assert_eq!(t.strength(RingEvent::Change, ms(70)), None);
+        assert_eq!(t.strength(RingEvent::Change, ms(90)), Some(Strength::Weak));
+        // Running is firm even right after a change; cancelling is silent.
+        assert_eq!(t.strength(RingEvent::Run, ms(95)), Some(Strength::Strong));
+        assert_eq!(t.strength(RingEvent::Cancel, ms(500)), None);
+        // Cancel does not disturb the limiter.
+        assert_eq!(t.strength(RingEvent::Change, ms(500)), Some(Strength::Weak));
+    }
 
     #[test]
     fn limiter_spaces_ticks() {

@@ -14,8 +14,9 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
-    FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT, FileOpenDialog, FileSaveDialog,
-    IFileDialog, IFileOpenDialog, IFileSaveDialog, SIGDN_FILESYSPATH,
+    FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_NODEREFERENCELINKS, FOS_OVERWRITEPROMPT,
+    FileOpenDialog, FileSaveDialog, IFileDialog, IFileOpenDialog, IFileSaveDialog,
+    SIGDN_FILESYSPATH,
 };
 use windows::core::{HRESULT, PCWSTR, Result, w};
 
@@ -106,6 +107,32 @@ pub fn open_toml() -> Result<Option<PathBuf>> {
         let dlg: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL)?;
         let base: IFileDialog = windows::core::Interface::cast(&dlg)?;
         configure(&base, w!("Import settings"), FOS_FILEMUSTEXIST)?;
+        show(&base)
+    }
+}
+
+/// "Open" dialog for an app: an executable or a shortcut (`.lnk`), shortcuts not resolved.
+pub fn open_app() -> Result<Option<PathBuf>> {
+    init_com_once();
+    let filters = [
+        COMDLG_FILTERSPEC {
+            pszName: w!("アプリとショートカット (*.exe, *.lnk)"),
+            pszSpec: w!("*.exe;*.lnk"),
+        },
+        COMDLG_FILTERSPEC {
+            pszName: w!("すべてのファイル (*.*)"),
+            pszSpec: w!("*.*"),
+        },
+    ];
+    // SAFETY: standard COM activation; the filter strings are 'static.
+    unsafe {
+        let dlg: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL)?;
+        let base: IFileDialog = windows::core::Interface::cast(&dlg)?;
+        base.SetFileTypes(&filters)?;
+        base.SetTitle(w!("起動するアプリを選ぶ"))?;
+        let opts = base.GetOptions()?;
+        // Keep a chosen .lnk as the shortcut itself instead of its target.
+        base.SetOptions(opts | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_NODEREFERENCELINKS)?;
         show(&base)
     }
 }

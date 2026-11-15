@@ -1,13 +1,24 @@
 //! Pure overlay state: which ring is open, what is selected, which generation owns it.
 //! Stale generations are ignored here, so the window code stays free of that logic.
 
+use std::sync::Arc;
+
 use super::level::LevelInfo;
 
-/// One ring slot: a Japanese label and an optional Segoe Fluent Icons glyph.
+/// A small square picture (an app's own icon): premultiplied BGRA, `side` x `side`, row-major.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RingImage {
+    pub side: u32,
+    pub px: Arc<Vec<u32>>,
+}
+
+/// One ring slot: a Japanese label, an optional Segoe Fluent Icons glyph and an optional picture
+/// (the picture wins over the glyph).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RingSlot {
     pub label: String,
     pub icon: Option<char>,
+    pub image: Option<RingImage>,
 }
 
 /// Messages the engine sends. The overlay has no gesture logic of its own.
@@ -63,6 +74,8 @@ pub struct Model {
     pub anchor: (i32, i32),
     pub items: Vec<RingSlot>,
     pub selected: Option<usize>,
+    /// The hand went back to the centre after pointing at a slot: the cancel disc lights up.
+    pub centre: bool,
 }
 
 impl Model {
@@ -86,6 +99,7 @@ impl Model {
                 self.anchor = anchor_px;
                 self.items = items;
                 self.selected = None;
+                self.centre = false;
                 Effect::Open
             }
             OverlayCmd::Select { index, generation } => {
@@ -96,6 +110,8 @@ impl Model {
                 if index == self.selected {
                     return Effect::None;
                 }
+                // Only a return to the centre counts; a ring that just opened has not been left yet.
+                self.centre = index.is_none();
                 self.selected = index;
                 Effect::Redraw
             }
@@ -130,6 +146,7 @@ mod tests {
             .map(|i| RingSlot {
                 label: format!("項目{i}"),
                 icon: None,
+                image: None,
             })
             .collect()
     }
@@ -175,6 +192,25 @@ mod tests {
         assert_eq!(m.apply(open(6)), Effect::Open);
         assert_eq!(m.selected, None);
         assert_eq!(m.apply(close(None, 6)), Effect::Hide);
+    }
+
+    #[test]
+    fn centre_lights_up_only_after_leaving_it() {
+        let mut m = Model::default();
+        m.apply(open(1));
+        assert!(!m.centre, "a fresh ring is not 'back in the centre'");
+        let sel = |index| OverlayCmd::Select {
+            index,
+            generation: 1,
+        };
+        assert_eq!(m.apply(sel(None)), Effect::None);
+        assert!(!m.centre);
+        m.apply(sel(Some(3)));
+        assert!(!m.centre);
+        assert_eq!(m.apply(sel(None)), Effect::Redraw);
+        assert!(m.centre);
+        m.apply(sel(Some(0)));
+        assert!(!m.centre);
     }
 
     #[test]

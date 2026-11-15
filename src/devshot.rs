@@ -34,6 +34,8 @@ pub enum Fixture {
     DemoSpeedOff,
     /// Corner swipes on, a mix of set and off slots (one is the window resize).
     CornerDemo,
+    /// A ring with eight items, including an app launch with a long path.
+    RingFull,
 }
 
 impl Fixture {
@@ -54,6 +56,30 @@ impl Fixture {
                 c[3].horizontal = Action::DesktopNext;
                 c[3].vertical = Action::Find;
                 c[3].diagonal = Action::ResizeFromOpposite;
+            }
+            Self::RingFull => {
+                use crate::config::RingItem;
+                cfg.ring.enabled = true;
+                let item = |label: &str, action: Action| RingItem {
+                    label: label.into(),
+                    action,
+                };
+                cfg.ring.items = vec![
+                    item("タスクビュー", Action::TaskView),
+                    item("コピー", Action::Keys("Ctrl+C".into())),
+                    item("音量を上げる", Action::VolumeStep(5)),
+                    item("検索", Action::Find),
+                    item(
+                        "アプリを起動",
+                        Action::Launch {
+                            path: r"C:\Windows\System32\notepad.exe".into(),
+                            args: String::new(),
+                        },
+                    ),
+                    item("デスクトップを表示", Action::ShowDesktop),
+                    item("ミュート", Action::ToggleMute),
+                    item("次のデスクトップ", Action::DesktopNext),
+                ];
             }
             Self::DemoSpeedOn | Self::DemoSpeedOff => {
                 Self::DemoProfiles.apply(cfg);
@@ -228,6 +254,21 @@ impl DevShot {
                 theme: ThemeChoice::Black,
                 size: Vec2::new(w, 1100.0),
                 fixture: Fixture::Keep,
+                profile: None,
+                fake: false,
+                practice: false,
+                anim_t: None,
+                reduced: false,
+            });
+        }
+        // The ring page with a full ring (eight items), tall enough to show every row.
+        for (n, w) in [("wide", WIDE.x), ("narrow", NARROW.x)] {
+            shots.push(Shot {
+                name: format!("ringfull-{n}"),
+                page: Page::Ring,
+                theme: ThemeChoice::Black,
+                size: Vec2::new(w, 1500.0),
+                fixture: Fixture::RingFull,
                 profile: None,
                 fake: false,
                 practice: false,

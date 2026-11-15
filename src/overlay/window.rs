@@ -13,7 +13,7 @@ use windows::Win32::Graphics::Gdi::{
     BLENDFUNCTION, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection, CreateFontW,
     DEFAULT_CHARSET, DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT,
     DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW,
-    FF_DONTCARE, GdiFlush, GetDC, GetMonitorInfoW, HBITMAP, HDC, HFONT, HGDIOBJ,
+    FF_DONTCARE, GdiFlush, GetDC, GetMonitorInfoW, GetTextFaceW, HBITMAP, HDC, HFONT, HGDIOBJ,
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, OUT_DEFAULT_PRECIS, ReleaseDC,
     SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
@@ -155,41 +155,95 @@ impl Drop for Dib {
 struct Fonts {
     label: HFONT,
     /// The second line of a message card.
-    small: HFONT,
+    hint: HFONT,
     icon: HFONT,
+    /// The centre disc's caption and its cross.
+    small: HFONT,
+    cross: HFONT,
+    /// False when neither icon face exists: glyphs are then left out.
+    icon_ok: bool,
     dpi_scale: f32,
+    /// The (label, icon) em sizes it was built for.
+    key: (i32, i32),
 }
 
 impl Fonts {
-    fn new(scale: f32) -> Fonts {
-        let make = |px: f32, weight: i32, face: PCWSTR| {
-            // SAFETY: plain font creation; deleted in Drop.
-            unsafe {
-                CreateFontW(
-                    -(px * scale).round() as i32,
-                    0,
-                    0,
-                    0,
-                    weight,
-                    0,
-                    0,
-                    0,
-                    DEFAULT_CHARSET,
-                    OUT_DEFAULT_PRECIS,
-                    CLIP_DEFAULT_PRECIS,
-                    ANTIALIASED_QUALITY,
-                    FF_DONTCARE.0 as u32,
-                    face,
-                )
-            }
-        };
+    fn new(scale: f32, label_px: f32, icon_px: f32) -> Fonts {
+        let (icon, face_ok) = make_icon_font(icon_px, scale);
+        let (cross, _) = make_icon_font(18.0, scale);
         Fonts {
-            label: make(13.0, 600, w!("Segoe UI")),
-            small: make(12.0, 400, w!("Segoe UI")),
-            icon: make(20.0, 400, w!("Segoe Fluent Icons")),
+            hint: make_font(12.0, 400, scale, w!("Segoe UI")),
+            label: make_font(label_px, 600, scale, w!("Segoe UI")),
+            icon,
+            small: make_font(11.0, 600, scale, w!("Segoe UI")),
+            cross,
+            icon_ok: face_ok,
             dpi_scale: scale,
+            key: (label_px.round() as i32, icon_px.round() as i32),
         }
     }
+
+    fn matches(&self, scale: f32, label_px: f32, icon_px: f32) -> bool {
+        (self.dpi_scale - scale).abs() <= 0.01
+            && self.key == (label_px.round() as i32, icon_px.round() as i32)
+    }
+}
+
+fn make_font(px: f32, weight: i32, scale: f32, face: PCWSTR) -> HFONT {
+    // SAFETY: plain font creation; deleted in Drop.
+    unsafe {
+        CreateFontW(
+            -(px * scale).round() as i32,
+            0,
+            0,
+            0,
+            weight,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            ANTIALIASED_QUALITY,
+            FF_DONTCARE.0 as u32,
+            face,
+        )
+    }
+}
+
+/// The face GDI really picked for `font` (CreateFontW silently substitutes a missing face).
+fn face_of(font: HFONT) -> String {
+    // SAFETY: a throw-away memory DC; the font is selected and restored again.
+    unsafe {
+        let dc = CreateCompatibleDC(None);
+        if dc.is_invalid() {
+            return String::new();
+        }
+        let old = SelectObject(dc, font.into());
+        let mut buf = [0u16; 64];
+        let n = GetTextFaceW(dc, Some(&mut buf)).max(0) as usize;
+        SelectObject(dc, old);
+        let _ = DeleteDC(dc);
+        String::from_utf16_lossy(&buf[..n.min(buf.len())])
+            .trim_end_matches('\0')
+            .to_owned()
+    }
+}
+
+/// Segoe Fluent Icons (Windows 11), else Segoe MDL2 Assets (Windows 10: the same code points).
+/// The bool tells whether either face exists.
+fn make_icon_font(px: f32, scale: f32) -> (HFONT, bool) {
+    let fluent = make_font(px, 400, scale, w!("Segoe Fluent Icons"));
+    if face_of(fluent).eq_ignore_ascii_case("Segoe Fluent Icons") {
+        return (fluent, true);
+    }
+    // SAFETY: the font was just created above.
+    unsafe {
+        let _ = DeleteObject(fluent.into());
+    }
+    let mdl2 = make_font(px, 400, scale, w!("Segoe MDL2 Assets"));
+    let ok = face_of(mdl2).eq_ignore_ascii_case("Segoe MDL2 Assets");
+    (mdl2, ok)
 }
 
 impl Drop for Fonts {
@@ -197,8 +251,10 @@ impl Drop for Fonts {
         // SAFETY: fonts were created in `new`.
         unsafe {
             let _ = DeleteObject(self.label.into());
-            let _ = DeleteObject(self.small.into());
+            let _ = DeleteObject(self.hint.into());
             let _ = DeleteObject(self.icon.into());
+            let _ = DeleteObject(self.small.into());
+            let _ = DeleteObject(self.cross.into());
         }
     }
 }
@@ -447,7 +503,7 @@ impl App {
         // The DIB is `width` wide and square; the HUD only uses its top rows.
         let side = layout.width;
         let need_new = match &self.surface {
-            Some(s) => s.main.size != side || (s.fonts.dpi_scale - layout.scale).abs() > 0.01,
+            Some(s) => s.main.size != side || !s.fonts.matches(layout.scale, 13.0, 20.0),
             None => true,
         };
         if need_new {
@@ -455,7 +511,7 @@ impl App {
             self.surface = Some(Surface {
                 main: Dib::new(side)?,
                 scratch: Dib::new(side)?,
-                fonts: Fonts::new(layout.scale),
+                fonts: Fonts::new(layout.scale, 13.0, 20.0),
             });
         }
         let alpha = if self.animate && !was_visible {
@@ -500,9 +556,10 @@ impl App {
         self.origin = geometry::clamp_origin(self.model.anchor, layout.size, work);
         self.layout = layout;
         self.win_size = (layout.size, layout.size);
+        let m = geometry::slot_metrics(layout.n);
         let need_new = match &self.surface {
             Some(s) => {
-                s.main.size != layout.size || (s.fonts.dpi_scale - layout.scale).abs() > 0.01
+                s.main.size != layout.size || !s.fonts.matches(layout.scale, m.label_px, m.icon_px)
             }
             None => true,
         };
@@ -511,7 +568,7 @@ impl App {
             self.surface = Some(Surface {
                 main: Dib::new(layout.size)?,
                 scratch: Dib::new(layout.size)?,
-                fonts: Fonts::new(layout.scale),
+                fonts: Fonts::new(layout.scale, m.label_px, m.icon_px),
             });
         }
         let was_visible = matches!(self.phase, Phase::Shown | Phase::FadeIn);
@@ -591,6 +648,7 @@ impl App {
             (Some(i), Phase::Flash | Phase::FadeOut) => Highlight::Flash(i),
             (Some(i), _) if !self.model.open => Highlight::Flash(i),
             (Some(i), _) => Highlight::Selected(i),
+            (None, _) if self.model.centre => Highlight::Centre,
             (None, _) => Highlight::None,
         };
         let s = self.surface.as_mut().ok_or("no surface")?;
@@ -679,58 +737,107 @@ impl App {
     }
 }
 
-/// Draw each slot's icon and label with GDI into the scratch DIB, then composite the coverage.
+/// Draw each slot's picture and label, and the centre's cross and caption, with GDI into the
+/// scratch DIB, then composite the coverage.
 fn draw_labels(s: &mut Surface, l: &Layout, model: &Model, hl: Highlight) {
     let sel = match hl {
-        Highlight::None => None,
+        Highlight::None | Highlight::Centre => None,
         Highlight::Selected(i) | Highlight::Flash(i) => Some(i),
     };
-    let bw = (88.0 * l.scale) as i32;
+    let m = geometry::slot_metrics(l.n);
+    let px = |v: f32| (v * l.scale).round() as i32;
+    let bw = px(m.box_w);
+    let lh = px(m.line_h());
     for (i, slot) in model.items.iter().enumerate() {
         let (lx, ly) = l.label_pos(i);
         let (lx, ly) = (lx.round() as i32, ly.round() as i32);
-        let has_icon = slot.icon.is_some();
-        // (rect, font, text) rows for this slot.
-        let mut rows: Vec<(RECT, HFONT, Vec<u16>)> = Vec::new();
-        if let Some(c) = slot.icon {
-            let ih = (24.0 * l.scale) as i32;
-            let cy = ly - (10.0 * l.scale) as i32;
-            rows.push((
-                RECT {
-                    left: lx - bw / 2,
-                    top: cy - ih / 2,
-                    right: lx + bw / 2,
-                    bottom: cy + ih / 2,
-                },
-                s.fonts.icon,
-                c.to_string().encode_utf16().collect(),
-            ));
-        }
-        let lh = (20.0 * l.scale) as i32;
-        let cy = if has_icon {
-            ly + (13.0 * l.scale) as i32
+        let image = slot.image.as_ref().filter(|im| im.side > 0);
+        let glyph = slot.icon.filter(|_| s.fonts.icon_ok && image.is_none());
+        let visual = if image.is_some() {
+            Some(m.image_px)
         } else {
-            ly
+            glyph.map(|_| m.icon_px)
         };
-        rows.push((
-            RECT {
-                left: lx - bw / 2,
-                top: cy - lh / 2,
-                right: lx + bw / 2,
-                bottom: cy + lh / 2,
-            },
-            s.fonts.label,
-            slot.label.encode_utf16().collect(),
-        ));
+        let (icon_dy, label_dy) = m.rows(visual);
         let color = if sel == Some(i) {
             PALETTE.text_sel
         } else {
             PALETTE.text
         };
-        for (rect, font, text) in rows {
+        if let Some(im) = image {
+            let side = px(m.image_px);
+            let cy = ly + px(icon_dy);
+            let stride = s.main.size as usize;
+            let (x0, y0) = (lx - side / 2, cy - side / 2);
+            paint::draw_image(s.main.pixels(), stride, x0, y0, side, &im.px, im.side);
+        } else if let Some(c) = glyph {
+            let ih = px(m.icon_px * 1.3);
+            let cy = ly + px(icon_dy);
+            let rect = RECT {
+                left: lx - bw / 2,
+                top: cy - ih / 2,
+                right: lx + bw / 2,
+                bottom: cy + ih / 2,
+            };
+            let font = s.fonts.icon;
+            let text = c.to_string().encode_utf16().collect();
             draw_text(s, rect, font, text, DT_CENTER, color);
         }
+        let cy = ly + px(label_dy);
+        let rect = RECT {
+            left: lx - bw / 2,
+            top: cy - lh / 2,
+            right: lx + bw / 2,
+            bottom: cy + lh / 2,
+        };
+        let text = geometry::fit_label(&slot.label, m.box_w, m.label_px);
+        let font = s.fonts.label;
+        draw_text(
+            s,
+            rect,
+            font,
+            text.encode_utf16().collect(),
+            DT_CENTER,
+            color,
+        );
     }
+    draw_centre(s, l, hl == Highlight::Centre);
+}
+
+/// The cancel disc: a cross over the caption, dim until the hand is back in it.
+fn draw_centre(s: &mut Surface, l: &Layout, lit: bool) {
+    let (cx, cy) = l.centre();
+    let (cx, cy) = (cx.round() as i32, cy.round() as i32);
+    let px = |v: f32| (v * l.scale).round() as i32;
+    let color = if lit {
+        PALETTE.text_sel
+    } else {
+        PALETTE.text_dim
+    };
+    let w = px(60.0);
+    let line = px(15.0);
+    let (cross, cross_font) = if s.fonts.icon_ok {
+        ('\u{E711}', s.fonts.cross)
+    } else {
+        ('\u{00D7}', s.fonts.label)
+    };
+    let rect = RECT {
+        left: cx - w / 2,
+        top: cy - px(28.0),
+        right: cx + w / 2,
+        bottom: cy - px(2.0),
+    };
+    let text = cross.to_string().encode_utf16().collect();
+    draw_text(s, rect, cross_font, text, DT_CENTER, color);
+    let rect = RECT {
+        left: cx - w / 2,
+        top: cy + px(6.0) - line / 2,
+        right: cx + w / 2,
+        bottom: cy + px(6.0) + line / 2,
+    };
+    let small = s.fonts.small;
+    let text = "取り消し".encode_utf16().collect();
+    draw_text(s, rect, small, text, DT_CENTER, color);
 }
 
 /// Draw `text` into `rect` with GDI in the scratch DIB (white on black), then composite the
@@ -811,7 +918,7 @@ fn draw_level_text(s: &mut Surface, l: &LevelLayout, info: &LevelInfo) {
         color,
     );
     if let Some(h) = info.hint() {
-        let small = s.fonts.small;
+        let small = s.fonts.hint;
         draw_text(
             s,
             rect(l.hint_rect()),
@@ -953,4 +1060,25 @@ pub(super) fn run(
     }
     shared.hwnd.store(0, Ordering::SeqCst);
     APP.with(|a| *a.borrow_mut() = None);
+}
+
+/// Render one ring into memory (no window), for the screenshot test.
+#[cfg(test)]
+pub(super) fn snapshot(
+    items: Vec<super::model::RingSlot>,
+    hl: Highlight,
+    dpi: u32,
+) -> Result<(i32, Vec<u32>), String> {
+    let layout = Layout::new(items.len(), dpi);
+    let m = geometry::slot_metrics(layout.n);
+    let mut s = Surface {
+        main: Dib::new(layout.size)?,
+        scratch: Dib::new(layout.size)?,
+        fonts: Fonts::new(layout.scale, m.label_px, m.icon_px),
+    };
+    paint::render_ring(s.main.pixels(), &layout, hl);
+    let mut model = Model::default();
+    model.items = items;
+    draw_labels(&mut s, &layout, &model, hl);
+    Ok((layout.size, s.main.pixels().to_vec()))
 }

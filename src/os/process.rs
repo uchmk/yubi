@@ -89,6 +89,11 @@ fn query_exe_path(pid: u32) -> Option<String> {
     }
 }
 
+/// Full path of the process's executable (not cached).
+pub fn exe_path_of_pid(pid: u32) -> Option<String> {
+    query_exe_path(pid)
+}
+
 /// Lowercase executable file name of the process by pid (cached ~30 s).
 pub fn exe_name_of_pid(pid: u32) -> Option<String> {
     let now = Instant::now();

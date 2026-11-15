@@ -19,6 +19,7 @@ mod pages;
 mod pause_notice;
 mod practice_gestures;
 mod resident;
+mod ringlook;
 mod search;
 mod theme;
 mod widgets;

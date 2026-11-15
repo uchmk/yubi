@@ -169,6 +169,7 @@ impl RingState {
         if self.phase != Phase::Idle {
             return;
         }
+        let actions = cfg.items.iter().map(|i| i.action.clone()).collect();
         let labels = cfg
             .items
             .iter()
@@ -188,7 +189,7 @@ impl RingState {
             pending: None,
         };
         out.push(Action::Suppress(Suppress::CursorAndClicks));
-        out.push(Action::RingOpen { labels });
+        out.push(Action::RingOpen { labels, actions });
     }
 
     /// Move the selection with the hand, freeze it on release and enforce the cancels.
@@ -477,7 +478,7 @@ mod tests {
         let acts = rig.ring_actions();
         assert_eq!(acts[0], Action::Suppress(Suppress::CursorAndClicks));
         match &acts[1] {
-            Action::RingOpen { labels } => {
+            Action::RingOpen { labels, .. } => {
                 assert_eq!(labels, &["項目0", "項目1", "項目2", "項目3"]);
             }
             other => panic!("{other:?}"),

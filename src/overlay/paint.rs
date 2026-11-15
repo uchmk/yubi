@@ -70,6 +70,8 @@ pub const PALETTE: Palette = Palette {
 pub enum Highlight {
     None,
     Selected(usize),
+    /// The hand is back in the centre: the cancel disc lights up.
+    Centre,
     /// The committed sector, flashed brighter.
     Flash(usize),
 }
@@ -89,8 +91,13 @@ pub fn render_ring(px: &mut [u32], l: &Layout, hl: Highlight) {
     let step = l.step();
     let n = l.n;
     let hl_index = match hl {
-        Highlight::None => None,
+        Highlight::None | Highlight::Centre => None,
         Highlight::Selected(i) | Highlight::Flash(i) => Some(i),
+    };
+    let (disc_fill, disc_border) = if hl == Highlight::Centre {
+        (PALETTE.sel_fill, PALETTE.sel_border)
+    } else {
+        (PALETTE.fill, PALETTE.border)
     };
     let disc_r = l.inner - l.gap * 0.5;
 
@@ -106,7 +113,7 @@ pub fn render_ring(px: &mut [u32], l: &Layout, hl: Highlight) {
             if r < l.inner {
                 let d = disc_r - r;
                 if d > -1.0 {
-                    px[y * size + x] = shade(PALETTE.fill, PALETTE.border, d);
+                    px[y * size + x] = shade(disc_fill, disc_border, d);
                 }
                 continue;
             }
@@ -228,9 +235,117 @@ pub fn blend_text(dst: &mut u32, coverage: u8, color: Rgba) {
     *dst = ch(24, 255.0) << 24 | ch(16, color.0) << 16 | ch(8, color.1) << 8 | ch(0, color.2);
 }
 
+/// Source-over of a premultiplied pixel `src` (scaled by `k`, 0..=1) onto the premultiplied `dst`.
+pub fn blend_premul(dst: &mut u32, src: u32, k: f32) {
+    let sa = ((src >> 24) & 0xFF) as f32 * k;
+    if sa <= 0.0 {
+        return;
+    }
+    let inv = 1.0 - sa / 255.0;
+    let ch = |shift: u32| {
+        let s = ((src >> shift) & 0xFF) as f32 * k;
+        let d = ((*dst >> shift) & 0xFF) as f32;
+        (s + d * inv).round().clamp(0.0, 255.0) as u32
+    };
+    let a = (sa + ((*dst >> 24) & 0xFF) as f32 * inv)
+        .round()
+        .clamp(0.0, 255.0) as u32;
+    *dst = a << 24 | ch(16) << 16 | ch(8) << 8 | ch(0);
+}
+
+/// Draw the square premultiplied picture `img` (`side` x `side`) scaled to `target` px, with its
+/// top-left at `(x0, y0)`, into `px` (`stride` pixels per row). Bilinear; clipped to the buffer.
+pub fn draw_image(
+    px: &mut [u32],
+    stride: usize,
+    x0: i32,
+    y0: i32,
+    target: i32,
+    img: &[u32],
+    side: u32,
+) {
+    let side = side as usize;
+    if target <= 0 || side == 0 || img.len() < side * side {
+        return;
+    }
+    let rows = px.len() / stride.max(1);
+    let k = side as f32 / target as f32;
+    let at = |x: usize, y: usize| img[y.min(side - 1) * side + x.min(side - 1)];
+    for ty in 0..target {
+        let dy = y0 + ty;
+        if dy < 0 || dy as usize >= rows {
+            continue;
+        }
+        for tx in 0..target {
+            let dx = x0 + tx;
+            if dx < 0 || dx as usize >= stride {
+                continue;
+            }
+            let fx = ((tx as f32 + 0.5) * k - 0.5).max(0.0);
+            let fy = ((ty as f32 + 0.5) * k - 0.5).max(0.0);
+            let (ix, iy) = (fx.floor() as usize, fy.floor() as usize);
+            let (wx, wy) = (fx - ix as f32, fy - iy as f32);
+            let mix = |shift: u32| {
+                let g = |x, y| ((at(x, y) >> shift) & 0xFF) as f32;
+                let top = g(ix, iy) * (1.0 - wx) + g(ix + 1, iy) * wx;
+                let bot = g(ix, iy + 1) * (1.0 - wx) + g(ix + 1, iy + 1) * wx;
+                (top * (1.0 - wy) + bot * wy).round().clamp(0.0, 255.0) as u32
+            };
+            let src = mix(24) << 24 | mix(16) << 16 | mix(8) << 8 | mix(0);
+            blend_premul(&mut px[dy as usize * stride + dx as usize], src, 1.0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn centre_highlight_fills_the_disc_with_the_accent() {
+        let l = Layout::new(6, 96);
+        let mut a = vec![0u32; (l.size * l.size) as usize];
+        let mut b = a.clone();
+        render_ring(&mut a, &l, Highlight::None);
+        render_ring(&mut b, &l, Highlight::Centre);
+        let c = |px: &[u32]| px[(l.size / 2 * l.size + l.size / 2) as usize];
+        assert!(
+            (c(&b) & 0xFF) > 0xC0 && ((c(&b) >> 16) & 0xFF) < 0xA0,
+            "{:08x}",
+            c(&b)
+        );
+        assert!((c(&a) & 0xFF) < 0x40, "{:08x}", c(&a));
+        // The slots do not change.
+        let mid = (l.outer + l.inner) / 2.0;
+        assert_eq!(
+            pixel(&a, &l, 0.0, -mid),
+            pixel(&b, &l, 0.0, -mid),
+            "sector unchanged"
+        );
+    }
+
+    #[test]
+    fn pictures_blend_and_scale() {
+        // A 2x2 opaque red picture scaled to 4 px lands on a transparent buffer.
+        let red = 0xFFFF_0000u32;
+        let mut px = vec![0u32; 8 * 8];
+        draw_image(&mut px, 8, 2, 2, 4, &[red; 4], 2);
+        assert_eq!(px[3 * 8 + 3], red);
+        assert_eq!(px[0], 0);
+        assert_eq!(px[2 * 8 + 6], 0, "outside the picture");
+        // Clipped at the edge without panicking.
+        draw_image(&mut px, 8, 6, 6, 4, &[red; 4], 2);
+        assert_eq!(px[7 * 8 + 7], red);
+        draw_image(&mut px, 8, -3, -3, 4, &[red; 4], 2);
+        // A half-transparent premultiplied pixel over opaque dark.
+        let mut d = 0xFF10_1010u32;
+        blend_premul(&mut d, 0x8080_0000, 1.0);
+        assert_eq!(d >> 24, 0xFF);
+        assert!(((d >> 16) & 0xFF) > 0x80);
+        let mut d = 0x1234_5678u32;
+        blend_premul(&mut d, 0, 1.0);
+        assert_eq!(d, 0x1234_5678);
+    }
 
     fn pixel(px: &[u32], l: &Layout, dx: f32, dy: f32) -> u32 {
         let (cx, cy) = l.centre();

@@ -22,7 +22,23 @@ mod window;
 #[allow(unused_imports)]
 pub use level::{LevelInfo, LevelKind};
 #[allow(unused_imports)]
-pub use model::{OverlayCmd, RingSlot};
+pub use model::{OverlayCmd, RingImage, RingSlot};
+
+/// Render a ring to memory (premultiplied pixels) for the screenshot test.
+#[cfg(all(test, windows))]
+pub fn snapshot(
+    items: Vec<RingSlot>,
+    highlight: Option<usize>,
+    centre: bool,
+    dpi: u32,
+) -> Result<(i32, Vec<u32>), String> {
+    let hl = match (highlight, centre) {
+        (Some(i), _) => paint::Highlight::Selected(i),
+        (None, true) => paint::Highlight::Centre,
+        (None, false) => paint::Highlight::None,
+    };
+    window::snapshot(items, hl, dpi)
+}
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::{self, SyncSender};

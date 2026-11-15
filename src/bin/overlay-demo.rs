@@ -72,6 +72,7 @@ fn main() {
         .map(|(l, c)| RingSlot {
             label: (*l).into(),
             icon: Some(*c),
+            image: None,
         })
         .collect();
 

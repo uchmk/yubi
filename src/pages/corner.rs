@@ -341,12 +341,19 @@ fn slot_pill(
                     // A kind with a field (keys, step) stays open so the field can be filled in.
                     if !matches!(
                         slot,
-                        Action::Keys(_) | Action::VolumeStep(_) | Action::BrightnessStep(_)
+                        Action::Keys(_)
+                            | Action::VolumeStep(_)
+                            | Action::BrightnessStep(_)
+                            | Action::Launch { .. }
                     ) {
                         ui.close();
                     }
                 }
             }
-            action_fields(ui, t, slot);
+            if let Action::Launch { path, args } = slot {
+                crate::widgets::launch_fields(ui, t, &resp.id, path, args);
+            } else {
+                action_fields(ui, t, slot);
+            }
         });
 }

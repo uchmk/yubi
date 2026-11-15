@@ -153,6 +153,11 @@ pub enum Action {
     /// Corner gestures only (the diagonal slot): resize the foreground window from the corner
     /// opposite the one the finger started in, for as long as the finger keeps moving.
     ResizeFromOpposite,
+    /// Start an app: an exe or a shortcut (`.lnk`) with optional arguments.
+    Launch {
+        path: String,
+        args: String,
+    },
 }
 
 /// Step the picker starts with when the user switches to a volume or brightness action.
@@ -181,10 +186,11 @@ pub enum ActionKind {
     Keys,
     /// Offered by the corner diagonal slot only; see [`ActionKind::WITH_RESIZE`].
     ResizeFromOpposite,
+    Launch,
 }
 
 impl ActionKind {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::None,
         Self::TaskView,
         Self::ShowDesktop,
@@ -200,10 +206,11 @@ impl ActionKind {
         Self::DesktopPrev,
         Self::DesktopNext,
         Self::Keys,
+        Self::Launch,
     ];
 
     /// [`ALL`](Self::ALL) plus the window resize, for the diagonal slot of a pad corner.
-    pub const WITH_RESIZE: [Self; 16] = [
+    pub const WITH_RESIZE: [Self; 17] = [
         Self::None,
         Self::TaskView,
         Self::ShowDesktop,
@@ -219,6 +226,7 @@ impl ActionKind {
         Self::DesktopPrev,
         Self::DesktopNext,
         Self::Keys,
+        Self::Launch,
         Self::ResizeFromOpposite,
     ];
 
@@ -240,6 +248,7 @@ impl ActionKind {
             Self::DesktopNext => "次のデスクトップ",
             Self::Keys => "キー入力",
             Self::ResizeFromOpposite => "反対側の角でウィンドウサイズを変更",
+            Self::Launch => "アプリを起動",
         }
     }
 }
@@ -272,6 +281,7 @@ impl Action {
             Self::DesktopNext => ActionKind::DesktopNext,
             Self::Keys(_) => ActionKind::Keys,
             Self::ResizeFromOpposite => ActionKind::ResizeFromOpposite,
+            Self::Launch { .. } => ActionKind::Launch,
         }
     }
 
@@ -297,6 +307,10 @@ impl Action {
             ActionKind::DesktopNext => Self::DesktopNext,
             ActionKind::Keys => Self::Keys(String::new()),
             ActionKind::ResizeFromOpposite => Self::ResizeFromOpposite,
+            ActionKind::Launch => Self::Launch {
+                path: String::new(),
+                args: String::new(),
+            },
         };
     }
 
@@ -306,6 +320,7 @@ impl Action {
             Self::Keys(k) if !k.is_empty() => k.clone(),
             Self::VolumeStep(n) => format!("音量 {n:+}"),
             Self::BrightnessStep(n) => format!("明るさ {n:+}"),
+            Self::Launch { path, .. } if !path.trim().is_empty() => file_stem_of(path),
             other => other.kind().label().to_owned(),
         }
     }
@@ -328,6 +343,16 @@ impl Action {
             Self::DesktopNext => "desktop_next".into(),
             Self::Keys(k) => format!("keys:{k}"),
             Self::ResizeFromOpposite => "resize_opposite".into(),
+            // `|` splits the path from the arguments. A Windows path cannot hold one, so a typed
+            // `|` is dropped from the path here instead of being read back as the separator.
+            Self::Launch { path, args } => {
+                let path = path.replace('|', "");
+                if args.is_empty() {
+                    format!("launch:{path}")
+                } else {
+                    format!("launch:{path}|{args}")
+                }
+            }
         }
     }
 
@@ -357,6 +382,12 @@ impl Action {
             other => {
                 if let Some(k) = other.strip_prefix("keys:") {
                     Self::Keys(k.to_owned())
+                } else if let Some(rest) = other.strip_prefix("launch:") {
+                    let (path, args) = rest.split_once('|').unwrap_or((rest, ""));
+                    Self::Launch {
+                        path: path.to_owned(),
+                        args: args.to_owned(),
+                    }
                 } else if let Some(n) = other.strip_prefix("volume").and_then(Self::parse_step) {
                     Self::VolumeStep(n)
                 } else if let Some(n) = other.strip_prefix("brightness").and_then(Self::parse_step)
@@ -378,6 +409,16 @@ impl Action {
             TokenParse::Ok(a) => a,
             TokenParse::Legacy | TokenParse::Unknown => Self::None,
         }
+    }
+}
+
+/// The file name of `path` without its extension (`C:\x\Notepad.exe` gives `Notepad`).
+pub fn file_stem_of(path: &str) -> String {
+    let name = path.trim().trim_matches('"');
+    let name = name.rsplit(['\\', '/']).next().unwrap_or(name);
+    match name.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem.to_owned(),
+        _ => name.to_owned(),
     }
 }
 
@@ -1470,6 +1511,8 @@ impl Cursor {
 pub struct Ring {
     pub enabled: bool,
     pub items: Vec<RingItem>,
+    /// Haptic ticks: when the ring opens, when the highlighted slot changes, when an item runs.
+    pub haptic_ticks: bool,
 }
 
 impl Default for Ring {
@@ -1477,11 +1520,15 @@ impl Default for Ring {
         Self {
             enabled: true,
             items: Vec::new(),
+            haptic_ticks: true,
         }
     }
 }
 
 impl Ring {
+    /// Most slots the ring shows (more would not fit around the circle).
+    pub const MAX_ITEMS: usize = 8;
+
     /// The slots the ring offers when none of the configured items has an action (an empty list,
     /// the new-install state, or only unset slots). The file keeps the list as written; this is
     /// applied at run time, and the ring page can copy it into the list for editing.
@@ -1514,7 +1561,8 @@ impl Ring {
     /// The items the ring really shows: the configured ones, or the defaults when none can run.
     pub fn effective_items(&self) -> Vec<RingItem> {
         if self.has_usable_items() {
-            self.items.clone()
+            // A hand-edited file may hold more than the ring can lay out.
+            self.items.iter().take(Self::MAX_ITEMS).cloned().collect()
         } else {
             Self::default_items()
         }
@@ -3576,6 +3624,84 @@ enabled = true
             Action::Keys("Ctrl+Shift+T".into())
         );
         assert_eq!(Action::from_token("garbage"), Action::None);
+    }
+
+    #[test]
+    fn launch_action_round_trips_through_tokens_and_toml() {
+        let a = Action::Launch {
+            path: r"C:\Program Files\App\app.exe".into(),
+            args: "--new-window | --x".into(),
+        };
+        assert_eq!(Action::from_token(&a.to_token()), a);
+        let bare = Action::Launch {
+            path: r"C:\Users\me\Menu\メモ帳.lnk".into(),
+            args: String::new(),
+        };
+        assert_eq!(bare.to_token(), r"launch:C:\Users\me\Menu\メモ帳.lnk");
+        assert_eq!(Action::from_token(&bare.to_token()), bare);
+        assert_eq!(bare.label(), "メモ帳");
+        assert_eq!(a.kind(), ActionKind::Launch);
+        assert_eq!(ActionKind::Launch.label(), "アプリを起動");
+        // Through the file: a ring item keeps its path and arguments.
+        let mut cfg = Config::default();
+        cfg.ring.items = vec![RingItem {
+            label: "エディタ".into(),
+            action: a.clone(),
+        }];
+        cfg.ring.haptic_ticks = false;
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back = parse_text(&text).unwrap().config;
+        assert_eq!(back.ring.items[0].action, a);
+        assert!(!back.ring.haptic_ticks);
+        assert_eq!(back.ring, cfg.ring);
+        // An older file without the key keeps the ticks on.
+        let old = parse_text("schema_version = 2\n[ring]\nenabled = true\n").unwrap();
+        assert!(old.config.ring.haptic_ticks && Ring::default().haptic_ticks);
+        // Picking the kind starts empty.
+        let mut k = Action::None;
+        k.set_kind(ActionKind::Launch);
+        assert_eq!(
+            k,
+            Action::Launch {
+                path: String::new(),
+                args: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn a_pipe_in_a_launch_path_cannot_leak_into_the_arguments() {
+        for args in ["", "--x"] {
+            let a = Action::Launch {
+                path: r"C:\odd|name.exe".into(),
+                args: args.into(),
+            };
+            let back = Action::from_token(&a.to_token());
+            assert_eq!(
+                back,
+                Action::Launch {
+                    path: r"C:\oddname.exe".into(),
+                    args: args.into()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn the_ring_shows_at_most_eight_items() {
+        let ring = Ring {
+            items: (0..12)
+                .map(|i| RingItem {
+                    label: format!("{i}"),
+                    action: Action::Find,
+                })
+                .collect(),
+            ..Ring::default()
+        };
+        assert_eq!(Ring::MAX_ITEMS, 8);
+        let shown = ring.effective_items();
+        assert_eq!(shown.len(), 8);
+        assert_eq!(shown[7].label, "7");
     }
 
     #[test]

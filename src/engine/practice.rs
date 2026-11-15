@@ -212,10 +212,10 @@ impl Recorder {
                 ));
                 None
             }
-            Action::Debug(GestureEvent::Corner { corner, dir }) => {
+            Action::Debug(GestureEvent::Corner { corner, slot }) => {
                 self.pending = Some((
-                    corner_swipe_label(*corner, *dir),
-                    GestureId::corner(*corner, *dir).as_str().to_owned(),
+                    corner_swipe_label(*corner, *slot),
+                    GestureId::corner_slot(*corner, *slot).as_str().to_owned(),
                 ));
                 None
             }

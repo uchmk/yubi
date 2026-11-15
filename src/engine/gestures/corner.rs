@@ -1,41 +1,60 @@
-//! Corner swipes: one finger lands in a corner zone of the pad and swipes out of it. Each corner
-//! has three slots, picked by the direction of the swipe (measured from the corner, toward the
-//! middle of the pad):
+//! Corner triggers: one finger in a corner zone of the pad. Each corner has up to six slots:
+//! three swipes, picked by the direction of the move (measured from the corner, toward the
+//! middle of the pad), plus a tap, a press and a hold.
 //!
 //!  * horizontal: along the top or bottom edge, away from the corner (angle -20..30 degrees),
 //!  * diagonal: toward the middle of the pad (30..60 degrees),
-//!  * vertical: along the left or right edge, away from the corner (60..110 degrees).
+//!  * vertical: along the left or right edge, away from the corner (60..110 degrees),
+//!  * tap: the finger touches down in the zone and lifts quickly without moving (the ordinary
+//!    tap thresholds),
+//!  * press: the pad's button clicks, or the finger presses past the one-finger light-press
+//!    pressure, while the finger is in the zone,
+//!  * hold: the finger rests in the zone for the long-hold time without moving.
 //!
-//! The finger must start inside the zone (`Corners::size_mm`, a square), and travel at least
-//! `COMMIT_MM` within `WINDOW_US` of touching down. A slow or short move, a start outside the
-//! zones, a second finger and a swipe that points out of the pad are all ordinary cursor moves.
-//! Once it commits, the cursor is frozen until the finger lifts and the slot's action runs:
-//! a one-shot action fires once; the window resize follows the finger live until it lifts.
+//! The finger must start inside the zone (`Corners::size_mm`, a square). A swipe must travel at
+//! least `COMMIT_MM` within `WINDOW_US` of touching down. A slow or short move, a start outside
+//! the zones, a second finger and a swipe that points out of the pad are all ordinary input.
+//! Once a swipe, press or hold commits, the cursor is frozen until the finger lifts and the
+//! slot's action runs: a one-shot action fires once; the window resize follows the finger live
+//! until it lifts. A tap fires when the finger lifts.
+//!
+//! A set tap or press slot also takes the click it shadows: from touchdown in its zone, the
+//! mouse hook holds back clicks (`Suppress::Clicks`) until the touch stops being a candidate, and
+//! for a short while after a tap's lift (`CLICK_LINGER_US`), because Windows' tap-to-click may
+//! arrive just after the lift. A touch that also becomes something else (a swipe, a second
+//! finger, a long rest) lets the clicks go again at once. A set hold slot shadows the one-finger
+//! long hold of the same touch.
 //!
 //! Arbitration with the edge slider: the edge slider starts from the same few millimetres, so a
 //! corner zone that has any slot set belongs to the corner: an edge slide never starts there
-//! (`owns_zone`). A corner whose three slots are all off leaves its zone to the edge slider. As a
+//! (`owns_zone`). A corner whose slots are all off leaves its zone to the edge slider. As a
 //! second guard, while a corner swipe can still claim the touch the edge slider holds back
 //! (`would_claim`), and if both commit in the same frame the corner wins (`Priority::Corner`).
 
-use crate::config::{Action as Cfg, CornerDir};
+use crate::config::{Action as Cfg, CornerDir, CornerSlot};
 use crate::engine::arbitration::{Owner, Proposal};
-use crate::engine::types::{Action, Ctx, GestureEvent, Point, Suppress, dist};
+use crate::engine::types::{
+    Action, CornerGestureCfg, Ctx, GestureCfg, GestureEvent, Point, Suppress, Thresholds, dist,
+};
 
 /// Travel from the landing point that commits the swipe.
 pub const COMMIT_MM: f32 = 6.0;
 /// ...which must happen within this long of touching down.
 pub const WINDOW_US: u64 = 400_000;
+/// How long the click hold outlives the lift of a tap (the tap-to-click may land just after it).
+pub const CLICK_LINGER_US: u64 = 150_000;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 enum Phase {
     #[default]
     Fresh,
-    /// Landed in the zone of `corner` at `start`, at time `t0`.
+    /// Landed in the zone of `corner` at `start`, at time `t0`. `fire` is the press or hold slot
+    /// that was just recognised and waits for the arbiter.
     Candidate {
         corner: usize,
         start: Point,
         t0: u64,
+        fire: Option<CornerSlot>,
     },
     /// Live. `last` is the position the resize has been applied up to.
     Committed {
@@ -49,6 +68,14 @@ enum Phase {
 #[derive(Debug, Default)]
 pub struct CornerState {
     phase: Phase,
+    /// The touch can no longer be a plain tap: it moved or clicked.
+    tap_blocked: bool,
+    /// Clicks are being held back through the mouse hook for this touch.
+    clicks_held: bool,
+    /// Since when the finger's pressure is at or over the press threshold.
+    deep_since: Option<u64>,
+    /// After a tap: let go of the click hold at this time (read by the recognizer).
+    linger: Option<u64>,
 }
 
 /// Which corner zone `p` is in on a `dims` pad (0 = top-left, 1 = top-right, 2 = bottom-left,
@@ -92,17 +119,13 @@ pub fn classify(corner: usize, dx: f32, dy: f32) -> Option<CornerDir> {
     }
 }
 
-/// True when `start` is inside the zone of a corner that has at least one slot set: the edge
-/// slider does not start there.
+/// True when `start` is inside the zone of a corner that has at least one slot set (of a trigger
+/// that is switched on): the edge slider does not start there.
 pub fn owns_zone(ctx: &Ctx, start: Point) -> bool {
     let (Some(cfg), Some(dims)) = (ctx.g.corner.as_ref(), ctx.dims) else {
         return false;
     };
-    zone_of(start, dims, cfg.size_mm).is_some_and(|corner| {
-        CornerDir::ALL
-            .into_iter()
-            .any(|dir| cfg.slot(corner, dir).is_some())
-    })
+    zone_of(start, dims, cfg.size_mm).is_some_and(|corner| cfg.any(corner))
 }
 
 /// True while the touch that landed at `start` at `t0` may still become a corner swipe that has
@@ -123,12 +146,54 @@ pub fn would_claim(ctx: &Ctx, state: &CornerState, free: bool, start: Point, t0:
         return false;
     };
     classify(corner, p.0 - start.0, p.1 - start.1)
-        .is_some_and(|dir| cfg.slot(corner, dir).is_some())
+        .is_some_and(|dir| cfg.swipe(corner, dir).is_some())
 }
 
 impl CornerState {
     pub fn is_committed(&self) -> bool {
         matches!(self.phase, Phase::Committed { .. })
+    }
+
+    /// Clicks are held back for the current touch.
+    pub fn clicks_held(&self) -> bool {
+        self.clicks_held
+    }
+
+    /// Take the time at which the click hold of a finished tap ends.
+    pub fn take_linger(&mut self) -> Option<u64> {
+        self.linger.take()
+    }
+
+    /// True while this touch is (or became) a corner touch whose hold slot is set: the ordinary
+    /// one-finger long hold stays quiet.
+    pub fn claims_hold(&self, g: &GestureCfg) -> bool {
+        let (Phase::Candidate { corner, .. } | Phase::Committed { corner, .. }) = self.phase else {
+            return false;
+        };
+        g.corner
+            .as_ref()
+            .is_some_and(|c| c.slot(corner, CornerSlot::Hold).is_some())
+    }
+
+    /// When the hold slot of the current candidate becomes due, if it has one.
+    pub fn deadline(&self, g: &GestureCfg, th: &Thresholds) -> Option<u64> {
+        let Phase::Candidate {
+            corner, t0, fire, ..
+        } = self.phase
+        else {
+            return None;
+        };
+        let cfg = g.corner.as_ref()?;
+        (fire.is_none() && cfg.slot(corner, CornerSlot::Hold).is_some()).then(|| t0 + th.hold_us)
+    }
+
+    /// Give up on this touch. Clicks held back for it are let go.
+    fn die(&mut self, out: &mut Vec<Action>) {
+        self.phase = Phase::Dead;
+        if self.clicks_held {
+            self.clicks_held = false;
+            out.push(Action::Suppress(Suppress::Off));
+        }
     }
 
     /// Follow the finger while a resize is live; give up when a second finger arrives.
@@ -143,6 +208,7 @@ impl CornerState {
         };
         if ctx.raw != 1 || ctx.rebase {
             self.phase = Phase::Dead;
+            self.clicks_held = false;
             if resize {
                 out.push(Action::CornerResizeEnd);
             }
@@ -164,8 +230,8 @@ impl CornerState {
         }
     }
 
-    /// Watch a fresh or candidate touch; propose once the swipe is clear.
-    pub fn step(&mut self, ctx: &Ctx, free: bool) -> Option<Proposal> {
+    /// Watch a fresh or candidate touch; propose once a swipe, press or hold is clear.
+    pub fn step(&mut self, ctx: &Ctx, free: bool, out: &mut Vec<Action>) -> Option<Proposal> {
         let cfg = ctx.g.corner.as_ref()?;
         match self.phase {
             Phase::Fresh => {
@@ -173,78 +239,192 @@ impl CornerState {
                     self.phase = Phase::Dead;
                     return None;
                 };
-                self.phase = if ctx.raw != 1 || ctx.rebase {
-                    Phase::Dead
-                } else {
-                    match zone_of(start, dims, cfg.size_mm) {
-                        Some(corner) => Phase::Candidate {
-                            corner,
-                            start,
-                            t0: ctx.now,
-                        },
-                        None => Phase::Dead,
-                    }
-                };
-                None
-            }
-            Phase::Candidate { corner, start, t0 } => {
+                self.tap_blocked = false;
+                self.deep_since = None;
                 if ctx.raw != 1 || ctx.rebase {
                     self.phase = Phase::Dead;
                     return None;
                 }
+                match zone_of(start, dims, cfg.size_mm) {
+                    Some(corner) if cfg.any(corner) => {
+                        self.phase = Phase::Candidate {
+                            corner,
+                            start,
+                            t0: ctx.now,
+                            fire: None,
+                        };
+                        // A tap or press here owns the click: hold clicks back from touchdown.
+                        if cfg.slot(corner, CornerSlot::Tap).is_some()
+                            || cfg.slot(corner, CornerSlot::Press).is_some()
+                        {
+                            self.clicks_held = true;
+                            out.push(Action::Suppress(Suppress::Clicks));
+                        }
+                        // The landing frame may already carry the button.
+                        self.watch(ctx, free, cfg, corner, start, ctx.now)
+                    }
+                    _ => {
+                        self.phase = Phase::Dead;
+                        None
+                    }
+                }
+            }
+            Phase::Candidate {
+                corner,
+                start,
+                t0,
+                fire,
+            } => {
+                if ctx.raw != 1 || ctx.rebase {
+                    self.die(out);
+                    return None;
+                }
+                if fire.is_some() {
+                    // Waiting for the arbiter: propose again until it decides.
+                    return free.then_some(Proposal {
+                        who: Owner::Corner,
+                        at_us: ctx.now,
+                    });
+                }
+                let p = *ctx.cur.first()?;
+                if ctx.max_travel >= ctx.th.tap_travel_mm {
+                    self.tap_blocked = true;
+                }
+                if let Some(prop) = self.watch(ctx, free, cfg, corner, start, t0) {
+                    return Some(prop);
+                }
                 if !ctx.from_frame {
                     return None;
                 }
-                let p = *ctx.cur.first()?;
-                let in_time = ctx.now.saturating_sub(t0) <= WINDOW_US;
+                let age = ctx.now.saturating_sub(t0);
+                let in_time = age <= WINDOW_US;
+                // A set hold slot keeps the touch alive until the hold is due.
+                let alive_for = if cfg.slot(corner, CornerSlot::Hold).is_some() {
+                    WINDOW_US.max(ctx.th.hold_us)
+                } else {
+                    WINDOW_US
+                };
                 if dist(p, start) < COMMIT_MM {
-                    if !in_time {
-                        // Too slow: an ordinary cursor move.
-                        self.phase = Phase::Dead;
+                    if age > alive_for {
+                        // Too slow: ordinary input.
+                        self.die(out);
                     }
                     return None;
                 }
                 let bound = in_time
                     && classify(corner, p.0 - start.0, p.1 - start.1)
-                        .is_some_and(|dir| cfg.slot(corner, dir).is_some());
+                        .is_some_and(|dir| cfg.swipe(corner, dir).is_some());
                 if bound && free {
                     return Some(Proposal {
                         who: Owner::Corner,
                         at_us: ctx.now,
                     });
                 }
-                self.phase = Phase::Dead;
+                self.die(out);
                 None
             }
             Phase::Committed { .. } | Phase::Dead => None,
         }
     }
 
-    /// The arbiter gave this swipe the session: freeze the cursor and run the slot's action.
+    /// Look for a press or a hold in a candidate touch; mark the slot and propose.
+    fn watch(
+        &mut self,
+        ctx: &Ctx,
+        free: bool,
+        cfg: &CornerGestureCfg,
+        corner: usize,
+        start: Point,
+        t0: u64,
+    ) -> Option<Proposal> {
+        let mut fire = None;
+        if ctx.button {
+            // A click is not a tap, whatever the slots.
+            self.tap_blocked = true;
+        }
+        if cfg.slot(corner, CornerSlot::Press).is_some() {
+            let deep = ctx
+                .pressures
+                .first()
+                .is_some_and(|&p| p >= cfg.press_threshold);
+            if deep {
+                let since = *self.deep_since.get_or_insert(ctx.now);
+                if ctx.now.saturating_sub(since) >= ctx.th.press_persist_us {
+                    fire = Some(CornerSlot::Press);
+                }
+            } else {
+                self.deep_since = None;
+            }
+            if ctx.button && ctx.from_frame {
+                fire = Some(CornerSlot::Press);
+            }
+        }
+        if fire.is_none()
+            && cfg.slot(corner, CornerSlot::Hold).is_some()
+            && ctx.max_travel < ctx.th.hold_travel_mm
+            && ctx.now.saturating_sub(t0) >= ctx.th.hold_us
+            && dist(*ctx.cur.first()?, start) < ctx.th.hold_travel_mm
+        {
+            fire = Some(CornerSlot::Hold);
+        }
+        let slot = fire?;
+        self.phase = Phase::Candidate {
+            corner,
+            start,
+            t0,
+            fire: Some(slot),
+        };
+        free.then_some(Proposal {
+            who: Owner::Corner,
+            at_us: ctx.now,
+        })
+    }
+
+    /// The arbiter gave this touch the session: freeze the cursor and run the slot's action.
     pub fn commit(&mut self, ctx: &Ctx, out: &mut Vec<Action>) {
-        let Phase::Candidate { corner, start, .. } = self.phase else {
+        let Phase::Candidate {
+            corner,
+            start,
+            fire,
+            ..
+        } = self.phase
+        else {
             return;
         };
         let (Some(cfg), Some(&p)) = (ctx.g.corner.as_ref(), ctx.cur.first()) else {
-            self.phase = Phase::Dead;
+            self.die(out);
             return;
         };
-        let Some(dir) = classify(corner, p.0 - start.0, p.1 - start.1) else {
-            self.phase = Phase::Dead;
+        let slot = match fire {
+            Some(s) => s,
+            None => match classify(corner, p.0 - start.0, p.1 - start.1) {
+                Some(dir) => CornerSlot::Swipe(dir),
+                None => {
+                    self.die(out);
+                    return;
+                }
+            },
+        };
+        let Some(action) = cfg.slot(corner, slot) else {
+            self.die(out);
             return;
         };
-        let Some(action) = cfg.slot(corner, dir) else {
-            self.phase = Phase::Dead;
-            return;
-        };
-        let resize = *action == Cfg::ResizeFromOpposite;
+        let swipe = matches!(slot, CornerSlot::Swipe(_));
+        let resize = swipe && *action == Cfg::ResizeFromOpposite;
         self.phase = Phase::Committed {
             corner,
             last: start,
             resize,
         };
-        out.push(Action::Debug(GestureEvent::Corner { corner, dir }));
-        out.push(Action::Suppress(Suppress::Cursor));
+        out.push(Action::Debug(GestureEvent::Corner { corner, slot }));
+        // A press or hold keeps the click hold; a swipe lets the clicks go.
+        let keep_clicks = self.clicks_held && !swipe;
+        self.clicks_held = keep_clicks;
+        out.push(Action::Suppress(if keep_clicks {
+            Suppress::CursorAndClicks
+        } else {
+            Suppress::Cursor
+        }));
         if resize {
             out.push(Action::CornerResizeBegin { corner });
             self.drive(ctx, out);
@@ -253,14 +433,59 @@ impl CornerState {
         }
     }
 
-    /// The touch ended or was cancelled: end a live resize and release the cursor.
-    pub fn release(&mut self, out: &mut Vec<Action>) {
-        if let Phase::Committed { resize, .. } = self.phase {
-            if resize {
-                out.push(Action::CornerResizeEnd);
-            }
-            out.push(Action::Suppress(Suppress::Off));
+    /// The finger lifted: a quick, still touch in a zone with a tap slot fires it. Returns
+    /// whether a tap fired (the click hold then lingers, see `release`).
+    pub fn finish_tap(
+        &mut self,
+        g: &GestureCfg,
+        th: &Thresholds,
+        now: u64,
+        free: bool,
+        out: &mut Vec<Action>,
+    ) -> bool {
+        let Phase::Candidate {
+            corner, t0, fire, ..
+        } = self.phase
+        else {
+            return false;
+        };
+        let Some(action) = g
+            .corner
+            .as_ref()
+            .and_then(|c| c.slot(corner, CornerSlot::Tap))
+        else {
+            return false;
+        };
+        if fire.is_some() || self.tap_blocked || !free || now.saturating_sub(t0) >= th.tap_max_us {
+            return false;
         }
+        out.push(Action::Debug(GestureEvent::Corner {
+            corner,
+            slot: CornerSlot::Tap,
+        }));
+        out.push(Action::Trigger(action.clone()));
+        true
+    }
+
+    /// The touch ended or was cancelled: end a live resize and release the cursor and the
+    /// clicks. After a tap (`linger_until`) the clicks are let go later, by the recognizer.
+    pub fn release(&mut self, out: &mut Vec<Action>, linger_until: Option<u64>) {
+        match self.phase {
+            Phase::Committed { resize, .. } => {
+                if resize {
+                    out.push(Action::CornerResizeEnd);
+                }
+                out.push(Action::Suppress(Suppress::Off));
+            }
+            _ if self.clicks_held => match linger_until {
+                Some(at) => self.linger = Some(at),
+                None => out.push(Action::Suppress(Suppress::Off)),
+            },
+            _ => {}
+        }
+        self.clicks_held = false;
+        self.deep_since = None;
+        self.tap_blocked = false;
         self.phase = Phase::Fresh;
     }
 }
@@ -586,5 +811,245 @@ mod tests {
             .filter(|a| matches!(a, Action::CornerResizeEnd))
             .count();
         assert_eq!(ends, 1);
+    }
+
+    // ---- tap / press / hold -------------------------------------------------------------
+
+    fn pressed(ms: u64, x: f32, y: f32, button: bool, pressure: Option<f32>) -> Frame {
+        let mut ct = c(1, x, y);
+        ct.pressure = pressure;
+        Frame {
+            t_us: ms * 1000,
+            button,
+            contacts: vec![ct],
+        }
+    }
+
+    /// One finger resting at `at` from 0 to `rest_ms` (every 10 ms), then lifted.
+    fn rest(at: Point, rest_ms: u64) -> Vec<Frame> {
+        let mut v: Vec<Frame> = (0..=rest_ms / 10)
+            .map(|i| frame(i * 10, vec![c(1, at.0, at.1)]))
+            .collect();
+        v.push(frame(rest_ms + 10, vec![]));
+        v
+    }
+
+    fn with_slot(corner: usize, slot: CornerSlot, a: Cfg) -> Config {
+        let mut cfg = Config::default();
+        cfg.corner.enabled = true;
+        *cfg.corner.corners[corner].get_mut(slot) = a;
+        *cfg.corner.trigger_enabled_mut(slot.trigger()) = true;
+        cfg
+    }
+
+    #[test]
+    fn a_quick_still_touch_taps_and_the_click_hold_outlives_the_lift() {
+        let cfg = with_slot(2, CornerSlot::Tap, Cfg::Find);
+        let mut r = Recognizer::default();
+        r.set_pad_dims(Some(DIMS));
+        let mut out = Vec::new();
+        for f in rest((4.0, 110.0), 80) {
+            out.extend(r.step(&f, &cfg));
+        }
+        assert_eq!(triggers(&out), vec![Cfg::Find], "one tap");
+        // Clicks are held from touchdown; they are not let go at the lift.
+        assert_eq!(suppress(&out), vec![Suppress::Clicks]);
+        assert!(out.iter().any(|a| matches!(
+            a,
+            Action::Debug(GestureEvent::Corner {
+                corner: 2,
+                slot: CornerSlot::Tap
+            })
+        )));
+        // ...but a moment later, by the timer.
+        let due = r.next_deadline().expect("a deadline for the hold release");
+        assert!(due >= 90_000 + CLICK_LINGER_US - 20_000);
+        assert!(suppress(&r.tick(due - 1)).is_empty());
+        assert_eq!(suppress(&r.tick(due)), vec![Suppress::Off]);
+        assert!(r.tick(due + 1000).is_empty(), "only once");
+    }
+
+    #[test]
+    fn a_tap_needs_a_still_and_quick_touch() {
+        let cfg = with_slot(0, CornerSlot::Tap, Cfg::Find);
+        // Moves 4 mm: more than the tap travel.
+        let out = run(&swipe((3.0, 3.0), (7.0, 3.0), 100, true), &cfg);
+        assert!(triggers(&out).is_empty(), "moved");
+        // Too long: a rest of 300 ms.
+        let out = run(&rest((3.0, 3.0), 300), &cfg);
+        assert!(triggers(&out).is_empty(), "slow");
+        // Outside the zone.
+        let out = run(&rest((60.0, 60.0), 80), &cfg);
+        assert!(triggers(&out).is_empty(), "outside");
+        // Another corner, with nothing set.
+        let out = run(&rest((156.0, 4.0), 80), &cfg);
+        assert!(triggers(&out).is_empty(), "other corner");
+        // Just inside and just outside the zone edge.
+        assert_eq!(
+            triggers(&run(&rest((11.9, 3.0), 80), &cfg)),
+            vec![Cfg::Find]
+        );
+        assert!(triggers(&run(&rest((12.5, 3.0), 80), &cfg)).is_empty());
+    }
+
+    #[test]
+    fn a_tap_that_clicked_is_not_a_tap() {
+        let cfg = with_slot(0, CornerSlot::Tap, Cfg::Find);
+        let fr = vec![
+            pressed(0, 3.0, 3.0, false, None),
+            pressed(30, 3.0, 3.0, true, None),
+            pressed(60, 3.0, 3.0, true, None),
+            frame(80, vec![]),
+        ];
+        assert!(triggers(&run(&fr, &cfg)).is_empty());
+    }
+
+    #[test]
+    fn a_second_finger_cancels_a_tap_and_lets_the_clicks_go() {
+        let cfg = with_slot(0, CornerSlot::Tap, Cfg::Find);
+        let fr = vec![
+            frame(0, vec![c(1, 3.0, 3.0)]),
+            frame(30, vec![c(1, 3.0, 3.0), c(2, 80.0, 60.0)]),
+            frame(60, vec![c(1, 3.0, 3.0), c(2, 80.0, 60.0)]),
+            frame(90, vec![]),
+        ];
+        let out = run(&fr, &cfg);
+        assert!(triggers(&out).is_empty());
+        assert_eq!(suppress(&out), vec![Suppress::Clicks, Suppress::Off]);
+    }
+
+    #[test]
+    fn a_hold_fires_once_after_the_hold_time_and_not_before() {
+        let cfg = with_slot(3, CornerSlot::Hold, Cfg::Find);
+        let hold_ms = u64::from(cfg.sensitivity.hold_ms);
+        let at = (157.0, 112.0);
+        let out = run(&rest(at, hold_ms - 60), &cfg);
+        assert!(triggers(&out).is_empty(), "too short");
+        let out = run(&rest(at, hold_ms + 300), &cfg);
+        assert_eq!(triggers(&out), vec![Cfg::Find], "once");
+        assert_eq!(suppress(&out), vec![Suppress::Cursor, Suppress::Off]);
+        // A finger that shifts 4 mm early on is not holding still.
+        let mut fr = vec![frame(0, vec![c(1, 157.0, 112.0)])];
+        for ms in (50..=hold_ms + 300).step_by(10) {
+            fr.push(frame(ms, vec![c(1, 153.0, 112.0)]));
+        }
+        fr.push(frame(hold_ms + 400, vec![]));
+        let out = run(&fr, &cfg);
+        assert!(triggers(&out).is_empty(), "moved 4 mm");
+    }
+
+    #[test]
+    fn the_hold_slot_shadows_the_one_finger_long_hold() {
+        let mut cfg = with_slot(0, CornerSlot::Hold, Cfg::Find);
+        cfg.long_hold.enabled = true;
+        *cfg.long_hold.actions.get_mut(0) = Cfg::TaskView;
+        let hold_ms = u64::from(cfg.sensitivity.hold_ms);
+        let out = run(&rest((3.0, 3.0), hold_ms + 300), &cfg);
+        assert_eq!(triggers(&out), vec![Cfg::Find]);
+        // Outside the zone the ordinary long hold still works.
+        let out = run(&rest((80.0, 60.0), hold_ms + 300), &cfg);
+        assert_eq!(triggers(&out), vec![Cfg::TaskView]);
+    }
+
+    #[test]
+    fn a_second_finger_cancels_a_hold() {
+        let cfg = with_slot(0, CornerSlot::Hold, Cfg::Find);
+        let mut fr = Vec::new();
+        for i in 0..=80u64 {
+            let mut contacts = vec![c(1, 3.0, 3.0)];
+            if i >= 20 {
+                contacts.push(c(2, 80.0, 60.0));
+            }
+            fr.push(frame(i * 10, contacts));
+        }
+        fr.push(frame(900, vec![]));
+        assert!(triggers(&run(&fr, &cfg)).is_empty());
+    }
+
+    #[test]
+    fn a_physical_click_in_the_zone_fires_press_once_and_no_tap() {
+        let mut cfg = with_slot(2, CornerSlot::Press, Cfg::Find);
+        cfg.corner.corners[2].tap = Cfg::TaskView;
+        cfg.corner.tap_enabled = true;
+        let mut fr = vec![pressed(0, 4.0, 110.0, false, None)];
+        for ms in [30, 60, 90, 120] {
+            fr.push(pressed(ms, 4.0, 110.0, true, None));
+        }
+        fr.push(frame(150, vec![]));
+        let out = run(&fr, &cfg);
+        assert_eq!(triggers(&out), vec![Cfg::Find]);
+        // Clicks are held from touchdown and stay held with the cursor until the lift.
+        assert_eq!(
+            suppress(&out),
+            vec![Suppress::Clicks, Suppress::CursorAndClicks, Suppress::Off]
+        );
+    }
+
+    #[test]
+    fn a_click_outside_every_zone_is_not_touched() {
+        let cfg = with_slot(2, CornerSlot::Press, Cfg::Find);
+        let fr = vec![
+            pressed(0, 80.0, 60.0, false, None),
+            pressed(30, 80.0, 60.0, true, None),
+            frame(90, vec![]),
+        ];
+        let out = run(&fr, &cfg);
+        assert!(triggers(&out).is_empty());
+        assert!(suppress(&out).is_empty());
+    }
+
+    #[test]
+    fn pressing_deep_in_the_zone_counts_as_a_press() {
+        let cfg = with_slot(1, CornerSlot::Press, Cfg::Find);
+        let thr = cfg.press.thresholds(1).0;
+        let mut fr = vec![pressed(0, 156.0, 4.0, false, Some(thr * 0.3))];
+        for ms in [20, 40, 60, 80, 100] {
+            fr.push(pressed(ms, 156.0, 4.0, false, Some(thr * 1.5)));
+        }
+        fr.push(frame(140, vec![]));
+        assert_eq!(triggers(&run(&fr, &cfg)), vec![Cfg::Find]);
+        // A light touch never does.
+        let mut fr = vec![pressed(0, 156.0, 4.0, false, Some(thr * 0.3))];
+        for ms in [20, 40, 60, 80, 100] {
+            fr.push(pressed(ms, 156.0, 4.0, false, Some(thr * 0.5)));
+        }
+        fr.push(frame(140, vec![]));
+        assert!(triggers(&run(&fr, &cfg)).is_empty());
+    }
+
+    #[test]
+    fn a_trigger_with_its_switch_off_does_nothing_and_does_not_own_the_zone() {
+        let mut cfg = with_slot(0, CornerSlot::Hold, Cfg::Find);
+        cfg.corner.hold_enabled = false;
+        cfg.edge.enabled = true;
+        cfg.edge.top = EdgeTarget::Volume;
+        let hold_ms = u64::from(cfg.sensitivity.hold_ms);
+        let out = run(&rest((3.0, 3.0), hold_ms + 300), &cfg);
+        assert!(triggers(&out).is_empty());
+        // The edge slider is free to start in that zone.
+        let out = run(&rest_then_slide_along_top(), &cfg);
+        assert!(out.iter().any(|a| matches!(a, Action::EdgeStep { .. })));
+    }
+
+    #[test]
+    fn a_set_tap_slot_keeps_the_edge_slider_out_of_its_zone() {
+        let mut cfg = with_slot(0, CornerSlot::Tap, Cfg::Find);
+        cfg.edge.enabled = true;
+        cfg.edge.top = EdgeTarget::Volume;
+        let out = run(&rest_then_slide_along_top(), &cfg);
+        assert!(!out.iter().any(|a| matches!(a, Action::EdgeStep { .. })));
+    }
+
+    #[test]
+    fn swipes_still_work_next_to_a_tap_slot_and_release_the_clicks() {
+        let mut cfg = cfg_with(0, Cfg::Find, Cfg::None, Cfg::None);
+        cfg.corner.corners[0].tap = Cfg::TaskView;
+        cfg.corner.tap_enabled = true;
+        let out = run(&swipe((3.0, 3.0), (23.0, 3.0), 200, true), &cfg);
+        assert_eq!(triggers(&out), vec![Cfg::Find]);
+        assert_eq!(
+            suppress(&out),
+            vec![Suppress::Clicks, Suppress::Cursor, Suppress::Off]
+        );
     }
 }

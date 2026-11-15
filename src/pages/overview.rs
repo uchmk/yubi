@@ -68,11 +68,16 @@ pub fn gesture_name(key: &str) -> String {
                 .iter()
                 .find(|(t, _)| t == c)
                 .map_or(*c, |(_, j)| *j);
-            let dir = crate::config::CornerDir::ALL
+            match crate::config::CornerSlot::ALL
                 .iter()
-                .find(|d| d.token() == *kind)
-                .map_or(*kind, |d| d.label());
-            format!("{c}の角から{dir}にスワイプ")
+                .find(|s| s.token() == *kind)
+            {
+                Some(crate::config::CornerSlot::Swipe(d)) => {
+                    format!("{c}の角から{}にスワイプ", d.label())
+                }
+                Some(other) => format!("{c}の角で{}", other.label()),
+                None => format!("{c}の角で{kind}"),
+            }
         }
         ["edge", "left"] => "左端をなぞる".to_owned(),
         ["edge", "right"] => "右端をなぞる".to_owned(),

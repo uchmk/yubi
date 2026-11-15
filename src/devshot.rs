@@ -36,11 +36,33 @@ pub enum Fixture {
     CornerDemo,
     /// `DemoProfiles` plus a 3-finger drag and a 3-finger long hold that opens the ring.
     OverlapDemo,
+    /// Every corner trigger on with slots set in corner 0 (all six) and a few elsewhere; the corner
+    /// page shows tab `tab` with the slot `sel` of corner 0 selected (0: none, else 1 + the index in
+    /// `CornerSlot::ALL`). With `off` the tab's trigger is switched off.
+    CornerView { tab: u8, sel: u8, off: bool },
+    /// `DemoProfiles` and `CornerView` data: the edge bands leave gaps at the corners in use.
+    CornerEdge,
     /// A ring with eight items, including an app launch with a long path.
     RingFull,
 }
 
 impl Fixture {
+    /// Corners on, every trigger on, corner 0 with all six slots set.
+    fn corner_all(cfg: &mut Config) {
+        Self::CornerDemo.apply(cfg);
+        cfg.corner.tap_enabled = true;
+        cfg.corner.swipe_enabled = true;
+        cfg.corner.press_enabled = true;
+        cfg.corner.hold_enabled = true;
+        let c = &mut cfg.corner.corners;
+        c[0].tap = Action::TaskView;
+        c[0].press = Action::Find;
+        c[0].hold = Action::ShowDesktop;
+        c[1].tap = Action::DesktopNext;
+        c[2].hold = Action::Find;
+        c[3].press = Action::ShowDesktop;
+    }
+
     /// Set the fixture's data (idempotent: called every frame).
     pub fn apply(self, cfg: &mut Config) {
         match self {
@@ -66,6 +88,25 @@ impl Fixture {
                 cfg.long_hold.enabled = true;
                 cfg.ring.enabled = true;
                 *cfg.long_hold.actions.get_mut(3) = Action::RingMenu;
+            }
+            Self::CornerView { tab, sel, off } => {
+                Self::corner_all(cfg);
+                let tr = crate::config::CornerTrigger::ALL[usize::from(tab) % 4];
+                *cfg.corner.trigger_enabled_mut(tr) = !off;
+                let selected = usize::from(sel)
+                    .checked_sub(1)
+                    .map(|i| (0, crate::config::CornerSlot::ALL[i % 6]));
+                crate::pages::corner::force_view(tr, selected);
+            }
+            Self::CornerEdge => {
+                Self::DemoProfiles.apply(cfg);
+                Self::corner_all(cfg);
+                cfg.edge.top = EdgeTarget::Scroll;
+                cfg.edge.right = EdgeTarget::Volume;
+                // Bottom corners only: the top corners stay free for the band.
+                for i in [0, 1] {
+                    cfg.corner.corners[i] = crate::config::CornerCfg::default();
+                }
             }
             Self::RingFull => {
                 use crate::config::RingItem;
@@ -512,6 +553,161 @@ impl DevShot {
                     });
                 }
             }
+            shots = list;
+        }
+        if std::env::var_os("YUBI_SHOT_ANIM2").is_some() {
+            let mut list = Vec::new();
+            let tall = |w: f32, h: f32| Vec2::new(w, h);
+            let mut push = |name: String,
+                            page: Page,
+                            theme: ThemeChoice,
+                            size: Vec2,
+                            fixture: Fixture,
+                            anim_t: Option<f32>| {
+                list.push(Shot {
+                    name,
+                    page,
+                    theme,
+                    size,
+                    fixture,
+                    profile: None,
+                    fake: false,
+                    practice: false,
+                    anim_t,
+                    reduced: false,
+                });
+            };
+            let dark = ThemeChoice::Black;
+            let light = ThemeChoice::Light;
+            let tabs = ["tap", "swipe", "press", "hold"];
+            // Corner page: each tab, nothing selected and a slot selected; wide, narrow, light, off.
+            for (tab, tn) in tabs.iter().enumerate() {
+                let tab = tab as u8;
+                // 1-based into `CornerSlot::ALL`: tap 4, swipe diagonal 3, press 5, hold 6.
+                let sel = [4u8, 3, 5, 6][usize::from(tab)];
+                for (sn, s) in [("none", 0u8), ("sel", sel)] {
+                    let f = Fixture::CornerView {
+                        tab,
+                        sel: s,
+                        off: false,
+                    };
+                    push(
+                        format!("corner-{tn}-{sn}-wide-dark"),
+                        Page::Corner,
+                        dark,
+                        tall(1200.0, 1700.0),
+                        f,
+                        Some(1.2),
+                    );
+                    push(
+                        format!("corner-{tn}-{sn}-narrow-dark"),
+                        Page::Corner,
+                        dark,
+                        tall(700.0, 2500.0),
+                        f,
+                        Some(1.2),
+                    );
+                }
+                let f = Fixture::CornerView {
+                    tab,
+                    sel,
+                    off: false,
+                };
+                push(
+                    format!("corner-{tn}-sel-wide-light"),
+                    Page::Corner,
+                    light,
+                    tall(1200.0, 1700.0),
+                    f,
+                    Some(1.2),
+                );
+                let f = Fixture::CornerView {
+                    tab,
+                    sel,
+                    off: true,
+                };
+                push(
+                    format!("corner-{tn}-off-wide-dark"),
+                    Page::Corner,
+                    dark,
+                    tall(1200.0, 1700.0),
+                    f,
+                    Some(1.2),
+                );
+            }
+            // The corner scene at a few times (the page's first screen).
+            for (tab, tn) in tabs.iter().enumerate() {
+                for (i, t) in [0.3f32, 0.9, 1.6, 2.4].into_iter().enumerate() {
+                    let f = Fixture::CornerView {
+                        tab: tab as u8,
+                        sel: 0,
+                        off: false,
+                    };
+                    push(
+                        format!("scene-corner-{tn}-{i}"),
+                        Page::Corner,
+                        dark,
+                        tall(1200.0, 700.0),
+                        f,
+                        Some(t),
+                    );
+                }
+            }
+            // The press, hold and combo scenes.
+            for (n, page) in [
+                ("press", Page::CustomPress),
+                ("hold", Page::LongHold),
+                ("finger", Page::FingerHold),
+                ("thumb", Page::ThumbHold),
+            ] {
+                for (i, t) in [0.2f32, 1.2, 2.2, 3.0].into_iter().enumerate() {
+                    push(
+                        format!("scene-{n}-{i}"),
+                        page,
+                        dark,
+                        tall(1200.0, 700.0),
+                        Fixture::Keep,
+                        Some(t),
+                    );
+                }
+                push(
+                    format!("scene-{n}-light"),
+                    page,
+                    light,
+                    tall(1200.0, 700.0),
+                    Fixture::Keep,
+                    Some(2.2),
+                );
+                push(
+                    format!("scene-{n}-narrow"),
+                    page,
+                    dark,
+                    tall(700.0, 900.0),
+                    Fixture::Keep,
+                    Some(2.2),
+                );
+            }
+            // The edge scene with corner gaps.
+            for (tn, theme) in [("dark", dark), ("light", light)] {
+                for (i, t) in [0.5f32, 2.0].into_iter().enumerate() {
+                    push(
+                        format!("scene-edge-gaps-{tn}-{i}"),
+                        Page::Edge,
+                        theme,
+                        tall(1200.0, 800.0),
+                        Fixture::CornerEdge,
+                        Some(t),
+                    );
+                }
+            }
+            push(
+                "scene-edge-gaps-narrow".to_owned(),
+                Page::Edge,
+                dark,
+                tall(700.0, 900.0),
+                Fixture::CornerEdge,
+                Some(2.0),
+            );
             shots = list;
         }
         let _ = fs::create_dir_all(&dir);

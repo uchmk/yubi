@@ -48,11 +48,12 @@ impl GestureId {
 
     /// A swipe starting in a pad corner (0 = top-left, 1 = top-right, 2 = bottom-left,
     /// 3 = bottom-right) along `dir`.
-    pub fn corner(index: usize, dir: config::CornerDir) -> Self {
+    /// Any slot of a pad corner: a swipe direction, or the tap / press / hold slot.
+    pub fn corner_slot(index: usize, slot: config::CornerSlot) -> Self {
         Self(format!(
             "corner.{}.{}",
             CORNER_TOKENS[index % 4],
-            dir.token()
+            slot.token()
         ))
     }
 
@@ -95,8 +96,8 @@ impl GestureId {
             out.push(Self::long_hold(n));
         }
         for i in 0..4 {
-            for dir in config::CornerDir::ALL {
-                out.push(Self::corner(i, dir));
+            for slot in config::CornerSlot::ALL {
+                out.push(Self::corner_slot(i, slot));
             }
         }
         for thumb in [false, true] {
@@ -232,10 +233,10 @@ pub enum GestureEvent {
         fingers: usize,
         deep: bool,
     },
-    /// A corner swipe was recognised (sent right before its `Trigger` or resize).
+    /// A corner trigger was recognised (sent right before its `Trigger` or resize).
     Corner {
         corner: usize,
-        dir: config::CornerDir,
+        slot: config::CornerSlot,
     },
 }
 
@@ -290,6 +291,8 @@ pub enum Suppress {
     Cursor,
     /// The cursor stays and clicks are held back.
     CursorAndClicks,
+    /// Only clicks are held back (the cursor moves on).
+    Clicks,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -383,6 +386,8 @@ pub struct Thresholds {
     pub tap_max_us: u64,
     /// A long hold moves less than this while it waits.
     pub hold_travel_mm: f32,
+    /// A long hold (and a corner hold) fires after this long at rest.
+    pub hold_us: u64,
     /// The centroid must travel this far before a drag begins.
     pub drag_start_mm: f32,
     /// Cursor pixels per millimetre of centroid travel while dragging.
@@ -455,6 +460,7 @@ impl Default for Thresholds {
             tap_travel_mm: 2.0,
             tap_max_us: 200_000,
             hold_travel_mm: 3.0,
+            hold_us: 500_000,
             drag_start_mm: 1.5,
             drag_px_per_mm: 12.0,
             window_tap_gap_us: 300_000,
@@ -498,6 +504,7 @@ impl Thresholds {
             tap_travel_mm: s.tap_travel_mm,
             tap_max_us: ms(s.tap_ms),
             hold_travel_mm: s.hold_travel_mm,
+            hold_us: u64::from(s.hold_ms) * 1000,
             drag_start_mm: s.drag_start_mm,
             drag_px_per_mm: s.drag_gain,
             window_tap_gap_us: ms(s.window_gap_ms),
@@ -583,12 +590,16 @@ impl EdgeCfg {
     }
 }
 
-/// The corner swipes as latched at touchdown: the zone size and the 3 slots of each of the 4
-/// corners (`None` = off).
+/// The corner triggers as latched at touchdown: the zone size and the 6 slots of each of the 4
+/// corners (`None` = off): three swipe directions, then tap, press and hold. A trigger whose
+/// own switch is off has all its slots `None`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CornerGestureCfg {
     pub size_mm: f32,
-    pub slots: [[Option<config::Action>; 3]; 4],
+    pub slots: [[Option<config::Action>; 6]; 4],
+    /// Raw pressure at which a one-finger press in a zone counts as a click (the 1-finger light
+    /// threshold of the custom press).
+    pub press_threshold: f32,
 }
 
 impl CornerGestureCfg {
@@ -596,22 +607,44 @@ impl CornerGestureCfg {
         if !cfg.corner.enabled {
             return None;
         }
-        let mut slots: [[Option<config::Action>; 3]; 4] = Default::default();
+        let mut slots: [[Option<config::Action>; 6]; 4] = Default::default();
         for (i, row) in slots.iter_mut().enumerate() {
-            for (k, dir) in config::CornerDir::ALL.into_iter().enumerate() {
-                let a = resolve(cfg, exe, &GestureId::corner(i, dir));
+            for (k, slot) in config::CornerSlot::ALL.into_iter().enumerate() {
+                if !cfg.corner.trigger_enabled(slot.trigger()) {
+                    continue;
+                }
+                let a = resolve(cfg, exe, &GestureId::corner_slot(i, slot));
                 row[k] = (a != config::Action::None).then_some(a);
             }
         }
         slots.iter().flatten().any(Option::is_some).then_some(Self {
             size_mm: cfg.corner.size_mm,
             slots,
+            press_threshold: cfg.press.thresholds(1).0,
         })
     }
 
-    pub fn slot(&self, corner: usize, dir: config::CornerDir) -> Option<&config::Action> {
-        let k = config::CornerDir::ALL.iter().position(|d| *d == dir)?;
-        self.slots.get(corner)?[k].as_ref()
+    fn index(slot: config::CornerSlot) -> usize {
+        config::CornerSlot::ALL
+            .iter()
+            .position(|s| *s == slot)
+            .unwrap_or(0)
+    }
+
+    pub fn slot(&self, corner: usize, slot: config::CornerSlot) -> Option<&config::Action> {
+        self.slots.get(corner)?[Self::index(slot)].as_ref()
+    }
+
+    /// Swipe slot of `dir`.
+    pub fn swipe(&self, corner: usize, dir: config::CornerDir) -> Option<&config::Action> {
+        self.slot(corner, config::CornerSlot::Swipe(dir))
+    }
+
+    /// True when any slot of `corner` (any trigger) has an action.
+    pub fn any(&self, corner: usize) -> bool {
+        self.slots
+            .get(corner)
+            .is_some_and(|r| r.iter().any(Option::is_some))
     }
 }
 
@@ -858,6 +891,8 @@ pub struct Ctx<'a> {
     pub max_travel: f32,
     /// Raw (median-filtered) pressure of every contact that reports one.
     pub pressures: &'a [f32],
+    /// The pad's physical button is down in the latest frame.
+    pub button: bool,
     /// Highest debounced finger count seen in this session.
     pub peak: usize,
 }
@@ -922,12 +957,12 @@ mod tests {
         cfg.profiles.push(p);
         let h = config::CornerDir::Horizontal;
         let other = CornerGestureCfg::from_config(&cfg, Some("other.exe")).unwrap();
-        assert_eq!(other.slot(0, h), Some(&config::Action::Find));
-        assert_eq!(other.slot(3, config::CornerDir::Diagonal), None);
+        assert_eq!(other.swipe(0, h), Some(&config::Action::Find));
+        assert_eq!(other.swipe(3, config::CornerDir::Diagonal), None);
         let code = CornerGestureCfg::from_config(&cfg, Some("code.exe")).unwrap();
-        assert_eq!(code.slot(0, h), Some(&config::Action::TaskView));
+        assert_eq!(code.swipe(0, h), Some(&config::Action::TaskView));
         assert_eq!(
-            code.slot(3, config::CornerDir::Diagonal),
+            code.swipe(3, config::CornerDir::Diagonal),
             Some(&config::Action::ShowDesktop)
         );
     }

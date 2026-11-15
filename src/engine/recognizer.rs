@@ -20,7 +20,7 @@ use super::gestures::ring::RingState;
 use super::gestures::scroll::ScrollState;
 use super::gestures::window::WindowState;
 use super::tracking::{Environment, Tracker};
-use super::types::{Ctx, GestureCfg, Point, SessionId, centroid};
+use super::types::{Ctx, GestureCfg, Point, SessionId, Suppress, centroid};
 use crate::config::Config;
 
 pub use super::types::{Action, GestureEvent, SnapDir, Snapshot, Thresholds};
@@ -67,6 +67,10 @@ pub struct Recognizer {
     multi: MultiState,
     edge: EdgeState,
     corner: CornerState,
+    /// After a corner tap: let go of the click hold at this time.
+    clicks_off_at: Option<u64>,
+    /// The pad button is down in the latest frame.
+    button: bool,
     ring: RingState,
     press: PressState,
     /// Raw pressure of every active contact in the latest frame (median of the last three).
@@ -194,6 +198,7 @@ impl Recognizer {
             self.scroll.stop_glide();
         }
         self.cur = active.iter().map(|c| (c.x_mm, c.y_mm)).collect();
+        self.button = frame.button;
         self.centroid = centroid(&self.cur);
         self.pressures = self
             .tracker
@@ -235,6 +240,19 @@ impl Recognizer {
             self.cancel_touch(&mut out);
             return out;
         }
+        // The click hold that outlived a corner tap ends (unless a new touch took it over).
+        if let Some(at) = self.clicks_off_at
+            && now_us >= at
+        {
+            self.clicks_off_at = None;
+            if !self.corner.clicks_held()
+                && !self.corner.is_committed()
+                && !self.edge.is_committed()
+                && !self.ring.is_open()
+            {
+                out.push(Action::Suppress(Suppress::Off));
+            }
+        }
         self.advance(now_us, false, &mut out);
         out
     }
@@ -244,6 +262,8 @@ impl Recognizer {
         [
             self.tracker.debounce_deadline(self.th.debounce_us),
             self.hold_deadline(),
+            self.corner.deadline(&self.g, &self.th),
+            self.clicks_off_at,
             self.drag.lift_deadline(&self.g),
             self.ring.deadline(&self.g),
             self.session
@@ -315,7 +335,7 @@ impl Recognizer {
         self.drag.cancel(out);
         self.multi.finish();
         self.edge.release(out);
-        self.corner.release(out);
+        self.corner.release(out, None);
         self.ring.cancel(out);
         self.press.reset();
         self.scroll.cancel();
@@ -364,7 +384,9 @@ impl Recognizer {
                 let action = (1..=5)
                     .contains(&fingers)
                     .then(|| self.g.long_hold[fingers - 1].clone())
-                    .filter(|a| *a != crate::config::Action::None);
+                    .filter(|a| *a != crate::config::Action::None)
+                    // A corner hold slot shadows the one-finger long hold of its touch.
+                    .filter(|_| !(fingers == 1 && self.corner.claims_hold(&self.g)));
                 if let Some(action) = action
                     && !s.hold_acted
                     && self.arb.resolve(&[Proposal {
@@ -410,10 +432,20 @@ impl Recognizer {
 
     /// All fingers are up: close what was in flight and arm what follows a tap.
     fn finish_gestures(&mut self, s: &Session, is_tap: bool, t: u64, out: &mut Vec<Action>) {
+        // A corner tap goes first: in a corner with a tap slot it takes the place of the
+        // provisional light press, so one lift never fires both.
+        let tapped = self.corner.finish_tap(
+            &self.g,
+            &self.th,
+            t,
+            self.arb.is_free_for(Owner::Corner),
+            out,
+        );
         // A provisional light press fires when the fingers lift.
-        if let Some(hit) = self
-            .press
-            .finish_hit(&self.g, self.arb.is_free_for(Owner::Pressure), t)
+        if !tapped
+            && let Some(hit) =
+                self.press
+                    .finish_hit(&self.g, self.arb.is_free_for(Owner::Pressure), t)
         {
             self.press.commit(hit, self.g.ticks, out);
         }
@@ -432,7 +464,13 @@ impl Recognizer {
         }
         self.drag.finish(&self.g, is_tap, s.drag_was_held, t, out);
         self.edge.release(out);
-        self.corner.release(out);
+        self.corner.release(
+            out,
+            tapped.then_some(t + super::gestures::corner::CLICK_LINGER_US),
+        );
+        if let Some(at) = self.corner.take_linger() {
+            self.clicks_off_at = Some(at);
+        }
         self.ring.finish(&self.g, t, out);
         self.multi.finish();
         self.scroll.finish(self.g.scroll.as_ref(), &self.th, t);
@@ -461,6 +499,7 @@ impl Recognizer {
             max_travel: s.max_travel,
             pressures: &self.pressures,
             peak: s.peak,
+            button: self.button,
         };
         let mut proposals: Vec<Proposal> = Vec::new();
         let mut hit: Option<MultiHit> = None;
@@ -489,7 +528,7 @@ impl Recognizer {
         if ctx.g.corner.is_some() {
             self.corner.drive(&ctx, out);
             let free = self.arb.is_free_for(Owner::Corner);
-            proposals.extend(self.corner.step(&ctx, free));
+            proposals.extend(self.corner.step(&ctx, free, out));
         }
         if ctx.g.ring.is_some() {
             self.ring.drive(&ctx, out);

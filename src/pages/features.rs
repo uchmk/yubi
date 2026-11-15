@@ -4,10 +4,11 @@
 use eframe::egui::{self, Align, Layout, RichText, Ui};
 
 use crate::config::{
-    ActionKind, Combo, Config, EdgeKind, EdgeTarget, Finger, HoldCombos, HoldTrigger, Ring,
+    Action, ActionKind, Combo, Config, EdgeKind, EdgeTarget, Finger, HoldCombos, HoldTrigger, Ring,
     RingItem,
 };
 use crate::howto::{self, Mini, Side};
+use crate::howto_scenes;
 use crate::icons;
 use crate::nav::Page;
 use crate::win_gestures;
@@ -226,6 +227,10 @@ pub fn custom_press(
     let mut cmd = None;
     let measured = device_key.is_some_and(|k| cfg.calibration.contains_key(k));
     ui.add_enabled_ui(on, |ui| {
+        section_header(ui, t, "使い方");
+        group(ui, t, |g| {
+            g.wrapped_row(|ui| press_guide(ui, t, cfg));
+        });
         group(ui, t, |g| {
             g.wrapped_row(|ui| {
                 ui.label(
@@ -282,6 +287,10 @@ pub fn long_hold(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
     overlap_note(ui, t, cfg, on);
     let mut cmd = None;
     ui.add_enabled_ui(on, |ui| {
+        section_header(ui, t, "使い方");
+        group(ui, t, |g| {
+            g.wrapped_row(|ui| hold_guide(ui, t, cfg));
+        });
         section_header(ui, t, "動作");
         group(ui, t, |g| {
             g.slider_row(
@@ -344,6 +353,10 @@ pub fn hold_combos(ui: &mut Ui, t: &Tokens, cfg: &mut Config, page: Page) {
         &mut cfg.finger_hold
     };
     ui.add_enabled_ui(on, |ui| {
+        section_header(ui, t, "使い方");
+        group(ui, t, |g| {
+            g.wrapped_row(|ui| combo_guide(ui, t, thumb, &*list));
+        });
         section_header(ui, t, "キーの組み合わせ");
         let mut remove = None;
         let id = if thumb { "thumb-hold" } else { "finger-hold" };
@@ -447,6 +460,21 @@ fn edge_guide(ui: &mut Ui, t: &Tokens, cfg: &Config) {
     let strip = cfg.sensitivity.edge_strip_mm;
     let detent = cfg.sensitivity.edge_detent_mm;
     let e = &cfg.edge;
+    // Corner zones in use are left out of the bands (corners: TL, TR, BL, BR).
+    let gaps = |side: Side| {
+        let (a, b) = match side {
+            Side::Left => (0, 2),
+            Side::Right => (1, 3),
+            Side::Top => (0, 1),
+        };
+        [a, b].map(|i| {
+            if cfg.corner.owns(i) {
+                cfg.corner.size_mm
+            } else {
+                0.0
+            }
+        })
+    };
     ui.vertical(|ui| {
         let anim = howto::Anim::new(ui);
         let bands = [
@@ -458,6 +486,7 @@ fn edge_guide(ui: &mut Ui, t: &Tokens, cfg: &Config) {
             side,
             label: (*target != EdgeTarget::None).then(|| short_label(target)),
             step_mm: target.step_mm(detent),
+            gap_mm: gaps(side),
         });
         let steps: Vec<f32> = bands
             .iter()
@@ -849,6 +878,124 @@ fn ring_guide(ui: &mut Ui, t: &Tokens, cfg: &Config) {
                         "方向へ動かす",
                         "離して実行",
                     ],
+                    anim.live().then_some(step.get()),
+                );
+            },
+        );
+    });
+}
+
+/// How custom press works: the depth bar with the light and deep marks.
+fn press_guide(ui: &mut Ui, t: &Tokens, cfg: &Config) {
+    // The animation shows the first finger count that is switched on (2 when none is).
+    let n = (1..=5usize)
+        .find(|n| cfg.press.fingers[n - 1].enabled)
+        .unwrap_or(2);
+    ui.vertical(|ui| {
+        let anim = howto::Anim::new(ui);
+        let step = std::cell::Cell::new(0);
+        howto::two_col(
+            ui,
+            t,
+            howto_scenes::press_scene_width(ui.available_width()),
+            |ui| step.set(howto_scenes::press_scene(ui, t, anim, n)),
+            |ui| {
+                howto::summary(
+                    ui,
+                    t,
+                    "押し込む強さで、操作を使い分けます",
+                    &[
+                        "指を置いたまま、トラックパッドを軽く押し込むと「軽い押し込み」、さらに深く押し込むと「深い押し込み」の操作が実行されます。".to_owned(),
+                        "強さの目安は本数ごとのスライダーで決めます。本数が多いほど力が分かれるため、低めの値が向いています。".to_owned(),
+                    ],
+                );
+                ui.add_space(t.space_md);
+                howto::steps(
+                    ui,
+                    t,
+                    &[Mini::RingPlace(n), Mini::Push(n, false), Mini::Push(n, true)],
+                    &[&format!("{n}本の指を置く"), "軽く押し込む", "深く押し込む"],
+                    anim.live().then_some(step.get()),
+                );
+            },
+        );
+    });
+}
+
+/// How the long hold works: a ring fills while the fingers rest, then the action runs.
+fn hold_guide(ui: &mut Ui, t: &Tokens, cfg: &Config) {
+    let n = (1..=5usize)
+        .find(|n| *cfg.long_hold.actions.get(*n) != Action::None)
+        .unwrap_or(1);
+    let hold_ms = cfg.sensitivity.hold_ms;
+    ui.vertical(|ui| {
+        let anim = howto::Anim::new(ui);
+        let step = std::cell::Cell::new(0);
+        howto::two_col(
+            ui,
+            t,
+            howto_scenes::hold_scene_width(ui.available_width()),
+            |ui| step.set(howto_scenes::hold_scene(ui, t, anim, n, hold_ms)),
+            |ui| {
+                howto::summary(
+                    ui,
+                    t,
+                    "指を置いたままにして、操作を実行します",
+                    &[
+                        format!("指を {hold_ms} ms ほど動かさずに置き続けると、本数ごとに割り当てた操作が実行されます。"),
+                        "動かしたり、指の本数が変わったりすると、実行されずに取り消されます。".to_owned(),
+                    ],
+                );
+                ui.add_space(t.space_md);
+                howto::steps(
+                    ui,
+                    t,
+                    &[Mini::RingPlace(n), Mini::RingWait(n), Mini::Run(n)],
+                    &[&format!("{n}本の指を置く"), "動かさずに待つ", "操作が実行される"],
+                    anim.live().then_some(step.get()),
+                );
+            },
+        );
+    });
+}
+
+/// How the finger / thumb hold works: one finger rests, a second one taps or swipes.
+fn combo_guide(ui: &mut Ui, t: &Tokens, thumb: bool, list: &HoldCombos) {
+    let trigger = list.combos.first().map_or(HoldTrigger::Tap, |c| c.trigger);
+    let keys = list.combos.first().map_or("", |c| c.keys.as_str());
+    let who = if thumb { "親指" } else { "指" };
+    let second = match trigger {
+        HoldTrigger::Tap => "別の指でタップする",
+        HoldTrigger::Swipe => "別の指でスワイプする",
+    };
+    ui.vertical(|ui| {
+        let anim = howto::Anim::new(ui);
+        let step = std::cell::Cell::new(0);
+        howto::two_col(
+            ui,
+            t,
+            howto_scenes::combo_scene_width(ui.available_width()),
+            |ui| step.set(howto_scenes::combo_scene(ui, t, anim, thumb, trigger, keys)),
+            |ui| {
+                howto::summary(
+                    ui,
+                    t,
+                    &format!("{who}を置いたまま、別の指でキーを送ります"),
+                    &[
+                        format!("{who}をトラックパッドに置いたまま、別の指でタップまたはスワイプすると、設定したキーの組み合わせが送られます。"),
+                        "どの指を置くか、タップかスワイプかは、組み合わせごとに選べます。".to_owned(),
+                    ],
+                );
+                ui.add_space(t.space_md);
+                howto::steps(
+                    ui,
+                    t,
+                    &[
+                        Mini::Combo(thumb, howto::ComboStage::Hold),
+                        Mini::Combo(thumb, howto::ComboStage::Second),
+                        Mini::Run(2),
+                    ],
+                    &[&format!("{who}を置く"), second, "キーが送られる"],
                     anim.live().then_some(step.get()),
                 );
             },

@@ -13,6 +13,7 @@ use eframe::egui::{
     self, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2,
 };
 
+use crate::config::CornerTrigger;
 use crate::icons;
 use crate::theme::Tokens;
 use crate::widgets::paint_icon;
@@ -34,11 +35,11 @@ pub fn ease(x: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
-fn lerp(a: f32, b: f32, u: f32) -> f32 {
+pub(crate) fn lerp(a: f32, b: f32, u: f32) -> f32 {
     a + (b - a) * u
 }
 
-fn fade(c: Color32, a: f32) -> Color32 {
+pub(crate) fn fade(c: Color32, a: f32) -> Color32 {
     c.gamma_multiply(a.clamp(0.0, 1.0))
 }
 
@@ -304,7 +305,7 @@ impl Anim {
     }
 
     /// Ask for the next frame, but only while the scene at `rect` is really on screen.
-    fn keep_alive(&self, ui: &Ui, rect: Rect) {
+    pub(crate) fn keep_alive(&self, ui: &Ui, rect: Rect) {
         let (minimized, hidden) = ui.ctx().input(|i| {
             let v = i.viewport();
             (v.minimized == Some(true), v.visible() == Some(false))
@@ -336,7 +337,7 @@ impl Side {
 }
 
 /// Where fingers rest on the pad (unit square, centred): a gentle arc like a relaxed hand.
-fn hand(n: usize) -> Vec<Vec2> {
+pub(crate) fn hand(n: usize) -> Vec<Vec2> {
     let n = n.clamp(1, 5);
     (0..n)
         .map(|i| {
@@ -346,7 +347,7 @@ fn hand(n: usize) -> Vec<Vec2> {
         .collect()
 }
 
-fn arc(p: &Painter, c: Pos2, r: f32, a0: f32, a1: f32, stroke: Stroke) {
+pub(crate) fn arc(p: &Painter, c: Pos2, r: f32, a0: f32, a1: f32, stroke: Stroke) {
     let n = (((a1 - a0).abs() * r / 3.0).ceil() as usize).clamp(2, 64);
     let pts = (0..=n)
         .map(|i| c + Vec2::angled(lerp(a0, a1, i as f32 / n as f32)) * r)
@@ -354,7 +355,7 @@ fn arc(p: &Painter, c: Pos2, r: f32, a0: f32, a1: f32, stroke: Stroke) {
     p.add(Shape::line(pts, stroke));
 }
 
-fn dashed_ring(p: &Painter, c: Pos2, r: f32, stroke: Stroke) {
+pub(crate) fn dashed_ring(p: &Painter, c: Pos2, r: f32, stroke: Stroke) {
     const DASHES: usize = 10;
     let step = std::f32::consts::TAU / DASHES as f32;
     for i in 0..DASHES {
@@ -364,7 +365,7 @@ fn dashed_ring(p: &Painter, c: Pos2, r: f32, stroke: Stroke) {
 }
 
 /// A timer ring: faint track plus the filled part, starting at 12 o'clock.
-fn timer_ring(p: &Painter, t: &Tokens, c: Pos2, r: f32, frac: f32, alpha: f32) {
+pub(crate) fn timer_ring(p: &Painter, t: &Tokens, c: Pos2, r: f32, frac: f32, alpha: f32) {
     p.circle_stroke(c, r, Stroke::new(1.5, fade(t.accent, 0.25 * alpha)));
     if frac > 0.0 {
         let a0 = -std::f32::consts::FRAC_PI_2;
@@ -383,7 +384,7 @@ fn timer_ring(p: &Painter, t: &Tokens, c: Pos2, r: f32, frac: f32, alpha: f32) {
 const SHADOW_ALPHA: f32 = 70.0;
 const SHEEN_ALPHA: f32 = 80.0;
 
-fn finger(p: &Painter, t: &Tokens, c: Pos2, r: f32, alpha: f32) {
+pub(crate) fn finger(p: &Painter, t: &Tokens, c: Pos2, r: f32, alpha: f32) {
     if alpha <= 0.0 {
         return;
     }
@@ -400,7 +401,7 @@ fn finger(p: &Painter, t: &Tokens, c: Pos2, r: f32, alpha: f32) {
     );
 }
 
-fn arrow(p: &Painter, from: Pos2, to: Pos2, stroke: Stroke) {
+pub(crate) fn arrow(p: &Painter, from: Pos2, to: Pos2, stroke: Stroke) {
     p.line_segment([from, to], stroke);
     let d = (to - from).normalized();
     let n = Vec2::new(-d.y, d.x);
@@ -409,7 +410,7 @@ fn arrow(p: &Painter, from: Pos2, to: Pos2, stroke: Stroke) {
     p.line_segment([to, to - d * head - n * head * 0.6], stroke);
 }
 
-fn clock_badge(p: &Painter, t: &Tokens, c: Pos2) {
+pub(crate) fn clock_badge(p: &Painter, t: &Tokens, c: Pos2) {
     p.circle_filled(c, 7.0, t.accent);
     let s = Stroke::new(1.3, t.on_accent);
     p.line_segment([c, c + Vec2::new(0.0, -4.0)], s);
@@ -417,7 +418,7 @@ fn clock_badge(p: &Painter, t: &Tokens, c: Pos2) {
 }
 
 /// A small rounded square with a four-point sparkle: "the assigned action runs".
-fn action_badge(p: &Painter, t: &Tokens, c: Pos2, size: f32) {
+pub(crate) fn action_badge(p: &Painter, t: &Tokens, c: Pos2, size: f32) {
     let r = Rect::from_center_size(c, Vec2::splat(size));
     p.rect_filled(r, t.radius_md as f32, t.accent_soft);
     p.rect_stroke(
@@ -441,13 +442,13 @@ fn action_badge(p: &Painter, t: &Tokens, c: Pos2, size: f32) {
     }
 }
 
-fn chevron(p: &Painter, t: &Tokens, c: Pos2) {
+pub(crate) fn chevron(p: &Painter, t: &Tokens, c: Pos2) {
     let s = Stroke::new(1.5, t.text_muted);
     p.line_segment([c + Vec2::new(-2.5, -5.0), c + Vec2::new(2.5, 0.0)], s);
     p.line_segment([c + Vec2::new(2.5, 0.0), c + Vec2::new(-2.5, 5.0)], s);
 }
 
-fn circled_number(p: &Painter, t: &Tokens, c: Pos2, n: usize, active: bool) {
+pub(crate) fn circled_number(p: &Painter, t: &Tokens, c: Pos2, n: usize, active: bool) {
     let (fill, text) = if active {
         (t.accent, t.on_accent)
     } else {
@@ -464,16 +465,16 @@ fn circled_number(p: &Painter, t: &Tokens, c: Pos2, n: usize, active: bool) {
 }
 
 /// The light theme has a light page; its surfaces need a little more tint to show up.
-fn is_light(t: &Tokens) -> bool {
+pub(crate) fn is_light(t: &Tokens) -> bool {
     t.bg.r() > 128
 }
 
 /// An empty segment of the level bar.
-fn track(t: &Tokens) -> Color32 {
+pub(crate) fn track(t: &Tokens) -> Color32 {
     if is_light(t) { t.border } else { t.control }
 }
 
-fn pad_surface(p: &Painter, t: &Tokens, pad: Rect) {
+pub(crate) fn pad_surface(p: &Painter, t: &Tokens, pad: Rect) {
     let fill = if is_light(t) {
         t.nav_selected
     } else {
@@ -486,6 +487,38 @@ fn pad_surface(p: &Painter, t: &Tokens, pad: Rect) {
         Stroke::new(t.stroke_thin, t.border),
         StrokeKind::Inside,
     );
+}
+
+/// Start and length of a band along an edge `len` long, leaving `g0` and `g1` free at its ends.
+/// At least a fifth of the edge always remains.
+pub(crate) fn band_span(len: f32, g0: f32, g1: f32) -> (f32, f32) {
+    let g0 = g0.max(0.0);
+    let g1 = g1.max(0.0);
+    let room = (len - g0 - g1).max(len * 0.2);
+    let start = if g0 + g1 > len * 0.8 {
+        (len - room) * g0 / (g0 + g1).max(f32::EPSILON)
+    } else {
+        g0
+    };
+    (start, room)
+}
+
+fn band_rect_gaps(pad: Rect, side: Side, thick: f32, g0: f32, g1: f32) -> Rect {
+    match side {
+        Side::Left | Side::Right => {
+            let (y, h) = band_span(pad.height(), g0, g1);
+            let x = if side == Side::Left {
+                pad.left()
+            } else {
+                pad.right() - thick
+            };
+            Rect::from_min_size(Pos2::new(x, pad.top() + y), Vec2::new(thick, h))
+        }
+        Side::Top => {
+            let (x, w) = band_span(pad.width(), g0, g1);
+            Rect::from_min_size(Pos2::new(pad.left() + x, pad.top()), Vec2::new(w, thick))
+        }
+    }
 }
 
 fn band_rect(pad: Rect, side: Side, thick: f32) -> Rect {
@@ -522,6 +555,13 @@ fn paint_band(p: &Painter, t: &Tokens, r: Rect, strong: bool) {
 
 /// The finger's position `u` (0..1) of the way along `side`'s band.
 fn edge_point(pad: Rect, side: Side, thick: f32, u: f32) -> Pos2 {
+    edge_point_gaps(pad, side, thick, u, [0.0, 0.0])
+}
+
+/// [`edge_point`] for a band that leaves `gaps` (px) free at its two ends: the path starts and ends
+/// past them.
+fn edge_point_gaps(pad: Rect, side: Side, thick: f32, u: f32, gaps: [f32; 2]) -> Pos2 {
+    let inset = |len: f32, g: f32, frac: f32| (len * frac).max(g + len * 0.04);
     match side {
         Side::Left | Side::Right => {
             let x = if side == Side::Left {
@@ -532,16 +572,16 @@ fn edge_point(pad: Rect, side: Side, thick: f32, u: f32) -> Pos2 {
             Pos2::new(
                 x,
                 lerp(
-                    pad.bottom() - pad.height() * 0.16,
-                    pad.top() + pad.height() * 0.16,
+                    pad.bottom() - inset(pad.height(), gaps[1], 0.16),
+                    pad.top() + inset(pad.height(), gaps[0], 0.16),
                     u,
                 ),
             )
         }
         Side::Top => Pos2::new(
             lerp(
-                pad.left() + pad.width() * 0.18,
-                pad.right() - pad.width() * 0.18,
+                pad.left() + inset(pad.width(), gaps[0], 0.18),
+                pad.right() - inset(pad.width(), gaps[1], 0.18),
                 u,
             ),
             pad.top() + thick / 2.0,
@@ -549,7 +589,7 @@ fn edge_point(pad: Rect, side: Side, thick: f32, u: f32) -> Pos2 {
     }
 }
 
-fn trail(p: &Painter, t: &Tokens, a: Pos2, b: Pos2, width: f32, alpha: f32) {
+pub(crate) fn trail(p: &Painter, t: &Tokens, a: Pos2, b: Pos2, width: f32, alpha: f32) {
     const SEGS: usize = 8;
     for i in 0..SEGS {
         let (u0, u1) = (i as f32 / SEGS as f32, (i + 1) as f32 / SEGS as f32);
@@ -576,6 +616,32 @@ pub enum Mini {
     Run(usize),
     /// A glyph from the icon font on a rounded square.
     Icon(char),
+    /// `n` fingers pressing in: one ring for the light press, a second one for the deep press.
+    Push(usize, bool),
+    /// A finger in the bottom-left corner zone of the pad.
+    CornerZone,
+    /// A finger in the corner zone doing the given trigger.
+    Corner(CornerTrigger),
+    /// The combo hold: the resting finger (`thumb`: the thumb), then a second finger acting.
+    Combo(bool, ComboStage),
+}
+
+/// Which moment of the combo hold a step card shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComboStage {
+    Hold,
+    Second,
+}
+
+/// Where the resting finger and the acting finger sit on a pad for the combo hold.
+pub(crate) fn combo_spots(pad: Rect, thumb: bool) -> (Pos2, Pos2) {
+    let at =
+        |fx: f32, fy: f32| Pos2::new(pad.left() + pad.width() * fx, pad.top() + pad.height() * fy);
+    if thumb {
+        (at(0.2, 0.78), at(0.62, 0.36))
+    } else {
+        (at(0.34, 0.5), at(0.66, 0.5))
+    }
 }
 
 fn mini(p: &Painter, t: &Tokens, card: Rect, kind: Mini, active: bool) {
@@ -616,6 +682,68 @@ fn mini(p: &Painter, t: &Tokens, card: Rect, kind: Mini, active: bool) {
     };
     match kind {
         Mini::Icon(_) => {}
+        Mini::Push(n, deep) => {
+            hand_at(n, Vec2::ZERO, 1.0);
+            for h in hand(n) {
+                let c = pad.center() + Vec2::new(h.x * pad.width() * 0.8, h.y * pad.height() * 0.8);
+                p.circle_stroke(c, dot + 3.5, Stroke::new(1.3, t.accent));
+                if deep {
+                    p.circle_stroke(c, dot + 7.5, Stroke::new(1.3, fade(t.accent, 0.7)));
+                }
+            }
+        }
+        Mini::CornerZone | Mini::Corner(_) => {
+            let zone = Rect::from_min_size(
+                Pos2::new(pad.left(), pad.bottom() - pad.width() * 0.3),
+                Vec2::splat(pad.width() * 0.3),
+            );
+            p.rect_filled(zone, t.radius_sm as f32, t.accent_soft);
+            p.rect_stroke(
+                zone,
+                t.radius_sm as f32,
+                Stroke::new(t.stroke_thin, t.accent),
+                StrokeKind::Inside,
+            );
+            let at = zone.center();
+            match kind {
+                Mini::Corner(CornerTrigger::Swipe) => {
+                    let end = at + Vec2::new(pad.width() * 0.34, -pad.height() * 0.3);
+                    finger(p, t, at, dot, 0.3);
+                    trail(p, t, at, end, 3.0, 1.0);
+                    finger(p, t, end, dot, 1.0);
+                }
+                Mini::Corner(CornerTrigger::Tap) => {
+                    finger(p, t, at, dot, 1.0);
+                    p.circle_stroke(at, dot + 4.0, Stroke::new(1.3, fade(t.accent, 0.8)));
+                    p.circle_stroke(at, dot + 8.0, Stroke::new(1.0, fade(t.accent, 0.4)));
+                }
+                Mini::Corner(CornerTrigger::Press) => {
+                    finger(p, t, at, dot, 1.0);
+                    p.circle_stroke(at, dot + 3.5, Stroke::new(1.3, t.accent));
+                    p.circle_stroke(at, dot + 7.5, Stroke::new(1.3, fade(t.accent, 0.7)));
+                }
+                Mini::Corner(CornerTrigger::Hold) => {
+                    finger(p, t, at, dot, 1.0);
+                    dashed_ring(p, at, dot + 3.5, Stroke::new(1.3, t.accent));
+                    clock_badge(p, t, card.right_top() + Vec2::new(-9.0, 9.0));
+                }
+                _ => finger(p, t, at, dot, 1.0),
+            }
+        }
+        Mini::Combo(thumb, stage) => {
+            let (hold_at, other_at) = combo_spots(pad, thumb);
+            finger(p, t, hold_at, dot, 1.0);
+            dashed_ring(
+                p,
+                hold_at,
+                dot + 3.5,
+                Stroke::new(1.2, fade(t.text_muted, 0.8)),
+            );
+            if stage == ComboStage::Second {
+                finger(p, t, other_at, dot, 1.0);
+                p.circle_stroke(other_at, dot + 4.0, Stroke::new(1.3, fade(t.accent, 0.8)));
+            }
+        }
         Mini::EdgePlace(s) | Mini::EdgeWait(s) | Mini::EdgeSlide(s) => {
             paint_band(p, t, band_rect(pad, s, thick), true);
             let start = edge_point(pad, s, thick, 0.12);
@@ -781,7 +909,7 @@ pub fn summary(ui: &mut Ui, t: &Tokens, title: &str, lines: &[String]) {
 // Edge scene
 
 /// Nominal Magic Trackpad size (mm); only the proportions matter.
-const PAD_MM: (f32, f32) = (160.0, 115.0);
+pub(crate) const PAD_MM: (f32, f32) = (160.0, 115.0);
 const SIDE_COLUMN_W: f32 = 78.0;
 
 /// Width the edge scene takes, for `two_col`.
@@ -800,6 +928,9 @@ pub struct EdgeBand<'a> {
     pub label: Option<&'a str>,
     /// Travel per level step (mm) for this edge's target.
     pub step_mm: f32,
+    /// Length (mm) of the corner zones at the band's two ends that the band leaves out: start is
+    /// the top (left and right edges) or the left (top edge). 0 when that corner is not in use.
+    pub gap_mm: [f32; 2],
 }
 
 /// The animated pad for the edge slider. Returns the strip step the animation is on.
@@ -842,7 +973,7 @@ pub fn edge_scene(
     let lab = dot * 2.0 + 8.0;
     let font = FontId::proportional(t.fs_small);
     for b in bands {
-        let r = band_rect(pad, b.side, thick);
+        let r = band_rect_gaps(pad, b.side, thick, b.gap_mm[0] * scale, b.gap_mm[1] * scale);
         if b.label.is_some() {
             paint_band(&p, t, r, Some(b.side) == current);
         }
@@ -883,8 +1014,11 @@ pub fn edge_scene(
 
     if let Some(side) = current {
         let at = thick.max(dot * 2.0 + 2.0);
-        let start = edge_point(pad, side, at, 0.0);
-        let end = edge_point(pad, side, at, 1.0);
+        let gaps = shown
+            .get(frame.side)
+            .map_or([0.0, 0.0], |b| [b.gap_mm[0] * scale, b.gap_mm[1] * scale]);
+        let start = edge_point_gaps(pad, side, at, 0.0, gaps);
+        let end = edge_point_gaps(pad, side, at, 1.0, gaps);
         // The path, with an arrow at the end.
         let guide = Stroke::new(1.0, fade(t.accent, 0.35));
         arrow(&p, start.lerp(end, 0.04), end, guide);
@@ -1209,5 +1343,30 @@ mod tests {
         assert_eq!(short_name("コピー", 0), "コピー");
         assert_eq!(short_name("スクリーンショット", 3), "スクリーンシ…");
         assert_eq!(short_name("  ", 1), "項目 2");
+    }
+
+    #[test]
+    fn band_span_leaves_the_gaps_free() {
+        assert_eq!(band_span(100.0, 0.0, 0.0), (0.0, 100.0));
+        assert_eq!(band_span(100.0, 10.0, 20.0), (10.0, 70.0));
+        assert_eq!(band_span(100.0, -5.0, 0.0), (0.0, 100.0));
+    }
+
+    #[test]
+    fn band_span_keeps_a_fifth_when_the_gaps_are_huge() {
+        let (start, len) = band_span(100.0, 60.0, 60.0);
+        assert!((len - 20.0).abs() < 1e-4);
+        assert!(start >= 0.0 && start + len <= 100.0 + 1e-4);
+    }
+
+    #[test]
+    fn band_rect_gaps_follow_the_side() {
+        let pad = Rect::from_min_size(Pos2::ZERO, Vec2::new(160.0, 115.0));
+        let left = band_rect_gaps(pad, Side::Left, 10.0, 12.0, 0.0);
+        assert_eq!((left.top(), left.bottom()), (12.0, 115.0));
+        let top = band_rect_gaps(pad, Side::Top, 10.0, 0.0, 20.0);
+        assert_eq!((top.left(), top.right()), (0.0, 140.0));
+        let right = band_rect_gaps(pad, Side::Right, 10.0, 0.0, 0.0);
+        assert_eq!((right.right(), right.height()), (160.0, 115.0));
     }
 }

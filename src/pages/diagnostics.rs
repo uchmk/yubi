@@ -274,7 +274,7 @@ fn event_label(e: GestureEvent) -> String {
         GestureEvent::LongHold { fingers } => format!("長押し（{fingers} 本）"),
         GestureEvent::Multi { fingers, kind } => multi_label(fingers, kind),
         GestureEvent::Press { fingers, deep } => press_label(fingers, deep),
-        GestureEvent::Corner { corner, dir } => corner_swipe_label(corner, dir),
+        GestureEvent::Corner { corner, slot } => corner_swipe_label(corner, slot),
     }
 }
 

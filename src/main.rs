@@ -10,6 +10,7 @@ mod fonts;
 mod haptic;
 mod hook;
 mod howto;
+mod howto_scenes;
 mod icons;
 mod input;
 mod nav;

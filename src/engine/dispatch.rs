@@ -101,9 +101,9 @@ pub fn press_label(fingers: usize, deep: bool) -> String {
     )
 }
 
-/// Name of a corner swipe for the note shown after it fires ("左上・斜め").
-pub fn corner_swipe_label(corner: usize, dir: config::CornerDir) -> String {
-    format!("{}・{}", corner_label(corner), dir.label())
+/// Name of a corner trigger for the note shown after it fires ("左上・斜め", "右下・タップ").
+pub fn corner_swipe_label(corner: usize, slot: config::CornerSlot) -> String {
+    format!("{}・{}", corner_label(corner), slot.label())
 }
 
 fn corner_label(corner: usize) -> &'static str {
@@ -205,7 +205,7 @@ pub struct Dispatcher {
     /// A corner resize was accepted and not yet ended.
     resize_active: bool,
     /// The corner swipe whose action is about to trigger.
-    last_corner: Option<(usize, config::CornerDir)>,
+    last_corner: Option<(usize, config::CornerSlot)>,
     last_multi: Option<(usize, MultiKind)>,
     /// The press (finger count, deep) whose action is about to trigger.
     last_press: Option<(usize, bool)>,
@@ -314,6 +314,7 @@ fn hook_mode(s: Suppress) -> crate::hook::Mode {
         Suppress::Off => Mode::Off,
         Suppress::Cursor => Mode::FreezeCursor,
         Suppress::CursorAndClicks => Mode::FreezeAndHold,
+        Suppress::Clicks => Mode::HoldClicks,
     }
 }
 
@@ -767,8 +768,8 @@ impl Dispatcher {
                 self.last_press = Some((*fingers, *deep));
                 None
             }
-            Action::Debug(GestureEvent::Corner { corner, dir }) => {
-                self.last_corner = Some((*corner, *dir));
+            Action::Debug(GestureEvent::Corner { corner, slot }) => {
+                self.last_corner = Some((*corner, *slot));
                 None
             }
             Action::Debug(_) | Action::PressTick { .. } => None,
@@ -931,7 +932,7 @@ impl Dispatcher {
             self.last_multi.take(),
         ) {
             (Some(s), _, _, _) => s,
-            (None, Some((c, dir)), _, _) => corner_swipe_label(c, dir),
+            (None, Some((c, slot)), _, _) => corner_swipe_label(c, slot),
             (None, None, Some((n, deep)), _) => press_label(n, deep),
             (None, None, None, Some((n, kind))) => multi_label(n, kind),
             (None, None, None, None) => "ジェスチャー".to_owned(),

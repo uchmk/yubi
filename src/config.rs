@@ -969,9 +969,83 @@ impl CornerDir {
     }
 }
 
-/// The three swipe slots of one pad corner. An old config's `swipe` is read as `diagonal` (the
-/// old swipe went toward the opposite corner); its `press` is dropped with a note, because a
-/// physical click in a corner is an ordinary click.
+/// The four ways to trigger an action in a pad corner (the tabs of the corner page).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CornerTrigger {
+    /// One finger touches the zone and lifts quickly without moving.
+    Tap,
+    /// One finger starts in the zone and swipes out of it (three directions).
+    Swipe,
+    /// One finger in the zone clicks (or presses past the click depth).
+    Press,
+    /// One finger rests in the zone for the long-hold time.
+    Hold,
+}
+
+impl CornerTrigger {
+    pub const ALL: [Self; 4] = [Self::Tap, Self::Swipe, Self::Press, Self::Hold];
+
+    /// Japanese name, as on the tab.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tap => "タップ",
+            Self::Swipe => "スワイプ",
+            Self::Press => "プレス",
+            Self::Hold => "ホールド",
+        }
+    }
+}
+
+/// One action slot of a pad corner: a swipe direction, or the tap / press / hold slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CornerSlot {
+    Swipe(CornerDir),
+    Tap,
+    Press,
+    Hold,
+}
+
+impl CornerSlot {
+    /// Every slot of a corner, in the order the gesture ids list them.
+    pub const ALL: [Self; 6] = [
+        Self::Swipe(CornerDir::Horizontal),
+        Self::Swipe(CornerDir::Vertical),
+        Self::Swipe(CornerDir::Diagonal),
+        Self::Tap,
+        Self::Press,
+        Self::Hold,
+    ];
+
+    pub fn trigger(self) -> CornerTrigger {
+        match self {
+            Self::Swipe(_) => CornerTrigger::Swipe,
+            Self::Tap => CornerTrigger::Tap,
+            Self::Press => CornerTrigger::Press,
+            Self::Hold => CornerTrigger::Hold,
+        }
+    }
+
+    /// Spelling in gesture ids (`corner.tl.diagonal`, `corner.br.tap`).
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Swipe(d) => d.token(),
+            Self::Tap => "tap",
+            Self::Press => "press",
+            Self::Hold => "hold",
+        }
+    }
+
+    /// Japanese name, as in "左上・斜め" / "左上・タップ".
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Swipe(d) => d.label(),
+            other => other.trigger().label(),
+        }
+    }
+}
+
+/// The action slots of one pad corner: three swipe directions plus tap, press and hold. An old
+/// config's `swipe` is read as `diagonal` (the old swipe went toward the opposite corner).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct CornerCfg {
@@ -979,33 +1053,16 @@ pub struct CornerCfg {
     pub vertical: Action,
     #[serde(alias = "swipe")]
     pub diagonal: Action,
-    /// Read only to report that an old `press` was ignored; never written.
-    #[serde(
-        rename = "press",
-        deserialize_with = "legacy_corner_press",
-        skip_serializing
-    )]
-    legacy_press: (),
+    pub tap: Action,
+    pub press: Action,
+    pub hold: Action,
 }
 
-/// `corner.<c>.swipe` / `corner.<c>.press` of the old layout -> (`<c>`, slot).
+/// `corner.<c>.swipe` of the old layout -> (`<c>`, slot).
 fn parse_old_corner_key(k: &str) -> Option<(&str, &str)> {
     let rest = k.strip_prefix("corner.")?;
     let (c, slot) = rest.split_once('.')?;
-    (["tl", "tr", "bl", "br"].contains(&c) && matches!(slot, "swipe" | "press"))
-        .then_some((c, slot))
-}
-
-fn legacy_corner_press<'de, D: Deserializer<'de>>(d: D) -> Result<(), D::Error> {
-    if Action::deserialize(d)? != Action::None {
-        scan_note(|s| {
-            s.bad.push(
-                "コーナーの「押す」操作は廃止されたため、無視しました（スワイプの設定は残っています）"
-                    .to_owned(),
-            );
-        });
-    }
-    Ok(())
+    (["tl", "tr", "bl", "br"].contains(&c) && slot == "swipe").then_some((c, slot))
 }
 
 impl CornerCfg {
@@ -1025,20 +1082,52 @@ impl CornerCfg {
         }
     }
 
-    /// True when any of the three slots does something.
-    pub fn any(&self) -> bool {
-        CornerDir::ALL
-            .into_iter()
-            .any(|d| *self.slot(d) != Action::None)
+    pub fn get(&self, slot: CornerSlot) -> &Action {
+        match slot {
+            CornerSlot::Swipe(d) => self.slot(d),
+            CornerSlot::Tap => &self.tap,
+            CornerSlot::Press => &self.press,
+            CornerSlot::Hold => &self.hold,
+        }
+    }
+
+    pub fn get_mut(&mut self, slot: CornerSlot) -> &mut Action {
+        match slot {
+            CornerSlot::Swipe(d) => self.slot_mut(d),
+            CornerSlot::Tap => &mut self.tap,
+            CornerSlot::Press => &mut self.press,
+            CornerSlot::Hold => &mut self.hold,
+        }
+    }
+
+    /// True when a slot of `trigger` does something.
+    pub fn any_of(&self, trigger: CornerTrigger) -> bool {
+        match trigger {
+            CornerTrigger::Swipe => CornerDir::ALL
+                .into_iter()
+                .any(|d| *self.slot(d) != Action::None),
+            CornerTrigger::Tap => self.tap != Action::None,
+            CornerTrigger::Press => self.press != Action::None,
+            CornerTrigger::Hold => self.hold != Action::None,
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Corners {
+    /// Master switch of every corner trigger.
     pub enabled: bool,
-    /// Side of the square corner zone a swipe must start in (mm).
+    /// Side of the square corner zone a gesture must start in (mm).
     pub size_mm: f32,
+    /// Corner taps (one finger touches and lifts) are on.
+    pub tap_enabled: bool,
+    /// Corner swipes are on (the only trigger that existed before, so it defaults to on).
+    pub swipe_enabled: bool,
+    /// Corner presses (a click in the zone) are on.
+    pub press_enabled: bool,
+    /// Corner holds (a finger rests in the zone) are on.
+    pub hold_enabled: bool,
     /// Top-left, top-right, bottom-left, bottom-right (always 4 entries after `normalize`).
     pub corners: Vec<CornerCfg>,
 }
@@ -1051,6 +1140,36 @@ impl Corners {
         max: 30.0,
     };
     pub const DEFAULT_SIZE_MM: f32 = 12.0;
+
+    /// Whether the trigger's own switch is on (the master switch is separate).
+    pub fn trigger_enabled(&self, t: CornerTrigger) -> bool {
+        match t {
+            CornerTrigger::Tap => self.tap_enabled,
+            CornerTrigger::Swipe => self.swipe_enabled,
+            CornerTrigger::Press => self.press_enabled,
+            CornerTrigger::Hold => self.hold_enabled,
+        }
+    }
+
+    /// Whether corner `i` takes its zone: corners are on and some enabled trigger has an action set
+    /// there. The edge slider's bands leave such corners out.
+    pub fn owns(&self, i: usize) -> bool {
+        self.enabled
+            && self.corners.get(i).is_some_and(|c| {
+                CornerTrigger::ALL
+                    .into_iter()
+                    .any(|t| self.trigger_enabled(t) && c.any_of(t))
+            })
+    }
+
+    pub fn trigger_enabled_mut(&mut self, t: CornerTrigger) -> &mut bool {
+        match t {
+            CornerTrigger::Tap => &mut self.tap_enabled,
+            CornerTrigger::Swipe => &mut self.swipe_enabled,
+            CornerTrigger::Press => &mut self.press_enabled,
+            CornerTrigger::Hold => &mut self.hold_enabled,
+        }
+    }
 }
 
 impl Default for Corners {
@@ -1058,6 +1177,10 @@ impl Default for Corners {
         Self {
             enabled: false,
             size_mm: Self::DEFAULT_SIZE_MM,
+            tap_enabled: false,
+            swipe_enabled: true,
+            press_enabled: false,
+            hold_enabled: false,
             corners: vec![CornerCfg::default(); 4],
         }
     }
@@ -1473,7 +1596,7 @@ pub struct Profile {
     /// Per-gesture actions that replace the global ones in this app. The key is a gesture id
     /// (`swipe.4.left`); an explicit `none` turns that gesture off here. Only the ids the engine
     /// resolves are kept: tap, swipe, pinch (and `press.*`, which the pressure work will resolve).
-    /// `corner.*` and `hold.*` ids are dropped on load and rejected on import until they are.
+    /// `corner.<corner>.<swipe-kind|tap|press|hold>` ids are resolved like the global corner slots.
     pub overrides: BTreeMap<String, Action>,
     /// Per-edge targets that replace the global ones (`edge.left`, `edge.right`, `edge.top`).
     pub edge_overrides: BTreeMap<String, EdgeTarget>,
@@ -1861,9 +1984,12 @@ macro_rules! slot_of {
                 } else if let Some((i, dir)) = parse_corner(other) {
                     match $cfg.corner.corners.len() > i {
                         true => Some(&$($m)* $cfg.corner.corners[i]).map(|c| match dir {
-                            CornerDir::Horizontal => &$($m)* c.horizontal,
-                            CornerDir::Vertical => &$($m)* c.vertical,
-                            CornerDir::Diagonal => &$($m)* c.diagonal,
+                            CornerSlot::Swipe(CornerDir::Horizontal) => &$($m)* c.horizontal,
+                            CornerSlot::Swipe(CornerDir::Vertical) => &$($m)* c.vertical,
+                            CornerSlot::Swipe(CornerDir::Diagonal) => &$($m)* c.diagonal,
+                            CornerSlot::Tap => &$($m)* c.tap,
+                            CornerSlot::Press => &$($m)* c.press,
+                            CornerSlot::Hold => &$($m)* c.hold,
                         }),
                         false => None,
                     }
@@ -1886,12 +2012,12 @@ fn parse_press(id: &str) -> Option<(usize, bool)> {
     }
 }
 
-/// `corner.br.diagonal` -> (3, Diagonal).
-fn parse_corner(id: &str) -> Option<(usize, CornerDir)> {
+/// `corner.br.diagonal` -> (3, Swipe(Diagonal)); `corner.tl.tap` -> (0, Tap).
+fn parse_corner(id: &str) -> Option<(usize, CornerSlot)> {
     let (corner, kind) = id.strip_prefix("corner.")?.split_once('.')?;
     let i = ["tl", "tr", "bl", "br"].iter().position(|c| *c == corner)?;
-    let dir = CornerDir::ALL.into_iter().find(|d| d.token() == kind)?;
-    Some((i, dir))
+    let slot = CornerSlot::ALL.into_iter().find(|d| d.token() == kind)?;
+    Some((i, slot))
 }
 
 /// `hold.thumb.index.swipe` -> (thumb hold, finger, trigger).
@@ -1957,7 +2083,13 @@ impl Config {
             .clamp(Corners::SIZE.min, Corners::SIZE.max);
         // The window resize needs a finger that keeps going toward the middle: diagonal only.
         for c in &mut self.corner.corners {
-            for slot in [&mut c.horizontal, &mut c.vertical] {
+            for slot in [
+                &mut c.horizontal,
+                &mut c.vertical,
+                &mut c.tap,
+                &mut c.press,
+                &mut c.hold,
+            ] {
                 if *slot == Action::ResizeFromOpposite {
                     *slot = Action::None;
                 }
@@ -2187,13 +2319,24 @@ impl Config {
         }
         if self.corner.enabled {
             for (name, c) in Corners::NAMES.iter().zip(&self.corner.corners) {
-                for dir in CornerDir::ALL {
-                    let a = c.slot(dir);
-                    if named(a) {
-                        out.push((
-                            format!("{name}の角から{}にスワイプ", dir.label()),
-                            a.label(),
-                        ));
+                if self.corner.swipe_enabled {
+                    for dir in CornerDir::ALL {
+                        let a = c.slot(dir);
+                        if named(a) {
+                            out.push((
+                                format!("{name}の角から{}にスワイプ", dir.label()),
+                                a.label(),
+                            ));
+                        }
+                    }
+                }
+                for (on, trigger, a) in [
+                    (self.corner.tap_enabled, "タップ", &c.tap),
+                    (self.corner.press_enabled, "プレス", &c.press),
+                    (self.corner.hold_enabled, "ホールド", &c.hold),
+                ] {
+                    if on && named(a) {
+                        out.push((format!("{name}の角で{trigger}"), a.label()));
                     }
                 }
             }
@@ -2371,7 +2514,7 @@ pub struct Parsed {
     /// Profile override keys no config field backs (`exe: id`); they are dropped.
     pub unbindable_overrides: Vec<String>,
     /// Profile override ids (`exe: id`) of gestures the engine does not resolve yet
-    /// (`corner.*`, `hold.*`); they are dropped.
+    /// (`hold.*`); they are dropped.
     pub inert_overrides: Vec<String>,
     /// Profile override keys that are no gesture id or edge key at all (`exe: key`); dropped.
     pub bad_override_keys: Vec<String>,
@@ -2691,33 +2834,22 @@ pub fn parse_text(text: &str) -> Result<Parsed, ParseError> {
     for p in &mut config.profiles {
         let before = p.overrides.len() + p.edge_overrides.len();
         let exe = p.exe_name.trim().to_owned();
-        // Corner keys of the old layout: `swipe` is now the diagonal slot, `press` is gone.
+        // Corner key of the old layout: `swipe` is now the diagonal slot.
         let old: Vec<String> = p
             .overrides
             .keys()
             .filter(|k| parse_old_corner_key(k).is_some())
             .cloned()
             .collect();
-        let mut dropped_press = false;
         for k in old {
-            let Some((c, old_slot)) = parse_old_corner_key(&k) else {
+            let Some((c, _)) = parse_old_corner_key(&k) else {
                 continue;
             };
-            let value = p.overrides.remove(&k);
-            if old_slot == "swipe" {
-                if let Some(v) = value {
-                    p.overrides
-                        .entry(format!("corner.{c}.diagonal"))
-                        .or_insert(v);
-                }
-            } else {
-                dropped_press = true;
+            if let Some(v) = p.overrides.remove(&k) {
+                p.overrides
+                    .entry(format!("corner.{c}.diagonal"))
+                    .or_insert(v);
             }
-        }
-        if dropped_press {
-            warnings.push(format!(
-                "「{exe}」のアプリ別設定にあるコーナーの「押す」操作は廃止されたため、削除しました"
-            ));
         }
         p.overrides.retain(|k, _| {
             let ok = GestureId::parse(k).is_some();
@@ -3158,14 +3290,14 @@ items = [
 "#;
 
     #[test]
-    fn old_corner_swipe_becomes_diagonal_and_press_is_dropped() {
+    fn old_corner_swipe_becomes_diagonal_and_press_is_the_new_slot() {
         let p = parse_text(
             "[corner]
 enabled = true
 
 [[corner.corners]]
 swipe = \"find\"
-press = \"mute\"
+press = \"task_view\"
 ",
         )
         .unwrap();
@@ -3173,11 +3305,10 @@ press = \"mute\"
         assert_eq!(c.diagonal, Action::Find);
         assert_eq!(c.horizontal, Action::None);
         assert_eq!(c.vertical, Action::None);
-        assert!(
-            p.warnings.iter().any(|w| w.contains("廃止")),
-            "{:?}",
-            p.warnings
-        );
+        // The old press key is the press slot now; it stays inert until the trigger is on.
+        assert_eq!(c.press, Action::TaskView);
+        assert!(!p.config.corner.press_enabled);
+        assert!(p.config.corner.swipe_enabled);
     }
 
     #[test]
@@ -3188,7 +3319,7 @@ press = \"mute\"
 exe_name = \"a.exe\"
 [profiles.overrides]
 \"corner.tl.swipe\" = \"find\"
-\"corner.tl.press\" = \"mute\"
+\"corner.tl.press\" = \"task_view\"
 \"corner.br.swipe\" = \"find\"
 \"corner.br.diagonal\" = \"task_view\"
 ",
@@ -3197,13 +3328,67 @@ exe_name = \"a.exe\"
         let o = &p.config.profiles[0].overrides;
         assert_eq!(o.get("corner.tl.diagonal"), Some(&Action::Find));
         assert_eq!(o.get("corner.br.diagonal"), Some(&Action::TaskView));
-        assert_eq!(o.len(), 2, "{o:?}");
+        // The press key is a live slot id now.
+        assert_eq!(o.get("corner.tl.press"), Some(&Action::TaskView));
+        assert_eq!(o.len(), 3, "{o:?}");
         assert!(p.bad_override_keys.is_empty(), "{:?}", p.bad_override_keys);
-        assert!(
-            p.warnings.iter().any(|w| w.contains("「押す」")),
-            "{:?}",
-            p.warnings
+    }
+
+    #[test]
+    fn corner_triggers_default_and_roundtrip() {
+        let d = Config::default().corner;
+        assert!(d.swipe_enabled && !d.tap_enabled && !d.press_enabled && !d.hold_enabled);
+        assert!(d.corners.iter().all(|c| !c.any_of(CornerTrigger::Tap)
+            && !c.any_of(CornerTrigger::Press)
+            && !c.any_of(CornerTrigger::Hold)));
+        // An old file without the toggles loads with the old behaviour.
+        let p = parse_text(
+            "[corner]
+enabled = true
+
+[[corner.corners]]
+swipe = \"find\"
+",
+        )
+        .unwrap();
+        assert!(p.config.corner.swipe_enabled && !p.config.corner.tap_enabled);
+        let mut cfg = Config::default();
+        cfg.corner.enabled = true;
+        cfg.corner.tap_enabled = true;
+        cfg.corner.swipe_enabled = false;
+        cfg.corner.corners[2].tap = Action::Find;
+        cfg.corner.corners[3].hold = Action::TaskView;
+        let text = toml::to_string(&cfg).unwrap();
+        let back = parse_text(&text).unwrap().config;
+        assert_eq!(back.corner, cfg.corner);
+    }
+
+    #[test]
+    fn corner_slots_have_gesture_ids_and_overrides() {
+        let id = GestureId::corner_slot(2, CornerSlot::Tap);
+        assert_eq!(id.as_str(), "corner.bl.tap");
+        assert_eq!(
+            GestureId::corner_slot(1, CornerSlot::Hold).as_str(),
+            "corner.tr.hold"
         );
+        assert!(GestureId::parse("corner.br.press").is_some());
+        let mut cfg = Config::default();
+        cfg.corner.corners[2].tap = Action::Find;
+        assert_eq!(cfg.binding(&id), Some(Action::Find));
+        assert!(cfg.set_binding(&id, Action::TaskView));
+        assert_eq!(cfg.corner.corners[2].tap, Action::TaskView);
+    }
+
+    #[test]
+    fn only_swipes_may_resize_from_the_opposite_corner() {
+        let mut cfg = Config::default();
+        cfg.corner.corners[0].tap = Action::ResizeFromOpposite;
+        cfg.corner.corners[0].press = Action::ResizeFromOpposite;
+        cfg.corner.corners[0].hold = Action::ResizeFromOpposite;
+        cfg.normalize();
+        assert_eq!(cfg.corner.corners[0].tap, Action::None);
+        assert_eq!(cfg.corner.corners[0].press, Action::None);
+        assert_eq!(cfg.corner.corners[0].hold, Action::None);
     }
 
     #[test]
@@ -3255,8 +3440,9 @@ exe_name = \"a.exe\"
         assert_eq!(*c.long_hold.actions.get(3), Action::TabSwitch);
         assert_eq!(c.finger_hold.combos[0].keys, "Alt+Tab");
         assert_eq!(c.thumb_hold.combos[0].hold, Finger::Thumb);
-        // The old corner press is gone: it is dropped, not carried over.
-        assert!(!c.corner.corners[0].any());
+        // The old corner press is the press slot now, inert until its trigger is on.
+        assert_eq!(c.corner.corners[0].press, Action::Find);
+        assert!(!c.corner.press_enabled);
         assert_eq!(c.corner.corners.len(), 4);
         // brush_size is gone.
         assert_eq!(c.edge.left, EdgeTarget::None);
@@ -4298,7 +4484,7 @@ command = 5
         tokens.sort();
         tokens.dedup();
         assert_eq!(tokens.len(), n, "ids are unique");
-        assert_eq!(n, 3 + 3 * 6 + 10 + 5 + 12 + 20);
+        assert_eq!(n, 3 + 3 * 6 + 10 + 5 + 24 + 20);
         for id in &all {
             assert_eq!(GestureId::parse(id.as_str()).as_ref(), Some(id));
             assert_eq!(id.to_string(), id.as_str());
@@ -4308,7 +4494,7 @@ command = 5
         assert_eq!(GestureId::tap(4).as_str(), "tap.4");
         assert_eq!(GestureId::press(2, true).as_str(), "press.2.deep");
         assert_eq!(
-            GestureId::corner(3, CornerDir::Diagonal).as_str(),
+            GestureId::corner_slot(3, CornerSlot::Swipe(CornerDir::Diagonal)).as_str(),
             "corner.br.diagonal"
         );
         assert_eq!(
@@ -4332,8 +4518,8 @@ command = 5
                 assert_eq!(cfg.binding(id), Some(sentinel), "{id}");
             }
         }
-        // 7 (four) + 4 (five) + 10 (press) + 5 (long hold) + 12 (corners) + 20 (hold combos).
-        assert_eq!(bound, 58);
+        // 7 (four) + 4 (five) + 10 (press) + 5 (long hold) + 24 (corners) + 20 (hold combos).
+        assert_eq!(bound, 70);
         // Ids without a field refuse.
         for id in ["tap.3", "tap.5", "swipe.3.up", "swipe.5.left", "pinch.3.in"] {
             let id = GestureId::parse(id).unwrap();
@@ -4372,7 +4558,7 @@ command = 5
                 );
             }
         }
-        assert_eq!(sentinels, 58);
+        assert_eq!(sentinels, 70);
     }
 
     #[test]

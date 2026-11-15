@@ -183,6 +183,7 @@ impl DevShot {
             ("home", Page::Home),
             ("four", Page::Four),
             ("five", Page::Five),
+            ("longhold", Page::LongHold),
             ("edge", Page::Edge),
             ("ring", Page::Ring),
             ("sensitivity", Page::Sensitivity),

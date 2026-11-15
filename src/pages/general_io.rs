@@ -477,7 +477,7 @@ fn setting_label(path: &str) -> String {
         | "edge.enabled"
         | "window.enabled"
         | "ring.enabled" => "機能を有効にする",
-        "drag.fingers" | "long_hold.fingers" | "ring.fingers" => "指の本数",
+        "drag.fingers" => "指の本数",
         "drag.lift_timeout_ms" => "指を離してから終了するまでの時間",
         "drag.keep_drag_on_release" => "離したあともドラッグを続ける",
         "five.pinch_in" => "ピンチイン",
@@ -490,7 +490,11 @@ fn setting_label(path: &str) -> String {
         "press.haptic_ticks" => "押し込みで触覚を返す",
         "calibration" => "押し込みのキャリブレーション",
         "press.fingers" => "指ごとの押し込み操作",
-        "long_hold.action" => "長押しの操作",
+        "long_hold.actions.one" => "1本指の長押し",
+        "long_hold.actions.two" => "2本指の長押し",
+        "long_hold.actions.three" => "3本指の長押し",
+        "long_hold.actions.four" => "4本指の長押し",
+        "long_hold.actions.five" => "5本指の長押し",
         "finger_hold.combos" | "thumb_hold.combos" => "組み合わせ",
         "corner.corners" => "コーナーの操作",
         "edge.left" => "左端",

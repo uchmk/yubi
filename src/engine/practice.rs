@@ -145,7 +145,7 @@ impl Recorder {
             )),
             Action::Debug(GestureEvent::LongHold { fingers }) => Some(made(
                 format!("{fingers}本指で長押し"),
-                GestureId::long_hold().as_str().to_owned(),
+                GestureId::long_hold(*fingers).as_str().to_owned(),
                 None,
                 Outcome::NoBinding,
             )),

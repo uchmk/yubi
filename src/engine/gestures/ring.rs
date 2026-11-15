@@ -2,8 +2,9 @@
 //! slot and lifting runs that slot's action.
 //!
 //! Flow (design section 5):
-//!  * Idle: exactly `fingers` stable contacts that moved less than the hold travel for the hold
-//!    time propose to open the ring.
+//!  * Idle: exactly N stable contacts (N is one of the finger counts whose long hold is set to
+//!    "ring menu", see `config::Config::ring_counts`) that moved less than the hold travel for the
+//!    hold time propose to open the ring.
 //!  * Open: the cursor and clicks are frozen; the centroid's offset from where the ring opened
 //!    picks a slot (centre = nothing). A new slot must persist for `SELECT_DWELL_US` first.
 //!  * Releasing: once the count falls below N the selection is frozen, and every finger must be
@@ -79,6 +80,8 @@ enum Phase {
     #[default]
     Idle,
     Open {
+        /// The finger count that opened the ring.
+        fingers: usize,
         anchor: Point,
         opened: u64,
         selected: Option<usize>,
@@ -86,6 +89,7 @@ enum Phase {
         pending: Option<(Option<usize>, u64)>,
     },
     Releasing {
+        fingers: usize,
         selected: Option<usize>,
         since: u64,
     },
@@ -96,8 +100,8 @@ enum Phase {
 #[derive(Debug, Default)]
 pub struct RingState {
     phase: Phase,
-    /// Idle: when the full count of still fingers was first seen.
-    since: Option<u64>,
+    /// Idle: when the full count of still fingers was first seen, and that count.
+    since: Option<(u64, usize)>,
 }
 
 impl RingState {
@@ -111,7 +115,7 @@ impl RingState {
         match self.phase {
             Phase::Idle => {
                 let cfg = g.ring.as_ref()?;
-                self.since.map(|s| s + cfg.hold_us)
+                self.since.map(|(s, _)| s + cfg.hold_us)
             }
             Phase::Open {
                 opened, pending, ..
@@ -136,15 +140,21 @@ impl RingState {
         if self.phase != Phase::Idle {
             return None;
         }
-        if ctx.raw > cfg.fingers || ctx.max_travel >= ctx.th.hold_travel_mm {
+        if ctx.raw > cfg.max_fingers() || ctx.max_travel >= ctx.th.hold_travel_mm {
             self.phase = Phase::Dead;
             return None;
         }
-        if ctx.raw != cfg.fingers || ctx.stable != cfg.fingers || ctx.rebase {
+        if !cfg.opens_with(ctx.raw) || ctx.stable != ctx.raw || ctx.rebase {
             self.since = None;
             return None;
         }
-        let since = *self.since.get_or_insert(ctx.now);
+        let since = match self.since {
+            Some((t, n)) if n == ctx.raw => t,
+            _ => {
+                self.since = Some((ctx.now, ctx.raw));
+                ctx.now
+            }
+        };
         (ctx.now >= since + cfg.hold_us && free).then_some(Proposal {
             who: Owner::Ring,
             at_us: ctx.now,
@@ -171,6 +181,7 @@ impl RingState {
             })
             .collect();
         self.phase = Phase::Open {
+            fingers: ctx.raw,
             anchor,
             opened: ctx.now,
             selected: None,
@@ -187,17 +198,19 @@ impl RingState {
         };
         match self.phase {
             Phase::Open {
+                fingers,
                 anchor,
                 opened,
                 selected,
                 pending,
             } => {
-                if ctx.now.saturating_sub(opened) >= TIMEOUT_US || ctx.raw > cfg.fingers {
+                if ctx.now.saturating_sub(opened) >= TIMEOUT_US || ctx.raw > fingers {
                     return self.cancel(out);
                 }
-                if ctx.raw < cfg.fingers {
+                if ctx.raw < fingers {
                     // The hand is lifting: freeze what is selected.
                     self.phase = Phase::Releasing {
+                        fingers,
                         selected,
                         since: ctx.now,
                     };
@@ -230,14 +243,15 @@ impl RingState {
                     }
                 };
                 self.phase = Phase::Open {
+                    fingers,
                     anchor,
                     opened,
                     selected,
                     pending,
                 };
             }
-            Phase::Releasing { since, .. } => {
-                if ctx.raw >= cfg.fingers || ctx.now.saturating_sub(since) > RELEASE_US {
+            Phase::Releasing { fingers, since, .. } => {
+                if ctx.raw >= fingers || ctx.now.saturating_sub(since) > RELEASE_US {
                     self.cancel(out);
                 }
             }
@@ -249,9 +263,9 @@ impl RingState {
     pub fn finish(&mut self, g: &GestureCfg, t: u64, out: &mut Vec<Action>) {
         let chosen = match self.phase {
             Phase::Open { selected, .. } => Some(selected),
-            Phase::Releasing { selected, since } if t.saturating_sub(since) <= RELEASE_US => {
-                Some(selected)
-            }
+            Phase::Releasing {
+                selected, since, ..
+            } if t.saturating_sub(since) <= RELEASE_US => Some(selected),
             Phase::Releasing { .. } => Some(None),
             Phase::Idle | Phase::Dead => None,
         };
@@ -338,7 +352,8 @@ mod tests {
     fn cfg() -> Config {
         let mut cfg = Config::default();
         cfg.ring.enabled = true;
-        cfg.ring.fingers = 5;
+        cfg.long_hold.enabled = true;
+        *cfg.long_hold.actions.get_mut(5) = config::Action::RingMenu;
         cfg.sensitivity.hold_ms = 500;
         cfg.ring.items = (0..4)
             .map(|i| RingItem {
@@ -654,6 +669,56 @@ mod tests {
     fn blocked_app_never_opens() {
         let mut rig = Rig::new(cfg());
         rig.r.set_foreground(Some("game.exe"), true);
+        rig.hold(900, &hand(5, 40.0, 60.0));
+        assert!(rig.ring_actions().is_empty());
+    }
+
+    /// Ring menu on 3 fingers, a plain action on 4, nothing on 5.
+    fn mixed_cfg() -> Config {
+        let mut c = cfg();
+        *c.long_hold.actions.get_mut(5) = config::Action::None;
+        *c.long_hold.actions.get_mut(3) = config::Action::RingMenu;
+        *c.long_hold.actions.get_mut(4) = config::Action::Find;
+        c
+    }
+
+    #[test]
+    fn a_three_finger_long_hold_set_to_the_ring_opens_it() {
+        let mut rig = Rig::new(mixed_cfg());
+        rig.hold(700, &hand(3, 40.0, 60.0));
+        assert!(rig.out.iter().any(|a| matches!(a, Action::RingOpen { .. })));
+        rig.hold(200, &hand(3, 60.0, 60.0));
+        rig.frame(vec![]);
+        rig.frame(vec![]);
+        assert_eq!(rig.triggers(), vec![config::Action::Keys("F2".into())]);
+    }
+
+    #[test]
+    fn another_count_runs_its_own_action_and_not_the_ring() {
+        let mut rig = Rig::new(mixed_cfg());
+        rig.hold(700, &hand(4, 40.0, 60.0));
+        assert!(!rig.out.iter().any(|a| matches!(a, Action::RingOpen { .. })));
+        assert_eq!(rig.triggers(), vec![config::Action::Find]);
+        // Lifting does not run it a second time.
+        rig.frame(vec![]);
+        rig.frame(vec![]);
+        assert_eq!(rig.triggers(), vec![config::Action::Find]);
+        // Five fingers have no binding: nothing happens.
+        let mut rig = Rig::new(mixed_cfg());
+        rig.hold(900, &hand(5, 40.0, 60.0));
+        assert!(rig.ring_actions().is_empty());
+    }
+
+    #[test]
+    fn long_hold_off_or_ring_off_keeps_the_ring_closed() {
+        let mut c = cfg();
+        c.long_hold.enabled = false;
+        let mut rig = Rig::new(c);
+        rig.hold(900, &hand(5, 40.0, 60.0));
+        assert!(rig.ring_actions().is_empty());
+        let mut c = cfg();
+        c.ring.enabled = false;
+        let mut rig = Rig::new(c);
         rig.hold(900, &hand(5, 40.0, 60.0));
         assert!(rig.ring_actions().is_empty());
     }

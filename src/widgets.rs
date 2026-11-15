@@ -547,8 +547,19 @@ pub fn combo_menu(
 
 /// Action combo box plus a key-string field when "キー入力" is chosen.
 pub fn action_picker(ui: &mut Ui, t: &Tokens, id: impl Hash + Debug, action: &mut Action) {
+    action_picker_of(ui, t, id, action, &ActionKind::ALL);
+}
+
+/// [`action_picker`] limited to the action kinds in `kinds`.
+pub fn action_picker_of(
+    ui: &mut Ui,
+    t: &Tokens,
+    id: impl Hash + Debug,
+    action: &mut Action,
+    kinds: &[ActionKind],
+) {
     let mut kind = action.kind();
-    if combo(ui, t, id, &mut kind, &ActionKind::ALL, ActionKind::label) {
+    if combo(ui, t, id, &mut kind, kinds, ActionKind::label) {
         action.set_kind(kind);
     }
     match action {

@@ -4,7 +4,8 @@
 use eframe::egui::{self, Align, Layout, RichText, Ui};
 
 use crate::config::{
-    Combo, Config, EdgeKind, EdgeTarget, Finger, HoldCombos, HoldTrigger, Ring, RingItem,
+    ActionKind, Combo, Config, EdgeKind, EdgeTarget, Finger, HoldCombos, HoldTrigger, Ring,
+    RingItem,
 };
 use crate::howto::{self, Mini, Side};
 use crate::icons;
@@ -263,32 +264,63 @@ pub fn custom_press(
     cmd
 }
 
-pub fn long_hold(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
+/// The long hold page: what a 1 to 5 finger long hold does. "リングメニュー" on 3 to 5 fingers is
+/// what makes the ring open there; the ring page only shows which counts those are.
+pub fn long_hold(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
     let on = feature_top(ui, t, cfg, Page::LongHold);
+    let mut cmd = None;
     ui.add_enabled_ui(on, |ui| {
         section_header(ui, t, "動作");
         group(ui, t, |g| {
-            let l = &mut cfg.long_hold;
-            g.slider_row(
-                "指の本数",
-                "長押しに使う指の本数です。",
-                SliderSpec::int(1, 5, 1, " 本"),
-                &mut l.fingers,
-            );
             g.slider_row(
                 "長押しの時間",
-                "操作が始まるまでに指を置き続ける時間です。長押しとリングメニューで共通で、「感度」ページの値と同じです。",
+                "操作が始まるまでに指を置き続ける時間です。すべての指の本数で共通で、「感度」ページの値と同じです。",
                 SliderSpec::int(300, 1500, 50, " ms"),
                 &mut cfg.sensitivity.hold_ms,
             );
-            g.action_row(
-                "実行する操作",
-                "長押ししたときの操作です。",
-                "long-hold",
-                &mut l.action,
-            );
         });
+        section_header(ui, t, "指の本数ごとの操作");
+        let without_ring: Vec<ActionKind> = ActionKind::ALL
+            .into_iter()
+            .filter(|k| *k != ActionKind::RingMenu)
+            .collect();
+        group(ui, t, |g| {
+            for n in 1..=5usize {
+                let can_ring = n >= 3;
+                let desc = if can_ring {
+                    "指を置き続けたときの操作です。「リングメニュー」を選ぶと、リングが開きます。"
+                } else {
+                    "指を置き続けたときの操作です。"
+                };
+                let kinds: &[ActionKind] = if can_ring {
+                    &ActionKind::ALL
+                } else {
+                    &without_ring
+                };
+                let a = cfg.long_hold.actions.get_mut(n);
+                g.row(None, &format!("{n}本指の長押し"), desc, |ui| {
+                    widgets::action_picker_of(ui, t, ("long-hold", n), a, kinds);
+                });
+            }
+        });
+        if !cfg.long_hold.ring_counts().is_empty() && !cfg.ring.enabled {
+            group(ui, t, |g| {
+                g.wrapped_row(|ui| {
+                    ui.label(
+                        RichText::new(
+                            "リングメニューが無効のため、「リングメニュー」を選んだ長押しでは何も起きません。",
+                        )
+                        .size(t.fs_small)
+                        .color(t.accent),
+                    );
+                    if widgets::button(ui, t, "リングメニューを開く").clicked() {
+                        cmd = Some(Cmd::Goto(Page::Ring));
+                    }
+                });
+            });
+        }
     });
+    cmd
 }
 
 pub fn hold_combos(ui: &mut Ui, t: &Tokens, cfg: &mut Config, page: Page) {
@@ -583,27 +615,45 @@ pub fn window(
     cmd
 }
 
-pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
+/// "3 本の指", "3 本または 5 本の指", "3 本、4 本、5 本のいずれかの指" (nothing bound: a hint).
+fn ring_fingers_text(counts: &[usize]) -> String {
+    match counts {
+        [] => "指（本数は「ロングホールド」で選びます）".to_owned(),
+        [a] => format!("{a} 本の指"),
+        [a, b] => format!("{a} 本または {b} 本の指"),
+        many => format!(
+            "{}のいずれかの指",
+            many.iter()
+                .map(|n| format!("{n} 本"))
+                .collect::<Vec<_>>()
+                .join("、")
+        ),
+    }
+}
+
+pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
     let on = feature_top(ui, t, cfg, Page::Ring);
+    let mut cmd = None;
     ui.add_enabled_ui(on, |ui| {
         section_header(ui, t, "使い方");
         group(ui, t, |g| {
             g.wrapped_row(|ui| ring_guide(ui, t, cfg));
         });
-        let n = cfg.ring.fingers.clamp(3, 5);
-        if (cfg.drag.enabled && cfg.drag.fingers == n)
-            || (cfg.four.enabled && n == 4)
-            || (cfg.five.enabled && n == 5)
-        {
-            ui.label(
-                RichText::new(format!(
-                    "{n} 本指には別のジェスチャーも割り当てられています。指を {} ms 動かさずに置くと、そちらより先にリングが開きます。",
-                    cfg.sensitivity.hold_ms
-                ))
-                .size(t.fs_small)
-                .color(t.accent),
-            );
-            ui.add_space(t.space_sm);
+        for n in cfg.ring_counts() {
+            if (cfg.drag.enabled && usize::from(cfg.drag.fingers) == n)
+                || (cfg.four.enabled && n == 4)
+                || (cfg.five.enabled && n == 5)
+            {
+                ui.label(
+                    RichText::new(format!(
+                        "{n} 本指には別のジェスチャーも割り当てられています。指を {} ms 動かさずに置くと、そちらより先にリングが開きます。",
+                        cfg.sensitivity.hold_ms
+                    ))
+                    .size(t.fs_small)
+                    .color(t.accent),
+                );
+                ui.add_space(t.space_sm);
+            }
         }
         if !cfg.ring.has_usable_items() {
             group(ui, t, |g| {
@@ -623,12 +673,40 @@ pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
         section_header(ui, t, "呼び出し");
         group(ui, t, |g| {
             let hold_ms = &mut cfg.sensitivity.hold_ms;
-            let r = &mut cfg.ring;
-            g.slider_row(
+            let bound = cfg.long_hold.ring_counts();
+            let (summary, attention) = if bound.is_empty() {
+                (
+                    "注意: どの指の本数にも割り当てられていません".to_owned(),
+                    true,
+                )
+            } else {
+                let list = bound
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join("・");
+                if cfg.long_hold.enabled {
+                    (format!("ロングホールドの {list} 本指で開きます"), false)
+                } else {
+                    (
+                        format!(
+                            "注意: ロングホールドが無効のため、{list} 本指でも開きません"
+                        ),
+                        true,
+                    )
+                }
+            };
+            g.row(
+                None,
                 "指の本数",
-                "リングメニューを開く指の本数です（3〜5 本）。",
-                SliderSpec::int(3, 5, 1, " 本"),
-                &mut r.fingers,
+                "リングメニューを開く指の本数は、「ロングホールド」で「リングメニュー」を選んだ本数です（3〜5 本）。",
+                |ui| {
+                    if widgets::button(ui, t, "ロングホールドで変更").clicked() {
+                        cmd = Some(Cmd::Goto(Page::LongHold));
+                    }
+                    let color = if attention { t.accent } else { t.text_muted };
+                    ui.label(RichText::new(summary).size(t.fs_small).color(color));
+                },
             );
             g.slider_row(
                 "長押しの時間",
@@ -674,11 +752,15 @@ pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
             items.push(RingItem::default());
         }
     });
+    cmd
 }
 
 /// How to use the ring menu: an animated pad and ring mock, four steps, the details.
 fn ring_guide(ui: &mut Ui, t: &Tokens, cfg: &Config) {
-    let n = cfg.ring.fingers.clamp(3, 5) as usize;
+    let counts = cfg.long_hold.ring_counts();
+    // The animation shows the first bound count (5 when nothing is bound yet).
+    let n = counts.first().copied().unwrap_or(5).clamp(3, 5);
+    let who = ring_fingers_text(&counts);
     let hold_ms = cfg.sensitivity.hold_ms;
     let labels: Vec<String> = cfg
         .ring
@@ -698,7 +780,7 @@ fn ring_guide(ui: &mut Ui, t: &Tokens, cfg: &Config) {
                 howto::summary(
                     ui,
                     t,
-                    &format!("{n} 本の指を置いたままにして、リングから選びます"),
+                    &format!("{who}を置いたままにして、リングから選びます"),
                     &[
                         format!(
                             "{hold_ms} ms ほど動かさずに待つと、カーソルの位置にリングが現れます。真上が先頭の項目で、時計回りに並びます。"

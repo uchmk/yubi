@@ -372,6 +372,37 @@ mod tests {
         );
     }
 
+    /// One finger rests at the right edge for 600 ms, then slides 20 mm along it.
+    fn rest_then_slide_right_edge() -> Vec<Frame> {
+        let mut v = Vec::new();
+        for ms in (0..=600).step_by(10) {
+            v.push(frame(ms, vec![c(157.0, 80.0)]));
+        }
+        for i in 1..=10 {
+            v.push(frame(600 + i * 10, vec![c(157.0, 80.0 - 2.0 * i as f32)]));
+        }
+        v
+    }
+
+    #[test]
+    fn an_unbound_one_finger_long_hold_does_not_stop_the_edge_slider() {
+        let mut cfg = cfg_with(EdgeTarget::None, EdgeTarget::Volume, EdgeTarget::None);
+        cfg.sensitivity.hold_ms = 500;
+        // Long hold 1 = none (the default): the rest only reports the debug event.
+        let out = run(&rest_then_slide_right_edge(), &cfg);
+        assert!(!out.iter().any(|a| matches!(a, Action::Trigger(_))));
+        assert!(!steps(&out).is_empty(), "{out:?}");
+        // Bound, the long hold takes the session: it runs once and the slide stays quiet.
+        *cfg.long_hold.actions.get_mut(1) = crate::config::Action::Find;
+        let out = run(&rest_then_slide_right_edge(), &cfg);
+        let fired = out
+            .iter()
+            .filter(|a| matches!(a, Action::Trigger(crate::config::Action::Find)))
+            .count();
+        assert_eq!(fired, 1, "{out:?}");
+        assert!(steps(&out).is_empty(), "{out:?}");
+    }
+
     #[test]
     fn lost_freeze_ends_the_slide_and_stops_the_steps() {
         let cfg = cfg_with(EdgeTarget::Volume, EdgeTarget::None, EdgeTarget::None);

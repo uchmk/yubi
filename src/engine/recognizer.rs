@@ -1,7 +1,7 @@
 //! Gesture recognizer: the thin coordinator over tracking, arbitration and the gesture machines.
 //!
 //! It never touches the OS and never reads a clock; time comes from `Frame::t_us` and `tick`.
-//! It tracks fingers (debounced count, taps, long hold: debug events only) and runs the real
+//! It tracks fingers (debounced count, taps, long hold: its plain actions run from here) and runs the real
 //! gestures in parallel: drag, window move (tap, then swipe) and the 3/4/5-finger tap, pinch and
 //! swipe. Gestures only propose to commit; the arbiter picks one winner per touch session, and the
 //! others stay quiet until all fingers are lifted.
@@ -35,6 +35,9 @@ struct Session {
     hold_us: u64,
     hold_since: Option<u64>,
     hold_fired: bool,
+    /// The long-hold action already ran in this touch session; it never runs twice (a count
+    /// change such as 2 -> 3 -> 2 re-arms the timer, not the action).
+    hold_acted: bool,
     /// This touch began soon after a 3-finger tap, so it may become a window move.
     win_candidate: bool,
     /// The touch began while a drag was being kept after release.
@@ -296,6 +299,7 @@ impl Recognizer {
             hold_us: u64::from(cfg.sensitivity.hold_ms) * 1000,
             hold_since: None,
             hold_fired: false,
+            hold_acted: false,
             win_candidate,
             drag_was_held: self.drag.phase == DragPhase::Held,
         });
@@ -337,12 +341,31 @@ impl Recognizer {
             && now >= due
             && let Some(s) = self.session.as_mut()
         {
-            if s.max_travel < self.th.hold_travel_mm {
-                out.push(Action::Debug(GestureEvent::LongHold {
-                    fingers: self.tracker.stable,
-                }));
-            }
+            let fired = s.max_travel < self.th.hold_travel_mm;
             s.hold_fired = true;
+            if fired {
+                let fingers = self.tracker.stable;
+                out.push(Action::Debug(GestureEvent::LongHold { fingers }));
+                // The ring-menu choice is not in this table: the ring state machine opens it.
+                // Only a count with a real action claims the session (an unbound one must not
+                // stop the edge slider, drag or scroll), once per touch session, and never for
+                // 6 or more contacts. Once it fired, no other gesture runs until all fingers lift
+                // (for example a 4-finger swipe after a bound 4-finger long hold stays quiet).
+                let action = (1..=5)
+                    .contains(&fingers)
+                    .then(|| self.g.long_hold[fingers - 1].clone())
+                    .filter(|a| *a != crate::config::Action::None);
+                if let Some(action) = action
+                    && !s.hold_acted
+                    && self.arb.resolve(&[Proposal {
+                        who: Owner::Hold,
+                        at_us: now,
+                    }]) == Some(Owner::Hold)
+                {
+                    s.hold_acted = true;
+                    out.push(Action::Trigger(action));
+                }
+            }
         }
         self.gestures(now, from_frame, out);
     }
@@ -491,7 +514,8 @@ impl Recognizer {
                     self.scroll.commit(&ctx, cfg, out);
                 }
             }
-            None => {}
+            // The long hold already ran its action when it fired.
+            Some(Owner::Hold) | None => {}
         }
     }
 }
@@ -861,5 +885,90 @@ mod tests {
         // One finger swaps IDs and its place jumps; no swipe may come from that jump alone.
         let out = r.step(&frame(t, mk([1, 2, 3, 4, 6], -30.0)), &cfg);
         assert!(!out.iter().any(|a| matches!(a, Action::Trigger(_))));
+    }
+
+    fn fingers_at(n: u32, dx: f32) -> Vec<Contact> {
+        (0..n)
+            .map(|k| c(k + 1, 20.0 + 15.0 * k as f32 + dx, 40.0))
+            .collect()
+    }
+
+    fn triggers(out: &[Action]) -> Vec<crate::config::Action> {
+        out.iter()
+            .filter_map(|a| match a {
+                Action::Trigger(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `n` fingers rest for `rest_ms`, then swipe left 60 mm and lift.
+    fn rest_swipe_lift(r: &mut Recognizer, cfg: &Config, n: u32, rest_ms: u64) -> Vec<Action> {
+        let mut out = Vec::new();
+        let mut t = 0;
+        while t <= rest_ms {
+            out.extend(r.step(&frame(t, fingers_at(n, 0.0)), cfg));
+            t += 11;
+        }
+        for i in 1..=12 {
+            out.extend(r.step(&frame(t, fingers_at(n, -5.0 * i as f32)), cfg));
+            t += 11;
+        }
+        out.extend(r.step(&frame(t, vec![]), cfg));
+        out
+    }
+
+    #[test]
+    fn a_bound_long_hold_takes_the_session_so_a_swipe_after_it_stays_quiet() {
+        use crate::config::Action as A;
+        let mut cfg = Config::default();
+        cfg.sensitivity.hold_ms = 300;
+        cfg.four.enabled = true;
+        cfg.four.swipe_left = A::TaskView;
+        // Control: with no long-hold action the swipe fires.
+        let out = rest_swipe_lift(&mut Recognizer::default(), &cfg, 4, 400);
+        assert_eq!(triggers(&out), vec![A::TaskView], "{out:?}");
+        // Bound: the long hold runs once and the swipe in the same session does not.
+        *cfg.long_hold.actions.get_mut(4) = A::Find;
+        let out = rest_swipe_lift(&mut Recognizer::default(), &cfg, 4, 400);
+        assert_eq!(triggers(&out), vec![A::Find], "{out:?}");
+    }
+
+    #[test]
+    fn the_long_hold_action_runs_once_per_touch_session() {
+        use crate::config::Action as A;
+        let mut cfg = Config::default();
+        cfg.sensitivity.hold_ms = 300;
+        *cfg.long_hold.actions.get_mut(2) = A::Find;
+        let mut r = Recognizer::default();
+        let mut out = Vec::new();
+        // 2 fingers rest, a third joins and leaves: the timer re-arms for 2 fingers.
+        for (from, to, n) in [(0u64, 400u64, 2u32), (400, 800, 3), (800, 1300, 2)] {
+            let mut t = from;
+            while t < to {
+                out.extend(r.step(&frame(t, fingers_at(n, 0.0)), &cfg));
+                t += 11;
+            }
+        }
+        let holds = events(&out)
+            .iter()
+            .filter(|e| matches!(e, GestureEvent::LongHold { fingers: 2 }))
+            .count();
+        assert_eq!(holds, 2, "the hold timer re-armed: {out:?}");
+        assert_eq!(triggers(&out), vec![A::Find], "{out:?}");
+    }
+
+    #[test]
+    fn six_contacts_do_not_run_the_five_finger_long_hold() {
+        use crate::config::Action as A;
+        let mut cfg = Config::default();
+        cfg.sensitivity.hold_ms = 300;
+        *cfg.long_hold.actions.get_mut(5) = A::Find;
+        let mut r = Recognizer::default();
+        let mut out = Vec::new();
+        for t in (0..600).step_by(11) {
+            out.extend(r.step(&frame(t, fingers_at(6, 0.0)), &cfg));
+        }
+        assert!(triggers(&out).is_empty(), "{out:?}");
     }
 }

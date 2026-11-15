@@ -609,13 +609,13 @@ impl App {
                     .and_then(|d| crate::calibration::device_key(&d.id));
                 return features::custom_press(ui, t, cfg, key.as_deref());
             }
-            Page::LongHold => features::long_hold(ui, t, cfg),
+            Page::LongHold => return features::long_hold(ui, t, cfg),
             Page::FingerHold => features::hold_combos(ui, t, cfg, Page::FingerHold),
             Page::ThumbHold => features::hold_combos(ui, t, cfg, Page::ThumbHold),
             Page::Corner => features::corner(ui, t, cfg),
             Page::Edge => features::edge(ui, t, cfg),
             Page::Window => return features::window(ui, t, cfg, &self.win_values),
-            Page::Ring => features::ring(ui, t, cfg),
+            Page::Ring => return features::ring(ui, t, cfg),
             Page::Profiles => return apps::page(ui, t, cfg, &mut self.apps),
             Page::Overview => {
                 return overview::page(ui, t, cfg, &self.win_values, &mut self.overview);

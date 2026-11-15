@@ -11,6 +11,8 @@ pub enum Owner {
     Multi,
     Edge,
     Ring,
+    /// A plain long-hold action (the ring-menu choice is `Ring`).
+    Hold,
     Pressure,
     Scroll,
 }
@@ -45,7 +47,7 @@ impl Owner {
             Self::Drag => Priority::Drag,
             Self::Edge => Priority::Edge,
             // The ring is a hold gesture; it shares the hold-combo slot.
-            Self::Ring => Priority::HoldCombo,
+            Self::Ring | Self::Hold => Priority::HoldCombo,
             Self::Scroll => Priority::Scroll,
         }
     }

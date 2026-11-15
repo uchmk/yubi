@@ -41,9 +41,9 @@ impl GestureId {
         ))
     }
 
-    /// The long hold with the configured finger count (reserved).
-    pub fn long_hold() -> Self {
-        Self("hold.long".to_owned())
+    /// The long hold with `fingers` fingers (1 to 5).
+    pub fn long_hold(fingers: usize) -> Self {
+        Self(format!("hold.long.{fingers}"))
     }
 
     /// A press or swipe starting in a pad corner (0 = top-left, 1 = top-right, 2 = bottom-left,
@@ -91,7 +91,9 @@ impl GestureId {
             out.push(Self::press(n, false));
             out.push(Self::press(n, true));
         }
-        out.push(Self::long_hold());
+        for n in 1..=5 {
+            out.push(Self::long_hold(n));
+        }
         for i in 0..4 {
             out.push(Self::corner(i, false));
             out.push(Self::corner(i, true));
@@ -561,10 +563,23 @@ impl EdgeCfg {
 /// The ring menu as latched at touchdown.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RingCfg {
-    pub fingers: usize,
+    /// The finger counts (3 to 5) whose long hold opens the ring: `[3, 4, 5]` flags.
+    pub counts: [bool; 3],
     /// How long the fingers must rest before the ring opens.
     pub hold_us: u64,
     pub items: Vec<config::RingItem>,
+}
+
+impl RingCfg {
+    /// Whether a long hold with `fingers` fingers opens the ring.
+    pub fn opens_with(&self, fingers: usize) -> bool {
+        (3..=5).contains(&fingers) && self.counts[fingers - 3]
+    }
+
+    /// The largest finger count that opens the ring.
+    pub fn max_fingers(&self) -> usize {
+        (3..=5).rev().find(|&n| self.opens_with(n)).unwrap_or(0)
+    }
 }
 
 /// Most slots the ring shows (more would not fit around the circle).
@@ -583,6 +598,10 @@ pub struct GestureCfg {
     pub multi: [Option<MultiCfg>; 3],
     /// `None` when edge sliders are off or none has a target.
     pub edge: Option<EdgeCfg>,
+    /// The plain action of a long hold per finger count (index = count - 1), as resolved for the
+    /// foreground app. `None` for an unbound count, for every count while the long hold is off,
+    /// and for a count bound to the ring menu: the ring state machine owns that one (see `ring`).
+    pub long_hold: [config::Action; 5],
     /// `None` when the ring is off (with no runnable item the default items are used).
     pub ring: Option<RingCfg>,
     /// Press bindings and thresholds, indexed by `count - 1`; `None` = that count does nothing
@@ -620,6 +639,16 @@ impl ScrollCfg {
             inertia_strength: s.inertia_strength,
         })
     }
+}
+
+/// Which counts (3, 4, 5) open the ring for `exe`: the effective long-hold binding per count
+/// (the app's override, else the global one) decides, so an override of `ring_menu` opens the ring
+/// in that app and any other override (or `none`) turns it off for that count there.
+fn ring_counts_for(cfg: &Config, exe: Option<&str>) -> [bool; 3] {
+    if !(cfg.long_hold.enabled && cfg.ring.enabled) {
+        return [false; 3];
+    }
+    [3, 4, 5].map(|n| resolve(cfg, exe, &GestureId::long_hold(n)) == config::Action::RingMenu)
 }
 
 impl GestureCfg {
@@ -660,15 +689,26 @@ impl GestureCfg {
                 })
                 .filter(EdgeCfg::any),
             // With no runnable item the built-in defaults are offered, so the ring always opens.
-            ring: cfg.ring.enabled.then(|| RingCfg {
-                fingers: usize::from(cfg.ring.fingers.clamp(3, 5)),
-                hold_us: u64::from(cfg.sensitivity.hold_ms) * 1000,
-                items: cfg
-                    .ring
-                    .effective_items()
-                    .into_iter()
-                    .take(RING_MAX_ITEMS)
-                    .collect(),
+            ring: Some(ring_counts_for(cfg, exe))
+                .filter(|c| c.iter().any(|&on| on))
+                .map(|counts| RingCfg {
+                    counts,
+                    hold_us: u64::from(cfg.sensitivity.hold_ms) * 1000,
+                    items: cfg
+                        .ring
+                        .effective_items()
+                        .into_iter()
+                        .take(RING_MAX_ITEMS)
+                        .collect(),
+                }),
+            long_hold: std::array::from_fn(|i| {
+                let a = resolve(cfg, exe, &GestureId::long_hold(i + 1));
+                // The ring menu is the ring state machine's job, not a plain action.
+                if cfg.long_hold.enabled && a != config::Action::RingMenu {
+                    a
+                } else {
+                    config::Action::None
+                }
             }),
             scroll: ScrollCfg::from_config(cfg, exe),
             ..Self::default()
@@ -773,21 +813,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ring_fingers_are_clamped_to_three_to_five() {
+    fn ring_counts_come_from_the_long_hold_bindings() {
+        use config::Action;
         let mut cfg = Config::default();
-        cfg.ring.enabled = true;
         cfg.ring.items = vec![config::RingItem {
             label: "a".into(),
-            action: config::Action::Keys("F1".into()),
+            action: Action::Keys("F1".into()),
         }];
-        for (raw, want) in [(1u8, 3usize), (2, 3), (4, 4), (9, 5)] {
-            cfg.ring.fingers = raw;
-            let g = GestureCfg::from_config(&cfg, None);
-            assert_eq!(g.ring.map(|r| r.fingers), Some(want), "raw {raw}");
-        }
-        cfg.ring.fingers = 1;
+        // Default: the five-finger long hold opens the ring.
+        let g = GestureCfg::from_config(&cfg, None);
+        assert_eq!(g.ring.map(|r| r.counts), Some([false, false, true]));
+        *cfg.long_hold.actions.get_mut(3) = Action::RingMenu;
+        *cfg.long_hold.actions.get_mut(5) = Action::Find;
+        let g = GestureCfg::from_config(&cfg, None);
+        assert_eq!(g.ring.map(|r| r.counts), Some([true, false, false]));
+        // The ring choice is not a plain long-hold action; the others are.
+        assert_eq!(g.long_hold[2], Action::None);
+        assert_eq!(g.long_hold[4], Action::Find);
+        cfg.ring.enabled = false;
+        assert!(GestureCfg::from_config(&cfg, None).ring.is_none());
+        cfg.ring.enabled = true;
+        cfg.long_hold.enabled = false;
+        let g = GestureCfg::from_config(&cfg, None);
+        assert!(g.ring.is_none());
+        assert_eq!(g.long_hold[4], Action::None);
+        // 1 and 2 fingers cannot open the ring.
+        cfg.long_hold.enabled = true;
+        *cfg.long_hold.actions.get_mut(2) = Action::RingMenu;
         cfg.normalize();
-        assert_eq!(cfg.ring.fingers, 3);
+        assert_eq!(*cfg.long_hold.actions.get(2), Action::None);
+    }
+
+    #[test]
+    fn ring_counts_follow_the_per_app_binding() {
+        use config::Action;
+        let mut cfg = Config::default(); // global: 5 fingers = ring menu
+        let mut p = config::Profile {
+            exe_name: "app.exe".into(),
+            enabled: true,
+            ..config::Profile::default()
+        };
+        // (a) an override of ring_menu opens the ring for that count in that app only.
+        p.overrides.insert("hold.long.4".into(), Action::RingMenu);
+        cfg.profiles = vec![p.clone()];
+        let counts = |cfg: &Config, exe| GestureCfg::from_config(cfg, exe).ring.map(|r| r.counts);
+        assert_eq!(counts(&cfg, Some("app.exe")), Some([false, true, true]));
+        assert_eq!(counts(&cfg, Some("other.exe")), Some([false, false, true]));
+        // (b) an explicit none turns the count off there; with no count left there is no ring.
+        p.overrides.clear();
+        p.overrides.insert("hold.long.5".into(), Action::None);
+        cfg.profiles = vec![p.clone()];
+        assert_eq!(counts(&cfg, Some("app.exe")), None);
+        assert_eq!(counts(&cfg, None), Some([false, false, true]));
+        // (c) another action turns the ring off for that count and runs as a plain long hold.
+        p.overrides.insert("hold.long.5".into(), Action::Find);
+        cfg.profiles = vec![p];
+        let g = GestureCfg::from_config(&cfg, Some("app.exe"));
+        assert!(g.ring.is_none());
+        assert_eq!(g.long_hold[4], Action::Find);
     }
 
     #[test]

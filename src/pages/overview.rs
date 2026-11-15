@@ -46,7 +46,7 @@ pub fn gesture_name(key: &str) -> String {
         ["pinch", _, "out"] => format!("{}本指でピンチアウト", n()),
         ["press", _, "light"] => format!("{}本指で軽く押し込む", n()),
         ["press", _, "deep"] => format!("{}本指で深く押し込む", n()),
-        ["hold", "long"] => "長押し".to_owned(),
+        ["hold", "long", n] => format!("{n}本指で長押し"),
         ["hold", kind, finger, trigger] => {
             let owner = if *kind == "thumb" {
                 "サムホールド"
@@ -88,7 +88,7 @@ pub fn page_of(key: &str) -> Page {
         ["tap" | "swipe" | "pinch", "5", ..] => Page::Five,
         ["tap" | "swipe" | "pinch", ..] => Page::Four,
         ["press", ..] => Page::CustomPress,
-        ["hold", "long"] => Page::LongHold,
+        ["hold", "long", _] => Page::LongHold,
         ["hold", "thumb", ..] => Page::ThumbHold,
         ["hold", ..] => Page::FingerHold,
         ["corner", ..] => Page::Corner,
@@ -446,17 +446,6 @@ fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conf
             });
         }
     }
-    if cfg.long_hold.enabled && cfg.ring.enabled && cfg.long_hold.fingers == cfg.ring.fingers {
-        let n = cfg.long_hold.fingers;
-        out.push(Conflict {
-            kind: ConflictKind::Overlap,
-            rows: keys(&|r| r.key == "hold.long"),
-            reason: format!(
-                "長押しとリングメニューが同じ{n}本指の長押しで始まるため、区別できません。"
-            ),
-            page: Page::LongHold,
-        });
-    }
     if cfg.corner.enabled && cfg.window.enabled && cfg.window.corner_resize {
         let affected = keys(&|r| r.key.starts_with("corner.") && r.key.ends_with(".swipe"));
         if !affected.is_empty() {
@@ -743,6 +732,7 @@ mod tests {
         cfg.window.enabled = false;
         cfg.ring.enabled = false;
         cfg.long_hold.enabled = false;
+        cfg.long_hold.actions = crate::config::LongHoldActions::default();
         cfg.corner.enabled = false;
         cfg.four.enabled = true;
         cfg
@@ -932,28 +922,6 @@ mod tests {
         assert!(c.rows.contains(&"swipe.4.left".to_owned()));
         cfg.drag.fingers = 3;
         cfg.window.enabled = false;
-        assert!(
-            build(&cfg, &WIN_OFF)
-                .conflicts
-                .iter()
-                .all(|c| c.kind != ConflictKind::Overlap)
-        );
-    }
-
-    #[test]
-    fn long_hold_and_ring_with_the_same_fingers_overlap() {
-        let mut cfg = base();
-        cfg.long_hold.enabled = true;
-        cfg.long_hold.action = Action::Find;
-        cfg.ring.enabled = true;
-        cfg.ring.fingers = cfg.long_hold.fingers;
-        let t = build(&cfg, &WIN_OFF);
-        assert!(
-            t.conflicts
-                .iter()
-                .any(|c| c.kind == ConflictKind::Overlap && c.rows == vec!["hold.long".to_owned()])
-        );
-        cfg.ring.fingers = if cfg.long_hold.fingers == 5 { 4 } else { 5 };
         assert!(
             build(&cfg, &WIN_OFF)
                 .conflicts

@@ -415,14 +415,6 @@ fn drag_fingers<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
     lenient_count(d, "ドラッグの指の本数", Drag::default().fingers)
 }
 
-fn long_hold_fingers<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
-    lenient_count(d, "長押しの指の本数", LongHold::default().fingers)
-}
-
-fn ring_fingers<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
-    lenient_count(d, "リングメニューの指の本数", Ring::default().fingers)
-}
-
 impl<'de> Deserialize<'de> for Action {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let token = match TokenWire::deserialize(d)? {
@@ -721,22 +713,69 @@ fn span_ok(baseline: f32, firm: f32) -> bool {
         && firm - baseline >= MIN_CALIBRATION_SPAN - 1e-4
 }
 
+/// What a long hold does, per finger count (1 to 5).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LongHoldActions {
+    pub one: Action,
+    pub two: Action,
+    pub three: Action,
+    pub four: Action,
+    pub five: Action,
+}
+
+impl LongHoldActions {
+    /// The action of the `fingers`-finger long hold (`fingers` is clamped into 1..=5).
+    pub fn get(&self, fingers: usize) -> &Action {
+        match fingers.clamp(1, 5) {
+            1 => &self.one,
+            2 => &self.two,
+            3 => &self.three,
+            4 => &self.four,
+            _ => &self.five,
+        }
+    }
+
+    pub fn get_mut(&mut self, fingers: usize) -> &mut Action {
+        match fingers.clamp(1, 5) {
+            1 => &mut self.one,
+            2 => &mut self.two,
+            3 => &mut self.three,
+            4 => &mut self.four,
+            _ => &mut self.five,
+        }
+    }
+}
+
+/// Long hold: resting `fingers` still for the hold time runs that count's action. The choice
+/// "ring menu" (3 to 5 fingers) is the one place that decides which finger count opens the ring
+/// (see [`LongHold::ring_counts`]); the ring page keeps only the items.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LongHold {
     pub enabled: bool,
-    #[serde(deserialize_with = "long_hold_fingers")]
-    pub fingers: u8,
-    pub action: Action,
+    pub actions: LongHoldActions,
 }
 
 impl Default for LongHold {
+    /// On with the five-finger long hold opening the ring menu (the ring's old default).
     fn default() -> Self {
         Self {
-            enabled: false,
-            fingers: 2,
-            action: Action::None,
+            enabled: true,
+            actions: LongHoldActions {
+                five: Action::RingMenu,
+                ..LongHoldActions::default()
+            },
         }
+    }
+}
+
+impl LongHold {
+    /// The finger counts (3 to 5) whose long hold opens the ring menu, ignoring the switches.
+    pub fn ring_counts(&self) -> Vec<usize> {
+        (3..=5)
+            .filter(|&n| *self.actions.get(n) == Action::RingMenu)
+            .collect()
     }
 }
 
@@ -1296,8 +1335,6 @@ impl Cursor {
 #[serde(default)]
 pub struct Ring {
     pub enabled: bool,
-    #[serde(deserialize_with = "ring_fingers")]
-    pub fingers: u8,
     pub items: Vec<RingItem>,
 }
 
@@ -1305,7 +1342,6 @@ impl Default for Ring {
     fn default() -> Self {
         Self {
             enabled: true,
-            fingers: 5,
             items: Vec::new(),
         }
     }
@@ -1626,7 +1662,11 @@ macro_rules! slot_of {
             "swipe.5.down" => Some(&$($m)* $cfg.five.swipe_down),
             "pinch.5.in" => Some(&$($m)* $cfg.five.pinch_in),
             "pinch.5.out" => Some(&$($m)* $cfg.five.pinch_out),
-            "hold.long" => Some(&$($m)* $cfg.long_hold.action),
+            "hold.long.1" => Some(&$($m)* $cfg.long_hold.actions.one),
+            "hold.long.2" => Some(&$($m)* $cfg.long_hold.actions.two),
+            "hold.long.3" => Some(&$($m)* $cfg.long_hold.actions.three),
+            "hold.long.4" => Some(&$($m)* $cfg.long_hold.actions.four),
+            "hold.long.5" => Some(&$($m)* $cfg.long_hold.actions.five),
             other => {
                 if let Some((n, deep)) = parse_press(other) {
                     match $cfg.press.fingers.len() > n - 1 {
@@ -1711,8 +1751,20 @@ impl Config {
     pub fn normalize(&mut self) {
         self.drag.fingers = self.drag.fingers.clamp(3, 5);
         self.drag.lift_timeout_ms = self.drag.lift_timeout_ms.min(1000);
-        self.long_hold.fingers = self.long_hold.fingers.clamp(1, 5);
-        self.ring.fingers = self.ring.fingers.clamp(3, 5);
+        // The ring needs 3 to 5 fingers: a ring menu on a 1 or 2 finger long hold cannot open
+        // (`clamp_report` says so).
+        for n in 1..=2 {
+            if *self.long_hold.actions.get(n) == Action::RingMenu {
+                *self.long_hold.actions.get_mut(n) = Action::None;
+            }
+        }
+        for p in &mut self.profiles {
+            for id in ["hold.long.1", "hold.long.2"] {
+                if p.overrides.get(id) == Some(&Action::RingMenu) {
+                    p.overrides.insert(id.into(), Action::None);
+                }
+            }
+        }
         self.sensitivity.clamp();
         self.scroll.clamp();
         let have = self.press.fingers.len();
@@ -1839,6 +1891,16 @@ impl Config {
         true
     }
 
+    /// The finger counts (3 to 5) whose long hold opens the ring menu right now: the long hold
+    /// and the ring are both on. The single place that says what opens the ring.
+    pub fn ring_counts(&self) -> Vec<usize> {
+        if self.long_hold.enabled && self.ring.enabled {
+            self.long_hold.ring_counts()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// The per-feature enable flags, in navigation order.
     pub fn feature_flags(&self) -> [bool; FEATURE_COUNT] {
         [
@@ -1911,9 +1973,14 @@ impl Config {
                 }
             }
         }
-        if self.long_hold.enabled && named(&self.long_hold.action) {
-            let l = &self.long_hold;
-            out.push((format!("{}本指の長押し", l.fingers), l.action.label()));
+        if self.long_hold.enabled {
+            for n in 1..=5 {
+                let a = self.long_hold.actions.get(n);
+                // The ring menu is listed only while the ring itself is on.
+                if named(a) && (*a != Action::RingMenu || self.ring.enabled) {
+                    out.push((format!("{n}本指の長押し"), a.label()));
+                }
+            }
         }
         for (name, h) in [
             ("フィンガーホールド", &self.finger_hold),
@@ -1950,12 +2017,6 @@ impl Config {
                 }
             }
         }
-        if self.ring.enabled {
-            out.push((
-                format!("{}本指の長押し", self.ring.fingers),
-                "リングメニュー".into(),
-            ));
-        }
         out
     }
 }
@@ -1982,6 +2043,15 @@ fn clamp_report(
             .position(|(s, _)| *s == v)
             .map_or_else(|| v.to_string(), |i| raw_speeds.remove(i).1.to_string())
     };
+    for n in 1..=2 {
+        if *raw.long_hold.actions.get(n) == Action::RingMenu
+            && *norm.long_hold.actions.get(n) != Action::RingMenu
+        {
+            w.push(format!(
+                "{n}本指の長押しでは「リングメニュー」を開けない（3〜5本指のみ）ため「なし」にしました"
+            ));
+        }
+    }
     let mut note = |name: &str, before: String, after: String| {
         if before != after {
             w.push(format!(
@@ -1998,16 +2068,6 @@ fn clamp_report(
         "ドラッグの持ち上げ猶予 (ms)",
         raw.drag.lift_timeout_ms.to_string(),
         norm.drag.lift_timeout_ms.to_string(),
-    );
-    note(
-        "長押しの指の本数",
-        raw.long_hold.fingers.to_string(),
-        norm.long_hold.fingers.to_string(),
-    );
-    note(
-        "リングメニューの指の本数",
-        raw.ring.fingers.to_string(),
-        norm.ring.fingers.to_string(),
     );
     for ((name, before), (_, after)) in raw
         .sensitivity
@@ -2194,6 +2254,186 @@ fn migrate_v1(root: &mut toml::Table, notes: &mut Vec<String>) {
     root.insert("schema_version".into(), Value::Integer(2));
 }
 
+/// Move the old finger count of the ring menu and the old single long hold (`fingers` + `action`)
+/// into per-count long hold actions, inside the TOML value, before it is read into [`Config`].
+/// Not tied to the schema version: it only acts when one of the three old keys is present, and
+/// removes them, so a migrated file is left alone. Returns whether anything was moved (the file
+/// is then saved back).
+///
+/// Rules: the old action lands on its old count and keeps the old on/off state (a long hold that
+/// was off stays off), unless the ring was on: the ring needs the long hold on, so an action of a
+/// disabled long hold is dropped with a note instead of switching on by surprise. The ring's old
+/// count N (default 5) becomes "ring menu" on N when the ring was on, which also turns the long
+/// hold on; on a clash (the old long hold had another action on N) the ring wins and a note says
+/// which action was dropped. A ring that was off still records N when the slot is free, and a
+/// note says so when it is not. A per-app override `hold.long` follows the old finger count
+/// (`hold.long.<N>`). Malformed tables are left untouched.
+fn migrate_hold_ring(root: &mut toml::Table, notes: &mut Vec<String>) -> bool {
+    use toml::Value;
+    const NAMES: [&str; 5] = ["one", "two", "three", "four", "five"];
+    // Read first, change later: a malformed table leaves the old keys where they are, so nothing
+    // the user wrote is lost (the load then reports the bad table).
+    let sub = |root: &toml::Table, table: &str, key: &str| -> Option<Value> {
+        root.get(table)
+            .and_then(Value::as_table)
+            .and_then(|t| t.get(key))
+            .cloned()
+    };
+    let lh_fingers = sub(root, "long_hold", "fingers");
+    let lh_action = sub(root, "long_hold", "action");
+    let ring_fingers = sub(root, "ring", "fingers");
+    let old_profile_key = root
+        .get("profiles")
+        .and_then(Value::as_array)
+        .is_some_and(|ps| {
+            ps.iter().any(|p| {
+                p.get("overrides")
+                    .and_then(Value::as_table)
+                    .is_some_and(|o| o.contains_key("hold.long"))
+            })
+        });
+    if lh_fingers.is_none() && lh_action.is_none() && ring_fingers.is_none() && !old_profile_key {
+        return false;
+    }
+    let lh_table_ok = root.get("long_hold").is_none_or(Value::is_table)
+        && root
+            .get("long_hold")
+            .and_then(|t| t.get("actions"))
+            .is_none_or(Value::is_table);
+    let ring_table_ok = root.get("ring").is_none_or(Value::is_table);
+    if !lh_table_ok || !ring_table_ok {
+        notes.push(
+            "「ロングホールド」または「リングメニュー」の設定が表ではないため、指の本数の移行をしませんでした"
+                .to_owned(),
+        );
+        return false;
+    }
+    let mut count = |v: &Option<Value>, what: &str, default: i64| -> usize {
+        let n = match v {
+            Some(Value::Integer(n)) => *n,
+            Some(_) => {
+                notes.push(format!(
+                    "{what}の値が整数ではないため、既定値 {default} を使います"
+                ));
+                default
+            }
+            None => default,
+        };
+        let (lo, hi) = if what.starts_with("リング") {
+            (3, 5)
+        } else {
+            (1, 5)
+        };
+        let c = n.clamp(lo, hi);
+        if c != n {
+            notes.push(format!("{what} の値 {n} は範囲外のため {c} に補正しました"));
+        }
+        usize::try_from(c).unwrap_or(1)
+    };
+    let lh_n = count(&lh_fingers, "長押しの指の本数", 2);
+    let ring_n = count(&ring_fingers, "リングメニューの指の本数", 5);
+    // The per-app override of the old single long hold follows its finger count.
+    if let Some(profiles) = root.get_mut("profiles").and_then(Value::as_array_mut) {
+        for o in profiles
+            .iter_mut()
+            .filter_map(|p| p.get_mut("overrides").and_then(Value::as_table_mut))
+        {
+            if let Some(v) = o.remove("hold.long") {
+                o.entry(format!("hold.long.{lh_n}")).or_insert(v);
+            }
+        }
+    }
+    for (table, key) in [
+        ("long_hold", "fingers"),
+        ("long_hold", "action"),
+        ("ring", "fingers"),
+    ] {
+        if let Some(t) = root.get_mut(table).and_then(Value::as_table_mut) {
+            t.remove(key);
+        }
+    }
+    if lh_fingers.is_none() && lh_action.is_none() && ring_fingers.is_none() {
+        return true; // only the profile key moved
+    }
+    let flag = |root: &toml::Table, table: &str, default: bool| {
+        root.get(table)
+            .and_then(Value::as_table)
+            .and_then(|t| t.get("enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(default)
+    };
+    let lh_on = flag(root, "long_hold", false);
+    let ring_on = flag(root, "ring", true);
+    let Some(lh) = root
+        .entry("long_hold")
+        .or_insert_with(|| Value::Table(toml::Table::new()))
+        .as_table_mut()
+    else {
+        return true;
+    };
+    let mut enabled = lh_on;
+    let Some(actions) = lh
+        .entry("actions")
+        .or_insert_with(|| Value::Table(toml::Table::new()))
+        .as_table_mut()
+    else {
+        return true;
+    };
+    let named = |v: &Value| v.as_str().is_none_or(|s| s != "none");
+    let label = |v: &Value| {
+        v.as_str().map_or_else(
+            || "別の操作".to_owned(),
+            |s| match Action::parse_token(s) {
+                TokenParse::Ok(a) => format!("「{}」", a.label()),
+                _ => format!("「{s}」"),
+            },
+        )
+    };
+    let slot = NAMES[ring_n - 1];
+    if let Some(a) = lh_action.filter(named) {
+        if lh_on || !ring_on {
+            // Kept in its count; a long hold that was off stays off.
+            actions.entry(NAMES[lh_n - 1]).or_insert(a);
+        } else if lh_n != ring_n {
+            // The ring needs the long hold on, which would also switch this action on.
+            notes.push(format!(
+                "{lh_n}本指の長押しの{}は、ロングホールドが無効だったため外しました（リングメニューのためにロングホールドを有効にしています）。必要なら「ロングホールド」で選び直してください",
+                label(&a)
+            ));
+        }
+    }
+    let taken = actions.get(slot).filter(|a| named(a)).cloned();
+    let mut moved = false;
+    if ring_on {
+        if let Some(old) = taken {
+            notes.push(format!(
+                "{ring_n}本指の長押しは、リングメニューを開く設定と重なっていたため、{}を外してリングメニューを開くようにしました。必要なら「ロングホールド」で選び直してください",
+                label(&old)
+            ));
+        }
+        actions.insert(slot.into(), Value::String("ring_menu".into()));
+        enabled = true;
+        moved = ring_fingers.is_some();
+    } else if let Some(old) = taken {
+        if ring_fingers.is_some() {
+            notes.push(format!(
+                "リングメニューを開く指の本数（{ring_n}本）は、{ring_n}本指の長押しに{}が割り当てられているため引き継げませんでした。リングメニューが無効なので動作は変わりません",
+                label(&old)
+            ));
+        }
+    } else {
+        actions.insert(slot.into(), Value::String("ring_menu".into()));
+        moved = ring_fingers.is_some();
+    }
+    lh.insert("enabled".into(), Value::Boolean(enabled));
+    if moved {
+        notes.push(format!(
+            "リングメニューを開く指の本数は「ロングホールド」に移しました（{ring_n}本指の長押し）"
+        ));
+    }
+    true
+}
+
 /// Parse one config text: read the schema version, migrate older layouts, deserialize, report
 /// unknown and legacy entries, drop duplicate profiles and bad override keys, then normalize.
 pub fn parse_text(text: &str) -> Result<Parsed, ParseError> {
@@ -2216,6 +2456,7 @@ pub fn parse_text(text: &str) -> Result<Parsed, ParseError> {
     if migrated {
         migrate_v1(&mut root, &mut warnings);
     }
+    let hold_moved = migrate_hold_ring(&mut root, &mut warnings);
     scan_note(|s| *s = Scan::default());
     let result = toml::Value::Table(root).try_into::<Config>();
     let scan = SCAN.with(|s| std::mem::take(&mut *s.borrow_mut()));
@@ -2288,7 +2529,8 @@ pub fn parse_text(text: &str) -> Result<Parsed, ParseError> {
         let mut inert = 0usize;
         p.overrides.retain(|k, _| {
             // The engine resolves no corner or hold gesture yet: an override would do nothing.
-            if k.starts_with("corner.") || k.starts_with("hold.") {
+            if k.starts_with("corner.") || (k.starts_with("hold.") && !k.starts_with("hold.long."))
+            {
                 inert_overrides.push(format!("{exe}: {k}"));
                 inert += 1;
                 return false;
@@ -2325,7 +2567,7 @@ pub fn parse_text(text: &str) -> Result<Parsed, ParseError> {
         unbindable_overrides,
         inert_overrides,
         bad_override_keys,
-        rewrite: migrated || !scan.legacy.is_empty() || scan.brush_size > 0,
+        rewrite: migrated || hold_moved || !scan.legacy.is_empty() || scan.brush_size > 0,
     })
 }
 
@@ -2544,7 +2786,8 @@ mod tests {
         cfg.five.swipe_down = Action::BrightnessStep(5);
         cfg.press.haptic_strength = HapticStrength::Firm;
         cfg.press.fingers[2].deep = Action::RingMenu;
-        cfg.long_hold.action = Action::MiddleClick;
+        *cfg.long_hold.actions.get_mut(2) = Action::MiddleClick;
+        *cfg.long_hold.actions.get_mut(4) = Action::RingMenu;
         cfg.finger_hold.combos.push(Combo {
             hold: Finger::Middle,
             trigger: HoldTrigger::Swipe,
@@ -2719,7 +2962,7 @@ items = [
         );
         assert_eq!(c.press.fingers.len(), 5);
         assert_eq!(c.press.fingers[0].deep, Action::RingMenu);
-        assert_eq!(c.long_hold.action, Action::TabSwitch);
+        assert_eq!(*c.long_hold.actions.get(3), Action::TabSwitch);
         assert_eq!(c.finger_hold.combos[0].keys, "Alt+Tab");
         assert_eq!(c.thumb_hold.combos[0].hold, Finger::Thumb);
         assert_eq!(c.corner.corners[0].press, Action::Find);
@@ -2733,7 +2976,10 @@ items = [
         assert!(c.profiles[0].overrides.is_empty());
         // long_hold.hold_ms wins over ring.hold_ms and lands in [sensitivity].
         assert_eq!(c.sensitivity.hold_ms, 700);
-        assert_eq!(c.ring.fingers, 4);
+        // The ring's old count moved onto the long hold (3 keeps its own action).
+        assert_eq!(*c.long_hold.actions.get(4), Action::RingMenu);
+        assert!(c.long_hold.enabled);
+        assert_eq!(c.ring_counts(), vec![4]);
         // Ring commands: a key combination becomes a typed action, empty becomes none, the rest is
         // dropped (strings are never shell commands).
         assert_eq!(c.ring.items.len(), 2);
@@ -3092,11 +3338,12 @@ enabled = true
     #[test]
     fn enabled_count_counts_feature_toggles() {
         let mut cfg = Config::default();
-        // Defaults: four-finger gestures and the ring menu are on; edge sliders are off.
-        assert_eq!(cfg.enabled_count(), (2, FEATURE_COUNT));
+        // Defaults: four-finger gestures, the long hold (it opens the ring) and the ring menu
+        // are on; edge sliders are off.
+        assert_eq!(cfg.enabled_count(), (3, FEATURE_COUNT));
         cfg.drag.enabled = true;
         cfg.window.enabled = true;
-        assert_eq!(cfg.enabled_count(), (4, FEATURE_COUNT));
+        assert_eq!(cfg.enabled_count(), (5, FEATURE_COUNT));
     }
 
     #[test]
@@ -3252,10 +3499,259 @@ fingers = [1]
         assert_eq!(c.edge.left, EdgeTarget::None);
         assert_eq!(c.edge.right, EdgeTarget::Volume);
         assert_eq!(c.drag.fingers, Drag::default().fingers);
-        assert_eq!(c.long_hold.fingers, LongHold::default().fingers);
-        assert_eq!(c.ring.fingers, Ring::default().fingers);
+        // Non-integer old finger counts fall back to the old defaults (long hold 2, ring 5).
+        assert_eq!(c.ring_counts(), vec![5]);
         assert!(p.unknown_tokens.is_empty());
-        assert_eq!(p.warnings.len(), 5, "{:?}", p.warnings);
+        assert_eq!(p.warnings.len(), 6, "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn default_long_hold_opens_the_ring_on_five_fingers() {
+        let c = Config::default();
+        assert!(c.long_hold.enabled && c.ring.enabled);
+        assert_eq!(c.ring_counts(), vec![5]);
+        let text = toml::to_string(&c).unwrap();
+        let back = parse_text(&text).unwrap();
+        assert_eq!(back.config.long_hold, c.long_hold);
+        assert!(!back.rewrite, "{:?}", back.warnings);
+    }
+
+    #[test]
+    fn old_ring_only_file_moves_its_count_to_the_long_hold() {
+        // The ring on 5 fingers with the long hold off (what the real config looked like).
+        let p = parse_text(
+            "[ring]
+enabled = true
+fingers = 3
+",
+        )
+        .unwrap();
+        assert!(p.rewrite);
+        let c = &p.config;
+        assert!(c.long_hold.enabled);
+        assert_eq!(*c.long_hold.actions.get(3), Action::RingMenu);
+        assert_eq!(*c.long_hold.actions.get(5), Action::None);
+        assert_eq!(c.ring_counts(), vec![3]);
+        // Saved back, the file no longer has the old keys and loads without another rewrite.
+        let text = toml::to_string(c).unwrap();
+        assert!(
+            !text.contains(
+                "fingers = 3
+
+[ring"
+            ),
+            "{text}"
+        );
+        let again = parse_text(&text).unwrap();
+        assert!(!again.rewrite);
+        assert_eq!(again.config.long_hold, c.long_hold);
+    }
+
+    #[test]
+    fn old_ring_count_defaults_to_five_and_a_disabled_ring_stays_off() {
+        let p = parse_text(
+            "[ring]
+enabled = true
+fingers = 5
+",
+        )
+        .unwrap();
+        assert_eq!(p.config.ring_counts(), vec![5]);
+        let p = parse_text(
+            "[ring]
+enabled = false
+fingers = 4
+",
+        )
+        .unwrap();
+        let c = &p.config;
+        // The count is remembered, but the ring (and the long hold) stay off.
+        assert_eq!(*c.long_hold.actions.get(4), Action::RingMenu);
+        assert!(!c.long_hold.enabled && !c.ring.enabled);
+        assert!(c.ring_counts().is_empty());
+    }
+
+    #[test]
+    fn old_long_hold_only_file_keeps_its_action_on_its_count() {
+        let p = parse_text(
+            "[long_hold]
+enabled = true
+fingers = 2
+action = \"find\"
+[ring]
+enabled = false
+",
+        )
+        .unwrap();
+        let c = &p.config;
+        assert!(p.rewrite && c.long_hold.enabled);
+        assert_eq!(*c.long_hold.actions.get(2), Action::Find);
+        assert_eq!(*c.long_hold.actions.get(5), Action::RingMenu);
+        assert!(c.ring_counts().is_empty());
+        // A switched-off old long hold keeps its action on its count, still switched off.
+        let p = parse_text(
+            "[long_hold]
+enabled = false
+fingers = 2
+action = \"find\"
+[ring]
+enabled = false
+",
+        )
+        .unwrap();
+        assert_eq!(*p.config.long_hold.actions.get(2), Action::Find);
+        assert!(!p.config.long_hold.enabled);
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        // With the ring on, the long hold must be on too: the old action is dropped with a note
+        // rather than switching on by surprise.
+        let p = parse_text(
+            "[long_hold]
+enabled = false
+fingers = 2
+action = \"find\"
+",
+        )
+        .unwrap();
+        assert_eq!(*p.config.long_hold.actions.get(2), Action::None);
+        assert!(
+            p.warnings
+                .iter()
+                .any(|w| w.contains("2本指") && w.contains("検索 (Ctrl+F)")),
+            "{:?}",
+            p.warnings
+        );
+    }
+
+    #[test]
+    fn old_per_app_hold_long_override_follows_the_old_finger_count() {
+        let text = |fingers: &str| {
+            format!(
+                "[long_hold]
+enabled = true
+{fingers}
+action = \"find\"
+[[profiles]]
+exe_name = \"a.exe\"
+[profiles.overrides]
+\"hold.long\" = \"task_view\"
+"
+            )
+        };
+        let p = parse_text(&text("fingers = 4")).unwrap();
+        let o = &p.config.profiles[0].overrides;
+        assert_eq!(o.get("hold.long.4"), Some(&Action::TaskView));
+        assert!(!o.contains_key("hold.long") && p.inert_overrides.is_empty());
+        // No `fingers` key: the old default (2).
+        let p = parse_text(&text("")).unwrap();
+        assert!(p.config.profiles[0].overrides.contains_key("hold.long.2"));
+    }
+
+    #[test]
+    fn malformed_long_hold_tables_keep_the_old_keys() {
+        let mut root: toml::Table = toml::from_str(
+            "long_hold = 3
+[ring]
+fingers = 4
+",
+        )
+        .unwrap();
+        let mut notes = Vec::new();
+        assert!(!migrate_hold_ring(&mut root, &mut notes));
+        assert!(root["ring"].as_table().unwrap().contains_key("fingers"));
+        assert_eq!(notes.len(), 1);
+    }
+
+    #[test]
+    fn migration_notes_only_report_what_happened() {
+        // Only the long hold moved: nothing about the ring count.
+        let p = parse_text(
+            "[long_hold]
+enabled = true
+fingers = 2
+action = \"find\"
+",
+        )
+        .unwrap();
+        assert!(!p.warnings.iter().any(|w| w.contains("移しました")));
+        // Ring off and its slot taken: the lost count is reported.
+        let p = parse_text(
+            "[long_hold]
+enabled = true
+fingers = 4
+action = \"find\"
+[ring]
+enabled = false
+fingers = 4
+",
+        )
+        .unwrap();
+        assert!(
+            p.warnings.iter().any(|w| w.contains("引き継げません")),
+            "{:?}",
+            p.warnings
+        );
+        assert!(!p.warnings.iter().any(|w| w.contains("移しました")));
+    }
+
+    #[test]
+    fn ring_menu_on_one_or_two_fingers_is_cleared_with_a_note() {
+        let p = parse_text(
+            "schema_version = 2
+[long_hold]
+enabled = true
+[long_hold.actions]
+one = \"ring_menu\"
+",
+        )
+        .unwrap();
+        assert_eq!(*p.config.long_hold.actions.get(1), Action::None);
+        assert!(
+            p.warnings.iter().any(|w| w.contains("1本指の長押し")),
+            "{:?}",
+            p.warnings
+        );
+    }
+
+    #[test]
+    fn old_long_hold_and_ring_on_the_same_count_keep_the_ring() {
+        let p = parse_text(
+            "[long_hold]
+enabled = true
+fingers = 4
+action = \"find\"
+[ring]
+enabled = true
+fingers = 4
+",
+        )
+        .unwrap();
+        let c = &p.config;
+        assert_eq!(*c.long_hold.actions.get(4), Action::RingMenu);
+        assert_eq!(c.ring_counts(), vec![4]);
+        assert!(
+            p.warnings
+                .iter()
+                .any(|w| w.contains("検索 (Ctrl+F)") && w.contains("4本指")),
+            "{:?}",
+            p.warnings
+        );
+    }
+
+    #[test]
+    fn new_format_long_hold_is_left_alone() {
+        let p = parse_text(
+            "schema_version = 2
+[long_hold]
+enabled = true
+[long_hold.actions]
+three = \"ring_menu\"
+five = \"find\"
+",
+        )
+        .unwrap();
+        assert!(!p.rewrite);
+        assert_eq!(p.config.ring_counts(), vec![3]);
+        assert_eq!(*p.config.long_hold.actions.get(5), Action::Find);
     }
 
     #[test]
@@ -3266,7 +3762,7 @@ fingers = [1]
 exe_name = \"a.exe\"
 [profiles.overrides]
 \"corner.br.swipe\" = \"find\"
-\"hold.long\" = \"find\"
+\"hold.long.3\" = \"find\"
 \"hold.thumb.index.swipe\" = \"find\"
 \"press.3.deep\" = \"find\"
 \"swipe.4.left\" = \"none\"
@@ -3274,8 +3770,9 @@ exe_name = \"a.exe\"
         )
         .unwrap();
         let keys: Vec<_> = p.config.profiles[0].overrides.keys().cloned().collect();
-        assert_eq!(keys, ["press.3.deep", "swipe.4.left"]);
-        assert_eq!(p.inert_overrides.len(), 3);
+        // `hold.long.N` is live (the per-app long hold); the other corner / hold ids are not.
+        assert_eq!(keys, ["hold.long.3", "press.3.deep", "swipe.4.left"]);
+        assert_eq!(p.inert_overrides.len(), 2);
         assert!(p.unbindable_overrides.is_empty());
         assert!(p.warnings.iter().any(|w| w.contains("コーナー・ホールド")));
     }
@@ -3424,7 +3921,7 @@ command = 5
         tokens.sort();
         tokens.dedup();
         assert_eq!(tokens.len(), n, "ids are unique");
-        assert_eq!(n, 3 + 3 * 6 + 10 + 1 + 8 + 20);
+        assert_eq!(n, 3 + 3 * 6 + 10 + 5 + 8 + 20);
         for id in &all {
             assert_eq!(GestureId::parse(id.as_str()).as_ref(), Some(id));
             assert_eq!(id.to_string(), id.as_str());
@@ -3455,8 +3952,8 @@ command = 5
                 assert_eq!(cfg.binding(id), Some(sentinel), "{id}");
             }
         }
-        // 7 (four) + 4 (five) + 10 (press) + 1 (long hold) + 8 (corners) + 20 (hold combos).
-        assert_eq!(bound, 50);
+        // 7 (four) + 4 (five) + 10 (press) + 5 (long hold) + 8 (corners) + 20 (hold combos).
+        assert_eq!(bound, 54);
         // Ids without a field refuse.
         for id in ["tap.3", "tap.5", "swipe.3.up", "swipe.5.left", "pinch.3.in"] {
             let id = GestureId::parse(id).unwrap();
@@ -3495,7 +3992,7 @@ command = 5
                 );
             }
         }
-        assert_eq!(sentinels, 50);
+        assert_eq!(sentinels, 54);
     }
 
     #[test]

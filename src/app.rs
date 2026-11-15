@@ -33,6 +33,8 @@ pub struct App {
     saved: Config,
     config_path: PathBuf,
     dirty_since: Option<Instant>,
+    /// The old-layout file has no backup yet (see `config::backup_before_first_save`).
+    needs_backup: bool,
     engine: Engine,
     diagnostics: Diagnostics,
     /// Windows gesture registry values, read when the 全般 page opens and after each change.
@@ -69,6 +71,7 @@ impl App {
             config: cfg,
             warnings,
             future_version,
+            needs_backup,
         } = loaded;
         theme::apply(ctx, cfg.general.theme);
         let mut general_state = general_io::GeneralState::new(ctx);
@@ -82,6 +85,7 @@ impl App {
             cfg,
             config_path,
             dirty_since: None,
+            needs_backup,
             engine,
             diagnostics: Diagnostics::default(),
             win_values: [None; 4],
@@ -218,9 +222,17 @@ impl App {
         }
         let since = *self.dirty_since.get_or_insert_with(Instant::now);
         if force || since.elapsed() >= SAVE_DEBOUNCE {
-            match config::save(&self.config_path, &self.cfg) {
-                Ok(()) => self.saved = self.cfg.clone(),
-                Err(e) => eprintln!("yubi: cannot save config: {e}"),
+            match config::backup_before_first_save(&self.config_path, &mut self.needs_backup) {
+                Ok(()) => match config::save(&self.config_path, &self.cfg) {
+                    Ok(()) => self.saved = self.cfg.clone(),
+                    Err(e) => eprintln!("yubi: cannot save config: {e}"),
+                },
+                Err(note) => {
+                    eprintln!("yubi: {note}");
+                    if !self.general_state.load_notes.contains(&note) {
+                        self.general_state.load_notes.push(note);
+                    }
+                }
             }
             self.dirty_since = Some(Instant::now());
         }
@@ -551,7 +563,11 @@ impl eframe::App for App {
         if let Some(r) = self.resident.as_mut() {
             r.shutdown();
         }
-        if self.devshot.is_none() && !self.read_only && self.cfg != self.saved {
+        if self.devshot.is_none()
+            && !self.read_only
+            && self.cfg != self.saved
+            && config::backup_before_first_save(&self.config_path, &mut self.needs_backup).is_ok()
+        {
             let _ = config::save(&self.config_path, &self.cfg);
         }
     }

@@ -362,7 +362,8 @@ impl Dispatcher {
                 Err(e) => e,
             }),
             Plan::Brightness(n) => Some(match self.sys.brightness_step(n) {
-                Ok(v) => format!("{source} → {label}（{}%）", percent(v)),
+                Ok(Some(v)) => format!("{source} → {label}（{}%）", percent(v)),
+                Ok(None) => format!("{source} → {label}"),
                 Err(e) => e,
             }),
             Plan::Nothing => Some(format!("{source} → {label}（まだ動作しません）")),
@@ -382,7 +383,6 @@ pub fn step_fraction(n: i8) -> f32 {
 }
 
 const VOLUME_FAILED_NOTE: &str = "音量を変えられませんでした";
-const BRIGHTNESS_UNKNOWN_NOTE: &str = "明るさを読み取っています。もう一度お試しください";
 const BRIGHTNESS_FAILED_NOTE: &str = "明るさを変えられませんでした";
 
 thread_local! {
@@ -415,29 +415,36 @@ fn with_volume<T>(
 #[derive(Default)]
 struct SystemOps {
     brightness: Option<crate::os::brightness::BrightnessWorker>,
-    /// The brightness the last step asked for (the worker applies it later) and the worker's
-    /// report generation when it was asked. It lives across gestures, so two quick gestures both
-    /// count, until the worker reports back (see [`pending_brightness`]).
+    /// The brightness the last step is expected to give (for the overlay text only; the worker
+    /// adds the step to a fresh read) and its sequence number. It lives across gestures so two
+    /// quick gestures both count, until the worker reports back (see [`pending_brightness`]).
     brightness_target: Option<(f32, u64)>,
 }
 
-/// The step target that is still waiting for the worker, or `None` once the worker has reported:
-/// a failed set, or the value we asked for. A report of an older value (a newer set is still
-/// queued) keeps the target.
+/// A cached brightness older than this is not shown as a percentage (the monitor's own buttons
+/// may have changed it since).
+const BRIGHTNESS_FRESH: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The step target that is still waiting for the worker, or `None` once the worker has finished
+/// with it (applied or failed). A report for an older step keeps a newer target.
 fn pending_brightness(
     target: Option<(f32, u64)>,
     status: &crate::os::brightness::WorkerStatus,
 ) -> Option<(f32, u64)> {
-    let (v, generation) = target?;
-    if status.generation == generation {
-        return target;
-    }
-    let applied = status.value.is_some_and(|c| (c - v).abs() < 0.005);
-    if status.error.is_none() && !applied {
-        target
-    } else {
-        None
-    }
+    let (_, seq) = target?;
+    (status.applied_seq < seq).then_some(target).flatten()
+}
+
+/// The percentage base for the overlay text: the expected value of a pending step, else the
+/// worker's last value while it is fresh. `None` when it would be a guess.
+fn brightness_base(
+    pending: Option<(f32, u64)>,
+    value: Option<f32>,
+    age: Option<std::time::Duration>,
+) -> Option<f32> {
+    pending
+        .map(|t| t.0)
+        .or_else(|| value.filter(|_| age.is_some_and(|a| a <= BRIGHTNESS_FRESH)))
 }
 
 impl SystemOps {
@@ -449,24 +456,28 @@ impl SystemOps {
         with_volume(|v| v.toggle_mute())
     }
 
-    /// Never blocks: the worker thread talks to the display. The first call only asks for a read.
-    fn brightness_step(&mut self, n: i8) -> Result<f32, String> {
+    /// Never blocks: the worker thread talks to the display. It reads the brightness fresh and adds
+    /// the step, so a change made with the monitor's own buttons is respected. The returned value
+    /// is only the expected result (`None` when the cached value is too old to say).
+    fn brightness_step(&mut self, n: i8) -> Result<Option<f32>, String> {
         let worker = self
             .brightness
             .get_or_insert_with(crate::os::brightness::BrightnessWorker::spawn);
         let status = worker.status();
         self.brightness_target = pending_brightness(self.brightness_target, &status);
-        let Some(current) = self.brightness_target.map(|t| t.0).or(status.value) else {
-            worker.refresh();
-            return Err(match status.error {
-                Some(_) => BRIGHTNESS_FAILED_NOTE.to_owned(),
-                None => BRIGHTNESS_UNKNOWN_NOTE.to_owned(),
-            });
-        };
-        let v = crate::os::volume::step_value(current, step_fraction(n));
-        worker.set(v);
-        self.brightness_target = Some((v, status.generation));
-        Ok(v)
+        let delta = step_fraction(n);
+        let base = brightness_base(
+            self.brightness_target,
+            status.value,
+            status.updated.map(|t| t.elapsed()),
+        );
+        let seq = worker.step(delta);
+        let expected = base.map(|b| crate::os::volume::step_value(b, delta));
+        self.brightness_target = expected.map(|v| (v, seq));
+        match (&status.error, status.value) {
+            (Some(_), None) => Err(BRIGHTNESS_FAILED_NOTE.to_owned()),
+            _ => Ok(expected),
+        }
     }
 }
 
@@ -553,21 +564,39 @@ mod tests {
 
     #[test]
     fn brightness_target_survives_until_the_worker_reports() {
-        let st = |value, generation, failed: bool| WorkerStatus {
-            value,
-            error: failed.then_some(crate::os::brightness::BrightnessError::Unsupported),
-            generation,
+        let st = |applied_seq| WorkerStatus {
+            applied_seq,
+            ..WorkerStatus::default()
         };
         let t = Some((0.6, 4));
-        // Nothing reported since the set: a second quick gesture steps from the target.
-        assert_eq!(pending_brightness(t, &st(Some(0.5), 4, false)), t);
-        // An earlier set landed while a newer one is queued: still pending.
-        assert_eq!(pending_brightness(t, &st(Some(0.55), 5, false)), t);
-        // The asked value was applied: the worker value is authoritative again.
-        assert_eq!(pending_brightness(t, &st(Some(0.6), 5, false)), None);
-        // A failed set drops the target.
-        assert_eq!(pending_brightness(t, &st(Some(0.5), 5, true)), None);
-        assert_eq!(pending_brightness(None, &st(None, 0, false)), None);
+        // Nothing finished since the step: a second quick gesture builds on the target.
+        assert_eq!(pending_brightness(t, &st(3)), t);
+        // A report (success or failure) for an older step must not drop a newer pending target.
+        let failed = WorkerStatus {
+            error: Some(crate::os::brightness::BrightnessError::Unsupported),
+            ..st(3)
+        };
+        assert_eq!(pending_brightness(t, &failed), t);
+        // The worker finished with it (or a newer one): the target is done.
+        assert_eq!(pending_brightness(t, &st(4)), None);
+        assert_eq!(pending_brightness(t, &st(5)), None);
+        assert_eq!(pending_brightness(None, &st(0)), None);
+    }
+
+    #[test]
+    fn brightness_base_ignores_a_stale_cache() {
+        use std::time::Duration;
+        let secs = |s| Some(Duration::from_secs(s));
+        // A pending step wins.
+        assert_eq!(
+            brightness_base(Some((0.7, 2)), Some(0.5), secs(60)),
+            Some(0.7)
+        );
+        // Fresh worker value is used, an old or unknown-age one is not.
+        assert_eq!(brightness_base(None, Some(0.5), secs(1)), Some(0.5));
+        assert_eq!(brightness_base(None, Some(0.5), secs(3)), None);
+        assert_eq!(brightness_base(None, Some(0.5), None), None);
+        assert_eq!(brightness_base(None, None, secs(0)), None);
     }
 
     use super::*;

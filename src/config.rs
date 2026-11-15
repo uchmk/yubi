@@ -324,9 +324,62 @@ impl Serialize for Action {
     }
 }
 
+/// An action value as written: a string, or something of the wrong type (replaced, not fatal).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TokenWire {
+    Text(String),
+    Other(serde::de::IgnoredAny),
+}
+
+/// A finger count as written: an integer, or something of the wrong type (the default is used).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CountWire {
+    Int(i64),
+    Other(serde::de::IgnoredAny),
+}
+
+/// Read a finger count leniently: a number out of the `u8` range saturates (the range check is
+/// [`Config::normalize`]'s job), anything else falls back to `default` with a note.
+fn lenient_count<'de, D: Deserializer<'de>>(d: D, what: &str, default: u8) -> Result<u8, D::Error> {
+    Ok(match CountWire::deserialize(d)? {
+        CountWire::Int(n) => n.clamp(0, i64::from(u8::MAX)) as u8,
+        CountWire::Other(_) => {
+            scan_note(|s| {
+                s.bad.push(format!(
+                    "{what}の値が整数ではないため、既定値 {default} を使います"
+                ));
+            });
+            default
+        }
+    })
+}
+
+fn drag_fingers<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    lenient_count(d, "ドラッグの指の本数", Drag::default().fingers)
+}
+
+fn long_hold_fingers<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    lenient_count(d, "長押しの指の本数", LongHold::default().fingers)
+}
+
+fn ring_fingers<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    lenient_count(d, "リングメニューの指の本数", Ring::default().fingers)
+}
+
 impl<'de> Deserialize<'de> for Action {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let token = String::deserialize(d)?;
+        let token = match TokenWire::deserialize(d)? {
+            TokenWire::Text(t) => t,
+            TokenWire::Other(_) => {
+                scan_note(|s| {
+                    s.bad
+                        .push("動作の値が文字列ではないため「なし」にしました".to_owned());
+                });
+                return Ok(Self::None);
+            }
+        };
         Ok(match Self::parse_token(&token) {
             TokenParse::Ok(a) => a,
             TokenParse::Legacy => {
@@ -349,6 +402,9 @@ struct Scan {
     brush_size: usize,
     /// Ready-made notes for values of the wrong type that were replaced by their default.
     bad: Vec<String>,
+    /// Whole-number sensitivity values the file held that do not fit the stored type, by their
+    /// Japanese name: the clamp report shows these, not the saturated stored value.
+    raw_nums: Vec<(&'static str, f64)>,
 }
 
 thread_local! {
@@ -366,7 +422,7 @@ pub struct Drag {
     #[serde(alias = "three_finger_drag")]
     pub enabled: bool,
     /// M1 name: `drag_fingers`.
-    #[serde(alias = "drag_fingers")]
+    #[serde(alias = "drag_fingers", deserialize_with = "drag_fingers")]
     pub fingers: u8,
     pub lift_timeout_ms: u16,
     pub keep_drag_on_release: bool,
@@ -479,6 +535,7 @@ impl Default for Press {
 #[serde(default)]
 pub struct LongHold {
     pub enabled: bool,
+    #[serde(deserialize_with = "long_hold_fingers")]
     pub fingers: u8,
     pub action: Action,
 }
@@ -798,7 +855,11 @@ impl EdgeTarget {
 #[serde(untagged)]
 enum EdgeWire {
     Name(String),
-    Custom { custom: CustomEdge },
+    Custom {
+        custom: CustomEdge,
+    },
+    /// Any other type (a number, a list ...): replaced by `none` with a note.
+    Other(serde::de::IgnoredAny),
 }
 
 #[derive(Serialize)]
@@ -852,6 +913,14 @@ impl<'de> Deserialize<'de> for EdgeTarget {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         Ok(match EdgeWire::deserialize(d)? {
             EdgeWire::Custom { custom } => Self::Custom(custom),
+            EdgeWire::Other(_) => {
+                scan_note(|s| {
+                    s.bad.push(
+                        "端のスライドの値が名前でも表でもないため「なし」にしました".to_owned(),
+                    );
+                });
+                Self::None
+            }
             EdgeWire::Name(n) => match Self::from_name(&n) {
                 Some(t) => t,
                 None => {
@@ -908,7 +977,9 @@ pub struct Profile {
     /// False switches yubi off for the app.
     pub enabled: bool,
     /// Per-gesture actions that replace the global ones in this app. The key is a gesture id
-    /// (`swipe.4.left`); an explicit `none` turns that gesture off here.
+    /// (`swipe.4.left`); an explicit `none` turns that gesture off here. Only the ids the engine
+    /// resolves are kept: tap, swipe, pinch (and `press.*`, which the pressure work will resolve).
+    /// `corner.*` and `hold.*` ids are dropped on load and rejected on import until they are.
     pub overrides: BTreeMap<String, Action>,
     /// Per-edge targets that replace the global ones (`edge.left`, `edge.right`, `edge.top`).
     pub edge_overrides: BTreeMap<String, EdgeTarget>,
@@ -918,6 +989,7 @@ pub struct Profile {
 #[serde(default)]
 pub struct Ring {
     pub enabled: bool,
+    #[serde(deserialize_with = "ring_fingers")]
     pub fingers: u8,
     pub items: Vec<RingItem>,
 }
@@ -1039,6 +1111,11 @@ impl<'de> Deserialize<'de> for Sensitivity {
         let ms = |key: &str, slot: &mut u16| {
             if let Some(n) = read(key) {
                 *slot = n.clamp(0.0, f64::from(u16::MAX)) as u16;
+                if !(0.0..=f64::from(u16::MAX)).contains(&n)
+                    && let Some(label) = Sensitivity::label_of(key)
+                {
+                    scan_note(|s| s.raw_nums.push((label, n)));
+                }
             }
         };
         f("drag_gain", &mut out.drag_gain);
@@ -1493,7 +1570,10 @@ fn finite_or(v: f32, fallback: f32) -> f32 {
 }
 
 /// Differences between the parsed and the normalized config, as Japanese notes.
-pub fn clamp_report(raw: &Config, norm: &Config) -> Vec<String> {
+///
+/// `raw_nums` holds numbers from the file that the parsed `raw` could not keep (a `u16`
+/// saturates): those are shown as written.
+fn clamp_report(raw: &Config, norm: &Config, raw_nums: &[(&'static str, f64)]) -> Vec<String> {
     let mut w = Vec::new();
     let mut note = |name: &str, before: String, after: String| {
         if before != after {
@@ -1528,7 +1608,11 @@ pub fn clamp_report(raw: &Config, norm: &Config) -> Vec<String> {
         .into_iter()
         .zip(norm.sensitivity.values())
     {
-        note(name, before.to_string(), after.to_string());
+        let before = raw_nums
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or_else(|| before.to_string(), |(_, v)| v.to_string());
+        note(name, before, after.to_string());
     }
     note(
         "軽い押し込みのしきい値",
@@ -1615,6 +1699,11 @@ pub struct Parsed {
     pub duplicate_profiles: Vec<String>,
     /// Profile override keys no config field backs (`exe: id`); they are dropped.
     pub unbindable_overrides: Vec<String>,
+    /// Profile override ids (`exe: id`) of gestures the engine does not resolve yet
+    /// (`corner.*`, `hold.*`); they are dropped.
+    pub inert_overrides: Vec<String>,
+    /// Profile override keys that are no gesture id or edge key at all (`exe: key`); dropped.
+    pub bad_override_keys: Vec<String>,
     /// The text was an older schema, or held entries that were rewritten: save it back.
     pub rewrite: bool,
 }
@@ -1647,6 +1736,7 @@ fn migrate_v1(root: &mut toml::Table, notes: &mut Vec<String>) {
         let old = std::mem::take(items);
         for item in old {
             let Value::Table(mut t) = item else {
+                notes.push("リングメニューの項目が表の形ではないため削除しました".to_owned());
                 continue;
             };
             let command = t.remove("command");
@@ -1744,12 +1834,25 @@ pub fn parse_text(text: &str) -> Result<Parsed, ParseError> {
             true
         }
     });
+    let mut bad_override_keys = Vec::new();
     let mut dropped_keys = Vec::new();
     for p in &mut config.profiles {
         let before = p.overrides.len() + p.edge_overrides.len();
-        p.overrides.retain(|k, _| GestureId::parse(k).is_some());
-        p.edge_overrides
-            .retain(|k, _| EDGE_KEYS.contains(&k.as_str()));
+        let exe = p.exe_name.trim().to_owned();
+        p.overrides.retain(|k, _| {
+            let ok = GestureId::parse(k).is_some();
+            if !ok {
+                bad_override_keys.push(format!("{exe}: {k}"));
+            }
+            ok
+        });
+        p.edge_overrides.retain(|k, _| {
+            let ok = EDGE_KEYS.contains(&k.as_str());
+            if !ok {
+                bad_override_keys.push(format!("{exe}: {k}"));
+            }
+            ok
+        });
         dropped_keys.push(before - (p.overrides.len() + p.edge_overrides.len()));
     }
 
@@ -1758,31 +1861,46 @@ pub fn parse_text(text: &str) -> Result<Parsed, ParseError> {
     // Overrides for ids that have a name but no global field (`tap.5`, `swipe.3.left` ...) could
     // never be resolved: drop them. Checked after normalizing so `press.N` / corner slots exist.
     let mut unbindable_overrides = Vec::new();
+    let mut inert_overrides = Vec::new();
     let mut profiles = std::mem::take(&mut config.profiles);
     for (p, dropped) in profiles.iter_mut().zip(dropped_keys) {
         let exe = p.exe_name.trim().to_owned();
         let before = p.overrides.len();
+        let mut inert = 0usize;
         p.overrides.retain(|k, _| {
+            // The engine resolves no corner or hold gesture yet: an override would do nothing.
+            if k.starts_with("corner.") || k.starts_with("hold.") {
+                inert_overrides.push(format!("{exe}: {k}"));
+                inert += 1;
+                return false;
+            }
             let ok = GestureId::parse(k).is_some_and(|id| config.binding(&id).is_some());
             if !ok {
                 unbindable_overrides.push(format!("{exe}: {k}"));
             }
             ok
         });
-        if dropped > 0 || p.overrides.len() != before {
+        if dropped > 0 || p.overrides.len() + inert != before {
             warnings.push(format!(
                 "「{exe}」のアプリ別設定にある未対応のジェスチャー名を削除しました"
             ));
         }
+        if inert > 0 {
+            warnings.push(format!(
+                "「{exe}」のアプリ別設定にあるコーナー・ホールドの項目は、まだ適用されないため削除しました"
+            ));
+        }
     }
     config.profiles = profiles;
-    warnings.extend(clamp_report(&raw, &config));
+    warnings.extend(clamp_report(&raw, &config, &scan.raw_nums));
     Ok(Parsed {
         config,
         warnings,
         unknown_tokens: scan.unknown,
         duplicate_profiles,
         unbindable_overrides,
+        inert_overrides,
+        bad_override_keys,
         rewrite: migrated || !scan.legacy.is_empty() || scan.brush_size > 0,
     })
 }
@@ -1826,19 +1944,57 @@ pub struct Loaded {
     pub warnings: Vec<String>,
     /// The file was written by a newer yubi: it is left untouched and must not be autosaved over.
     pub future_version: Option<u32>,
+    /// The file on disk is still the old layout and its backup copy failed: the first save must
+    /// retry the copy ([`backup_before_first_save`]) and must not happen while that fails.
+    pub needs_backup: bool,
+}
+
+/// Why [`save_migrated`] did not finish.
+struct MigrateFailure {
+    /// A Japanese note for the user.
+    note: String,
+    /// The old file is still on disk and has no backup yet.
+    backup_missing: bool,
 }
 
 /// Copy the original to `backup`, then save the migrated config over it. Without the copy nothing
 /// is saved. The error is a Japanese note for the user.
-fn save_migrated(path: &Path, cfg: &Config, backup: &Path) -> Result<(), String> {
-    fs::copy(path, backup).map_err(|e| {
-        format!(
-            "移行前の設定を控えられなかったため、移行後の設定は保存していません。この起動中だけ移行した設定を使います: {e}"
-        )
+fn save_migrated(path: &Path, cfg: &Config, backup: &Path) -> Result<(), MigrateFailure> {
+    fs::copy(path, backup).map_err(|e| MigrateFailure {
+        note: format!(
+            "移行前の設定を控えられなかったため、移行後の設定はまだ保存していません。控えを作れるまで、設定を変更しても保存しません（この起動中だけ移行した設定を使います）: {e}"
+        ),
+        backup_missing: true,
     })?;
-    save(path, cfg).map_err(|e| {
-        format!("移行した設定を保存できませんでした。元のファイルはそのまま残っています: {e}")
+    save(path, cfg).map_err(|e| MigrateFailure {
+        note: format!(
+            "移行した設定を保存できませんでした。元のファイルはそのまま残っています: {e}"
+        ),
+        backup_missing: false,
     })
+}
+
+/// The gate in front of the first save of a session that loaded an old file whose backup failed:
+/// retry the copy, and clear `needs_backup` once it worked. On `Err` the caller must not save
+/// (that would overwrite the old file with nothing kept). The error is a Japanese note.
+pub fn backup_before_first_save(path: &Path, needs_backup: &mut bool) -> Result<(), String> {
+    if !*needs_backup {
+        return Ok(());
+    }
+    if !path.exists() {
+        // The old file is gone: there is nothing left to protect.
+        *needs_backup = false;
+        return Ok(());
+    }
+    match fs::copy(path, unique_sibling(path, "v1")) {
+        Ok(_) => {
+            *needs_backup = false;
+            Ok(())
+        }
+        Err(e) => Err(format!(
+            "移行前の設定の控えを作れないため、設定の変更を保存していません。控えを作れるようになるまで保存しません: {e}"
+        )),
+    }
 }
 
 /// Load the config; a missing file yields defaults. A file that cannot be read or parsed is moved
@@ -1867,18 +2023,21 @@ pub fn load_report(path: &Path) -> Loaded {
                     "アプリ別設定「{d}」が重複しています。最初の設定だけを使います"
                 ));
             }
+            let mut needs_backup = false;
             if p.rewrite {
                 // Keep the original first; without that copy the migrated file is not saved
                 // (the migrated config still runs, in memory).
-                if let Err(w) = save_migrated(path, &p.config, &unique_sibling(path, "v1")) {
-                    eprintln!("yubi: {w}");
-                    warnings.push(w);
+                if let Err(f) = save_migrated(path, &p.config, &unique_sibling(path, "v1")) {
+                    eprintln!("yubi: {}", f.note);
+                    needs_backup = f.backup_missing;
+                    warnings.push(f.note);
                 }
             }
             Loaded {
                 config: p.config,
                 warnings,
                 future_version: None,
+                needs_backup,
             }
         }
         Err(ParseError::Syntax(e)) => {
@@ -2223,8 +2382,38 @@ items = [
         let cfg = parse_text(V1_FIXTURE).unwrap().config;
         let missing = dir.join("no-such-dir").join("config.toml.v1-1");
         let err = save_migrated(&path, &cfg, &missing).unwrap_err();
-        assert!(err.contains("控えられなかった"), "{err}");
+        assert!(err.note.contains("控えられなかった"), "{}", err.note);
+        assert!(err.note.contains("保存しません"), "{}", err.note);
+        assert!(err.backup_missing);
         assert_eq!(fs::read_to_string(&path).unwrap(), V1_FIXTURE);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn first_save_is_gated_on_the_backup() {
+        let dir = temp_dir("backup-gate");
+        let path = dir.join("config.toml");
+        // Nothing pending: always fine.
+        let mut pending = false;
+        assert!(backup_before_first_save(&path, &mut pending).is_ok());
+        // The copy still fails (the "file" is a directory): no save, flag stays.
+        fs::create_dir_all(&path).unwrap();
+        let mut pending = true;
+        let err = backup_before_first_save(&path, &mut pending).unwrap_err();
+        assert!(err.contains("保存していません"), "{err}");
+        assert!(pending);
+        fs::remove_dir_all(&path).unwrap();
+        // The copy works now: the old file is kept, the flag clears, a later save is allowed.
+        fs::write(&path, V1_FIXTURE).unwrap();
+        assert!(backup_before_first_save(&path, &mut pending).is_ok());
+        assert!(!pending);
+        let kept: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".v1-"))
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(fs::read_to_string(kept[0].path()).unwrap(), V1_FIXTURE);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2566,6 +2755,18 @@ swipe_mm = 20
         assert_eq!(s.drag_gain, Sensitivity::default().drag_gain);
         assert_eq!(s.swipe_mm, 20.0);
         assert!(p.warnings.iter().any(|w| w.contains("数値ではない")));
+        // The clamp report shows the number from the file, not the saturated stored one.
+        assert!(
+            p.warnings.iter().any(|w| w.contains("70000 は範囲外")),
+            "{:?}",
+            p.warnings
+        );
+        assert!(
+            p.warnings.iter().any(|w| w.contains("-5 は範囲外")),
+            "{:?}",
+            p.warnings
+        );
+        assert!(!p.warnings.iter().any(|w| w.contains("65535")));
         let p = parse_text(
             "schema_version = 2
 sensitivity = 5
@@ -2574,6 +2775,77 @@ sensitivity = 5
         .unwrap();
         assert_eq!(p.config.sensitivity, Sensitivity::default());
         assert_eq!(p.warnings.len(), 1);
+    }
+
+    #[test]
+    fn wrong_typed_action_edge_and_finger_values_do_not_reset_the_file() {
+        let p = parse_text(
+            "schema_version = 2
+gestures_enabled = false
+[four]
+swipe_up = 5
+swipe_down = \"find\"
+[edge]
+left = 5
+right = \"volume\"
+[drag]
+fingers = \"3\"
+[long_hold]
+fingers = true
+[ring]
+fingers = [1]
+",
+        )
+        .unwrap();
+        let c = &p.config;
+        assert!(!c.gestures_enabled);
+        assert_eq!(c.four.swipe_up, Action::None);
+        assert_eq!(c.four.swipe_down, Action::Find);
+        assert_eq!(c.edge.left, EdgeTarget::None);
+        assert_eq!(c.edge.right, EdgeTarget::Volume);
+        assert_eq!(c.drag.fingers, Drag::default().fingers);
+        assert_eq!(c.long_hold.fingers, LongHold::default().fingers);
+        assert_eq!(c.ring.fingers, Ring::default().fingers);
+        assert!(p.unknown_tokens.is_empty());
+        assert_eq!(p.warnings.len(), 5, "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn corner_and_hold_overrides_are_dropped_with_a_note() {
+        let p = parse_text(
+            "schema_version = 2
+[[profiles]]
+exe_name = \"a.exe\"
+[profiles.overrides]
+\"corner.br.swipe\" = \"find\"
+\"hold.long\" = \"find\"
+\"hold.thumb.index.swipe\" = \"find\"
+\"press.3.deep\" = \"find\"
+\"swipe.4.left\" = \"none\"
+",
+        )
+        .unwrap();
+        let keys: Vec<_> = p.config.profiles[0].overrides.keys().cloned().collect();
+        assert_eq!(keys, ["press.3.deep", "swipe.4.left"]);
+        assert_eq!(p.inert_overrides.len(), 3);
+        assert!(p.unbindable_overrides.is_empty());
+        assert!(p.warnings.iter().any(|w| w.contains("コーナー・ホールド")));
+    }
+
+    #[test]
+    fn non_table_ring_item_is_reported_on_migration() {
+        let p = parse_text(
+            "[ring]
+items = [5, { label = \"ok\", command = \"ctrl+c\" }]
+",
+        )
+        .unwrap();
+        assert_eq!(p.config.ring.items.len(), 1);
+        assert!(
+            p.warnings.iter().any(|w| w.contains("表の形ではない")),
+            "{:?}",
+            p.warnings
+        );
     }
 
     #[test]

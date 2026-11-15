@@ -391,7 +391,7 @@ fn undo_apply(
         return Err(READ_ONLY_REASON.to_owned());
     }
     let mut restored = match &u.backup {
-        Some(b) => config_io::import_from(b)
+        Some(b) => config_io::restore_from(b)
             .map(|i| i.config)
             .map_err(|e| e.to_string())?,
         None => u.previous.clone(),
@@ -633,6 +633,36 @@ mod tests {
         undo_apply(&mut live, &path, &undo, false).unwrap();
         assert_eq!(live.drag.fingers, 4);
         assert_eq!(config::load(&path).drag.fingers, 4);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_restores_a_backup_the_strict_import_would_refuse() {
+        let dir = temp_dir("undo-tolerant");
+        let path = dir.join("config.toml");
+        // Loads fine (with warnings) but import_from would reject it.
+        fs::write(
+            &path,
+            "schema_version = 2
+[drag]
+fingers = 5
+[four]
+swipe_up = \"teleport\"
+[[profiles]]
+exe_name = \"a.exe\"
+[[profiles]]
+exe_name = \"A.EXE\"
+",
+        )
+        .unwrap();
+        assert!(config_io::import_from(&path).is_err());
+        let mut live = config::load(&path);
+        let undo = apply_import(&mut live, &path, &Config::default(), false).unwrap();
+        assert_eq!(live.drag.fingers, 3);
+        undo_apply(&mut live, &path, &undo, false).unwrap();
+        assert_eq!(live.drag.fingers, 5);
+        assert_eq!(live.four.swipe_up, Action::None);
+        assert_eq!(live.profiles.len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -17,7 +17,7 @@
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Devices::Display::{
     DestroyPhysicalMonitors, GetMonitorBrightness, GetNumberOfPhysicalMonitorsFromHMONITOR,
@@ -366,43 +366,50 @@ impl Brightness {
 // ---------------------------------------------------------------------------------------------
 // Worker
 
-/// Latest-value-wins mailbox shared with the worker thread.
+/// Work for the worker thread. Steps are relative and add up, so two quick gestures both count and
+/// the base is always a fresh read taken by the worker (a change made with the monitor's own
+/// buttons is never overwritten with a stale value).
 #[derive(Debug, Default, PartialEq)]
 struct Mailbox {
-    pending_set: Option<f32>,
-    want_read: bool,
+    /// Sum of the steps not taken yet, as a fraction of the full range.
+    pending_step: Option<f32>,
+    /// Counts every queued step.
+    seq: u64,
     quit: bool,
 }
 
 impl Mailbox {
-    /// Queue a set; replaces any set not yet taken.
-    fn push_set(&mut self, v: f32) {
-        self.pending_set = Some(v.clamp(0.0, 1.0));
+    /// Queue a step (added to one not yet taken). Returns its sequence number.
+    fn push_step(&mut self, delta: f32) -> u64 {
+        let sum = self.pending_step.unwrap_or(0.0) + delta;
+        self.pending_step = Some(sum.clamp(-1.0, 1.0));
+        self.seq += 1;
+        self.seq
     }
 
     fn has_work(&self) -> bool {
-        self.pending_set.is_some() || self.want_read || self.quit
+        self.pending_step.is_some() || self.quit
     }
 
-    /// Take the pending work: (set to apply, read requested, quit).
-    fn take(&mut self) -> (Option<f32>, bool, bool) {
-        (
-            self.pending_set.take(),
-            std::mem::take(&mut self.want_read),
-            self.quit,
-        )
+    /// Take the pending work: (step to apply with the sequence number of the newest step in it,
+    /// quit).
+    fn take(&mut self) -> (Option<(f32, u64)>, bool) {
+        (self.pending_step.take().map(|d| (d, self.seq)), self.quit)
     }
 }
 
 /// What the worker last learned.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WorkerStatus {
-    /// Last known brightness 0.0..=1.0 (after a read or a successful set).
+    /// Last known brightness 0.0..=1.0 (after a successful step).
     pub value: Option<f32>,
+    /// When `value` was learned.
+    pub updated: Option<Instant>,
     /// Last error, cleared by the next success.
     pub error: Option<BrightnessError>,
-    /// Counts every report of the worker (a read or a set, successful or not).
-    pub generation: u64,
+    /// The newest step sequence number the worker has finished with (applied or failed). A step
+    /// with a higher number is still waiting.
+    pub applied_seq: u64,
 }
 
 type Shared = Arc<(Mutex<Mailbox>, Condvar)>;
@@ -445,18 +452,14 @@ impl BrightnessWorker {
         }
     }
 
-    /// Queue a set. Never blocks; a set still queued is replaced.
-    pub fn set(&self, v: f32) {
+    /// Queue a relative step (a fraction of the range). Never blocks. The worker reads the
+    /// brightness fresh, adds the step and sets it. Returns the step's sequence number (compare
+    /// with [`WorkerStatus::applied_seq`]).
+    pub fn step(&self, delta: f32) -> u64 {
         let (m, cv) = &*self.shared;
-        m.lock().unwrap_or_else(|e| e.into_inner()).push_set(v);
+        let seq = m.lock().unwrap_or_else(|e| e.into_inner()).push_step(delta);
         cv.notify_one();
-    }
-
-    /// Ask the worker to read the current brightness into [`status`](Self::status).
-    pub fn refresh(&self) {
-        let (m, cv) = &*self.shared;
-        m.lock().unwrap_or_else(|e| e.into_inner()).want_read = true;
-        cv.notify_one();
+        seq
     }
 
     pub fn status(&self) -> WorkerStatus {
@@ -491,7 +494,7 @@ fn worker_main(shared: Shared, status: Arc<Mutex<WorkerStatus>>) {
     let (m, cv) = &*shared;
     let mut dev: Option<Brightness> = None;
     loop {
-        let (set, read, quit) = {
+        let (step, quit) = {
             let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
             while !g.has_work() {
                 g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
@@ -506,19 +509,22 @@ fn worker_main(shared: Shared, status: Arc<Mutex<WorkerStatus>>) {
                 dev = Some(Brightness::open()?);
             }
             let d = dev.as_ref().ok_or(BrightnessError::Unsupported)?;
-            match set {
-                Some(v) => d.set(v).map(|()| Some(v)),
-                None if read => d.get().map(Some),
+            match step {
+                Some((delta, _)) => {
+                    let v = step_value(d.get()?, delta);
+                    d.set(v).map(|()| Some(v))
+                }
                 None => Ok(None),
             }
         })();
         let mut st = status.lock().unwrap_or_else(|e| e.into_inner());
-        if result.as_ref().map_or(true, Option::is_some) {
-            st.generation += 1;
+        if let Some((_, seq)) = step {
+            st.applied_seq = seq;
         }
         match result {
             Ok(Some(v)) => {
                 st.value = Some(v);
+                st.updated = Some(Instant::now());
                 st.error = None;
             }
             Ok(None) => {}
@@ -561,18 +567,24 @@ mod tests {
     }
 
     #[test]
-    fn mailbox_coalesces_sets() {
+    fn mailbox_adds_steps_and_numbers_them() {
         let mut m = Mailbox::default();
         assert!(!m.has_work());
-        for i in 0..100 {
-            m.push_set(i as f32 / 100.0);
-        }
-        m.push_set(7.0);
+        assert_eq!(m.push_step(0.05), 1);
+        assert_eq!(m.push_step(0.05), 2);
+        assert_eq!(m.push_step(-0.02), 3);
         assert!(m.has_work());
-        assert_eq!(m.take(), (Some(1.0), false, false));
+        let (step, quit) = m.take();
+        let (d, seq) = step.unwrap();
+        assert!((d - 0.08).abs() < 1e-6, "{d}");
+        assert_eq!(seq, 3);
+        assert!(!quit);
         assert!(!m.has_work());
-        m.want_read = true;
-        assert_eq!(m.take(), (None, true, false));
+        // The sum is bounded, and numbering goes on.
+        m.push_step(5.0);
+        assert_eq!(m.take().0, Some((1.0, 4)));
+        m.quit = true;
+        assert_eq!(m.take(), (None, true));
     }
 
     /// Manual: `cargo test -- --ignored brightness_roundtrip --nocapture`.

@@ -430,7 +430,7 @@ impl Worker {
         let actions = if self.enabled {
             // The app is decided once per touch session: look it up right before the first
             // contact of a session reaches the recognizer, which latches it.
-            if touch_began(self.prev_contacts, frame.contacts.len()) {
+            if touch_began(self.prev_contacts, active_contacts(&frame)) {
                 self.poll_foreground(true);
             }
             self.recognizer.step(&frame, &self.cfg)
@@ -440,7 +440,7 @@ impl Worker {
         if self.log {
             eprintln!("yubi: frame {:?}", frame);
         }
-        self.prev_contacts = frame.contacts.len();
+        self.prev_contacts = active_contacts(&frame);
         let snap = self.recognizer.snapshot();
         self.with_state(|s| {
             s.frames_total += 1;
@@ -526,6 +526,16 @@ impl Worker {
     }
 }
 
+/// The contacts the recognizer starts sessions from (the same predicate as its own filter): a
+/// resting palm or a low-confidence contact does not count.
+fn active_contacts(frame: &Frame) -> usize {
+    frame
+        .contacts
+        .iter()
+        .filter(|c| c.tip && c.confidence)
+        .count()
+}
+
 /// True on the frame where a touch begins: the previous frame had no contact, this one has.
 fn touch_began(prev: usize, now: usize) -> bool {
     prev == 0 && now > 0
@@ -542,6 +552,38 @@ mod tests {
         assert!(!touch_began(2, 3));
         assert!(!touch_began(3, 0));
         assert!(!touch_began(0, 0));
+    }
+
+    #[test]
+    fn a_resting_palm_does_not_hide_the_touch_begin() {
+        use super::{Frame, active_contacts, touch_began};
+        use crate::input::Contact;
+        let c = |id, tip, confidence| Contact {
+            id,
+            x: 0.0,
+            y: 0.0,
+            x_mm: 0.0,
+            y_mm: 0.0,
+            tip,
+            confidence,
+            pressure: None,
+        };
+        let frame = |contacts| Frame {
+            t_us: 0,
+            button: false,
+            contacts,
+        };
+        // A palm that is not a tip, and one the hardware is unsure of.
+        let palm = frame(vec![c(1, false, true), c(2, true, false)]);
+        assert_eq!(active_contacts(&palm), 0);
+        // Fingers land while the palm rests: the raw count is already > 0, the active count is not.
+        let touch = frame(vec![c(1, false, true), c(3, true, true), c(4, true, true)]);
+        assert_eq!(touch.contacts.len(), 3);
+        assert!(touch_began(active_contacts(&palm), active_contacts(&touch)));
+        assert!(!touch_began(
+            active_contacts(&touch),
+            active_contacts(&touch)
+        ));
     }
 
     use super::*;

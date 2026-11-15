@@ -34,6 +34,10 @@ pub enum ConfigIoError {
     DuplicateProfile(String),
     /// A per-app setting for a gesture that has no global setting (`exe: id`).
     UnbindableOverride(String),
+    /// A per-app setting for a gesture the engine does not resolve yet (`exe: id`).
+    InertOverride(String),
+    /// A per-app setting whose key is no gesture id or edge key (`exe: key`).
+    BadOverrideKey(String),
 }
 
 impl fmt::Display for ConfigIoError {
@@ -61,6 +65,14 @@ impl fmt::Display for ConfigIoError {
             Self::UnbindableOverride(k) => write!(
                 f,
                 "アプリ別の設定「{k}」は割り当てられないジェスチャーです。読み込みを中止しました"
+            ),
+            Self::InertOverride(k) => write!(
+                f,
+                "アプリ別の設定「{k}」のコーナー・ホールドは、まだ適用されません。読み込みを中止しました"
+            ),
+            Self::BadOverrideKey(k) => write!(
+                f,
+                "アプリ別の設定「{k}」はジェスチャー名として読み取れません。読み込みを中止しました"
             ),
         }
     }
@@ -143,6 +155,21 @@ pub fn export_to(path: &Path, cfg: &Config) -> Result<()> {
 
 /// Parse a config file for import. Rejects files over [`MAX_IMPORT_BYTES`].
 pub fn import_from(path: &Path) -> Result<Imported> {
+    parse_import(&read_limited(path)?)
+}
+
+/// Read a backup the app wrote itself (undo). It goes through the same tolerant parse as the normal
+/// load: a file the app started with must be restorable, so unknown tokens, duplicate profiles and
+/// bad overrides are only reported in `warnings`. A newer `schema_version` is still refused.
+pub fn restore_from(path: &Path) -> Result<Imported> {
+    let parsed = parse_tolerant(&read_limited(path)?)?;
+    Ok(Imported {
+        config: parsed.config,
+        warnings: parsed.warnings,
+    })
+}
+
+fn read_limited(path: &Path) -> Result<String> {
     let len = fs::metadata(path)?.len();
     if len > MAX_IMPORT_BYTES {
         return Err(ConfigIoError::TooLarge(len));
@@ -154,15 +181,18 @@ pub fn import_from(path: &Path) -> Result<Imported> {
     if buf.len() as u64 > MAX_IMPORT_BYTES {
         return Err(ConfigIoError::TooLarge(buf.len() as u64));
     }
-    let text = String::from_utf8(buf).map_err(|e| ConfigIoError::Parse(e.to_string()))?;
-    parse_import(&text)
+    String::from_utf8(buf).map_err(|e| ConfigIoError::Parse(e.to_string()))
+}
+
+fn parse_tolerant(text: &str) -> Result<config::Parsed> {
+    config::parse_text(text).map_err(|e| match e {
+        config::ParseError::Syntax(m) => ConfigIoError::Parse(m),
+        config::ParseError::FutureVersion(v) => ConfigIoError::FutureVersion(v),
+    })
 }
 
 fn parse_import(text: &str) -> Result<Imported> {
-    let parsed = config::parse_text(text).map_err(|e| match e {
-        config::ParseError::Syntax(m) => ConfigIoError::Parse(m),
-        config::ParseError::FutureVersion(v) => ConfigIoError::FutureVersion(v),
-    })?;
+    let parsed = parse_tolerant(text)?;
     // An import is a deliberate act: a token this build cannot read, or a profile that appears
     // twice, would silently change what the user meant, so the file is refused (load only warns).
     if let Some(token) = parsed.unknown_tokens.first() {
@@ -173,6 +203,12 @@ fn parse_import(text: &str) -> Result<Imported> {
     }
     if let Some(k) = parsed.unbindable_overrides.first() {
         return Err(ConfigIoError::UnbindableOverride(k.clone()));
+    }
+    if let Some(k) = parsed.inert_overrides.first() {
+        return Err(ConfigIoError::InertOverride(k.clone()));
+    }
+    if let Some(k) = parsed.bad_override_keys.first() {
+        return Err(ConfigIoError::BadOverrideKey(k.clone()));
     }
     Ok(Imported {
         config: parsed.config,
@@ -326,6 +362,38 @@ exe_name = \"a.exe\"
         )
         .unwrap_err();
         assert!(matches!(&err, ConfigIoError::UnbindableOverride(k) if k.contains("swipe.3.left")));
+        let err = parse_import(
+            "schema_version = 2
+[[profiles]]
+exe_name = \"a.exe\"
+[profiles.overrides]
+\"corner.br.swipe\" = \"none\"
+",
+        )
+        .unwrap_err();
+        assert!(matches!(&err, ConfigIoError::InertOverride(k) if k.contains("corner.br.swipe")));
+        let err = parse_import(
+            "schema_version = 2
+[[profiles]]
+exe_name = \"a.exe\"
+[profiles.overrides]
+\"hold.thumb.index.swipe\" = \"none\"
+",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigIoError::InertOverride(_)));
+        let err = parse_import(
+            "schema_version = 2
+[[profiles]]
+exe_name = \"a.exe\"
+[profiles.overrides]
+\"nonsense\" = \"none\"
+[profiles.edge_overrides]
+\"edge.bottom\" = \"none\"
+",
+        )
+        .unwrap_err();
+        assert!(matches!(&err, ConfigIoError::BadOverrideKey(k) if k.contains("nonsense")));
         // Legacy tokens and brush_size are not errors: they load as none and are reported.
         let got = parse_import(
             "schema_version = 2
@@ -347,6 +415,42 @@ hold_ms = 700
         .unwrap();
         assert_eq!(got.config.sensitivity.hold_ms, 700);
         assert_eq!(got.config.schema_version, 2);
+    }
+
+    #[test]
+    fn restore_is_tolerant_but_refuses_future_versions() {
+        let dir = temp_dir("restore");
+        let path = dir.join("backup.toml");
+        fs::write(
+            &path,
+            "schema_version = 2
+[four]
+swipe_up = \"teleport\"
+[[profiles]]
+exe_name = \"a.exe\"
+[profiles.overrides]
+\"corner.br.swipe\" = \"none\"
+[[profiles]]
+exe_name = \"A.EXE\"
+",
+        )
+        .unwrap();
+        assert!(import_from(&path).is_err());
+        let got = restore_from(&path).unwrap();
+        assert_eq!(got.config.four.swipe_up, crate::config::Action::None);
+        assert_eq!(got.config.profiles.len(), 1);
+        assert!(!got.warnings.is_empty());
+        fs::write(
+            &path,
+            "schema_version = 9
+",
+        )
+        .unwrap();
+        assert!(matches!(
+            restore_from(&path),
+            Err(ConfigIoError::FutureVersion(9))
+        ));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

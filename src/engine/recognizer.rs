@@ -144,6 +144,16 @@ impl Recognizer {
         out
     }
 
+    /// The cursor freeze was lost (watchdog): end a committed edge slide or an open ring cleanly.
+    /// The fingers do nothing more until all are lifted. Empty when neither is in flight.
+    pub fn abort_freeze(&mut self) -> Vec<Action> {
+        let mut out = Vec::new();
+        if self.edge.is_committed() || self.ring.is_open() {
+            self.cancel_touch(&mut out);
+        }
+        out
+    }
+
     /// What the current touch session latched at its first raw touchdown.
     #[allow(dead_code, reason = "read by tests and the gestures that come next")]
     pub fn latched(&self) -> Option<&Environment> {

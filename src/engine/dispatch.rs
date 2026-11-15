@@ -205,23 +205,41 @@ impl Suppression {
         None
     }
 
-    /// Keep the hook's lease alive; called every engine loop while a freeze is wanted.
-    fn renew(&self) {
+    /// True when the hook cancelled the freeze on its own (watchdog or emergency combo) while
+    /// one was wanted. `set(Off)` clears it.
+    fn lost(&self) -> bool {
+        #[cfg(all(windows, not(test)))]
+        if self.mode != Suppress::Off
+            && let Some(h) = &self.hook
+        {
+            return h.watchdog_tripped();
+        }
+        false
+    }
+
+    /// Keep the hook's lease alive; called every engine loop while a freeze is wanted. `alive`:
+    /// a finger is on the pad and a fresh frame just arrived, which restarts the hook's 10 s
+    /// watchdog window (a slow slide may last longer; the hook keeps an absolute cap).
+    fn renew(&self, alive: bool) {
         #[cfg(all(windows, not(test)))]
         if self.mode != Suppress::Off
             && let Some(h) = &self.hook
         {
             // The lease may have run out while this thread was stalled (the first overlay or
             // hook start blocks): the hook then dropped to Off on its own. Assert the mode
-            // again (this renews too). A watchdog downgrade stays downgraded inside `set_mode`.
-            // Note: the 10 s freeze watchdog is a safety net; a committed edge slide longer than
-            // that unfreezes, and the engine is not told (the state is not observed here).
+            // again (this renews too). A watchdog downgrade stays downgraded inside `set_mode`;
+            // the engine learns of it through `lost` (`freeze_lost`) and ends the gesture.
             let want = hook_mode(self.mode);
             if h.mode() != want {
                 h.set_mode(want);
             }
             h.renew();
+            if alive {
+                h.touch_alive();
+            }
         }
+        #[cfg(not(all(windows, not(test))))]
+        let _ = alive;
     }
 }
 
@@ -384,8 +402,14 @@ impl Dispatcher {
     }
 
     /// Keep the cursor freeze alive (the hook's lease is short). Call it every engine loop.
-    pub fn renew_suppression(&self) {
-        self.suppression.renew();
+    pub fn renew_suppression(&self, alive: bool) {
+        self.suppression.renew(alive);
+    }
+
+    /// True while the hook has cancelled the cursor freeze by itself (watchdog, emergency combo).
+    /// The engine then ends the edge slide / ring.
+    pub fn freeze_lost(&self) -> bool {
+        self.suppression.lost()
     }
 
     /// True once if the ring overlay could not be shown (the engine then cancels the ring).

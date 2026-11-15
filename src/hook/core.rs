@@ -116,6 +116,9 @@ pub struct LlEvent {
     pub t_us: i64,
 }
 
+/// Longest continuous freeze even with live touches (a slow volume slide stays far below it).
+pub const ABS_MAX_FREEZE_US: i64 = 120_000_000;
+
 /// Button ledger (who decides what, for each button event):
 ///
 /// * **Forwarded down**: a non-yubi down that arrives while the mode does not hold it (Off,
@@ -145,7 +148,14 @@ pub struct HookState {
     pub hold_mask: u8,
     /// First event time while a freeze mode was active.
     freeze_since: Option<i64>,
+    /// Same start, but never moved by a live-touch ping: the absolute cap counts from here.
+    freeze_abs_since: Option<i64>,
     pub max_freeze_us: i64,
+    /// Longest a freeze may last even while the engine keeps proving a live touch.
+    pub abs_max_freeze_us: i64,
+    /// Time of the engine's last "a finger is on the pad" ping ([`i64::MIN`] = never). The idle
+    /// window of the watchdog counts from the later of the freeze start and this.
+    pub last_alive_us: i64,
     /// Set by `decide` when the freeze exceeded the limit; the caller must switch to `Off`,
     /// report `Watchdog` and call [`HookState::ack_watchdog`].
     pub watchdog_tripped: bool,
@@ -160,7 +170,10 @@ impl HookState {
             held: 0,
             hold_mask,
             freeze_since: None,
+            freeze_abs_since: None,
             max_freeze_us: (max_freeze_ms.min(i64::MAX as u64 / 1000) * 1000) as i64,
+            abs_max_freeze_us: ABS_MAX_FREEZE_US,
+            last_alive_us: i64::MIN,
             watchdog_tripped: false,
             lease_expired: false,
         }
@@ -169,16 +182,19 @@ impl HookState {
     /// Forget the freeze start (call when the mode was changed from outside).
     pub fn reset_freeze(&mut self) {
         self.freeze_since = None;
+        self.freeze_abs_since = None;
     }
 
     pub fn ack_lease(&mut self) {
         self.lease_expired = false;
         self.freeze_since = None;
+        self.freeze_abs_since = None;
     }
 
     pub fn ack_watchdog(&mut self) {
         self.watchdog_tripped = false;
         self.freeze_since = None;
+        self.freeze_abs_since = None;
     }
 }
 
@@ -195,11 +211,18 @@ pub fn decide(state: &mut HookState, mode: Mode, lease_until_us: i64, ev: LlEven
     // Safety valve: a freeze mode that outlives `max_freeze_us` is cancelled.
     if mode.freezes() {
         let since = *state.freeze_since.get_or_insert(ev.t_us);
-        if ev.t_us - since > state.max_freeze_us {
+        let abs_since = *state.freeze_abs_since.get_or_insert(ev.t_us);
+        // A live touch proves the freeze is still wanted: it restarts the idle window. The
+        // absolute cap is the last net for a stuck engine that fakes live touches.
+        let idle_since = since.max(state.last_alive_us);
+        if ev.t_us - idle_since > state.max_freeze_us
+            || ev.t_us - abs_since > state.abs_max_freeze_us.max(state.max_freeze_us)
+        {
             state.watchdog_tripped = true;
         }
     } else {
         state.freeze_since = None;
+        state.freeze_abs_since = None;
     }
     if state.watchdog_tripped {
         mode = Mode::Off;
@@ -511,6 +534,53 @@ mod tests {
         assert_eq!(
             decide(&mut s, Mode::FreezeCursor, FAR, ev(LlKind::Move, 300_000)),
             Verdict::Swallow
+        );
+    }
+
+    fn run_pings(s: &mut HookState, ping: bool, from_us: i64, until_us: i64) -> Option<i64> {
+        // A move every 100 ms; a ping (at the same time) when `ping`.
+        let mut t = from_us;
+        while t <= until_us {
+            if ping {
+                s.last_alive_us = t;
+            }
+            decide(s, Mode::FreezeCursor, i64::MAX, ev(LlKind::Move, t));
+            if s.watchdog_tripped {
+                return Some(t);
+            }
+            t += 100_000;
+        }
+        None
+    }
+
+    #[test]
+    fn alive_pings_keep_a_long_freeze() {
+        let mut s = HookState::new(Button::ALL, 10_000);
+        assert_eq!(run_pings(&mut s, true, 0, 30_000_000), None);
+    }
+
+    #[test]
+    fn freeze_without_pings_trips_at_ten_seconds() {
+        let mut s = HookState::new(Button::ALL, 10_000);
+        let t = run_pings(&mut s, false, 0, 30_000_000).unwrap();
+        assert!((10_000_000..10_200_000).contains(&t), "{t}");
+    }
+
+    #[test]
+    fn pings_stopping_trip_ten_seconds_after_the_last() {
+        let mut s = HookState::new(Button::ALL, 10_000);
+        assert_eq!(run_pings(&mut s, true, 0, 20_000_000), None);
+        let t = run_pings(&mut s, false, 20_100_000, 40_000_000).unwrap();
+        assert!((30_000_000..30_300_000).contains(&t), "{t}");
+    }
+
+    #[test]
+    fn alive_pings_do_not_beat_the_absolute_cap() {
+        let mut s = HookState::new(Button::ALL, 10_000);
+        let t = run_pings(&mut s, true, 0, 200_000_000).unwrap();
+        assert!(
+            (ABS_MAX_FREEZE_US..ABS_MAX_FREEZE_US + 200_000).contains(&t),
+            "{t}"
         );
     }
 

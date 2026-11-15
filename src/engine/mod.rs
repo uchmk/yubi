@@ -38,6 +38,7 @@ use dispatch::Dispatcher;
 use executor::Executor;
 use pause::PauseCtl;
 use recognizer::{Action, GestureEvent, Recognizer};
+use types::Suppress;
 
 #[cfg(windows)]
 type Sink = executor::SendInputSink;
@@ -60,6 +61,11 @@ const RING_POLL: Duration = Duration::from_millis(30);
 
 /// How often the foreground app is looked up while yubi runs.
 const FOREGROUND_POLL: Duration = Duration::from_millis(500);
+
+/// A freeze counts as held by a live touch if a frame arrived within this.
+const ALIVE_FRAME_MAX_AGE: Duration = Duration::from_millis(200);
+/// Shown when the hook cancelled the cursor freeze by itself.
+const FREEZE_LOST_NOTE: &str = "安全のためカーソルの固定を解除しました";
 
 /// How often a refused button release is retried.
 const RELEASE_RETRY: Duration = Duration::from_millis(100);
@@ -242,6 +248,7 @@ impl Engine {
             ),
             manage_cursor,
             prev_contacts: 0,
+            last_frame_at: None,
             last_release_retry: None,
             haptics: None,
             cfg: Config::default(),
@@ -320,6 +327,8 @@ struct Worker {
     manage_cursor: bool,
     /// Contacts in the previous frame (a touch begins when this is 0 and the next frame is not).
     prev_contacts: usize,
+    /// When the last trackpad frame arrived (a freeze is only kept alive by a live touch).
+    last_frame_at: Option<Instant>,
     last_release_retry: Option<Instant>,
     /// Started on the first press tick that needs it.
     haptics: Option<crate::haptic::Haptics>,
@@ -375,7 +384,23 @@ impl Worker {
                 }
             }
             // The mouse hook's lease is short: keep a cursor freeze alive while it is wanted.
-            self.dispatch.renew_suppression();
+            let alive = self.recognizer.active()
+                && self
+                    .last_frame_at
+                    .is_some_and(|t| t.elapsed() < ALIVE_FRAME_MAX_AGE);
+            self.dispatch.renew_suppression(alive);
+            if self.dispatch.freeze_lost() {
+                // The hook's watchdog released the cursor: end the slide / ring, stop its steps.
+                let mut actions = self.recognizer.abort_freeze();
+                // Always let go of the freeze, even when no slide / ring claimed it, so the
+                // hook's latch clears and this does not repeat every loop.
+                if !actions.contains(&Action::Suppress(Suppress::Off)) {
+                    actions.push(Action::Suppress(Suppress::Off));
+                }
+                self.apply(actions);
+                self.with_state(|s| s.last_action = Some(FREEZE_LOST_NOTE.to_owned()));
+                (self.wake)();
+            }
             self.poll_foreground(false);
             self.retry_release();
         }
@@ -506,6 +531,7 @@ impl Worker {
 
     fn on_frame(&mut self, f: TouchFrame) {
         let frame = Frame::from(&f);
+        self.last_frame_at = Some(Instant::now());
         if let Some(w) = self.recorder.as_mut()
             && let Err(e) = replay::write_frame(w, &frame)
         {

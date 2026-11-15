@@ -350,6 +350,29 @@ mod tests {
     }
 
     #[test]
+    fn lost_freeze_ends_the_slide_and_stops_the_steps() {
+        let cfg = cfg_with(EdgeTarget::Volume, EdgeTarget::None, EdgeTarget::None);
+        let (mut r, cfg) = recognizer(&cfg);
+        let frames = slide((3.0, 80.0), (3.0, 60.0));
+        let mut out = Vec::new();
+        for f in &frames {
+            out.extend(r.step(f, &cfg));
+        }
+        assert!(!steps(&out).is_empty());
+        // The hook's watchdog cancelled the freeze: the engine aborts the slide.
+        let abort = r.abort_freeze();
+        assert_eq!(suppress(&abort), vec![Suppress::Off]);
+        // The finger keeps sliding for 10 s more: nothing is emitted any more.
+        let mut after = Vec::new();
+        for i in 0..1000u64 {
+            let y = 60.0 - (i as f32 * 0.02);
+            after.extend(r.step(&frame(400 + i * 10, vec![c(3.0, y)]), &cfg));
+        }
+        assert!(steps(&after).is_empty(), "{after:?}");
+        assert!(r.abort_freeze().is_empty());
+    }
+
+    #[test]
     fn steps_accumulate_both_ways_without_losing_travel() {
         let cfg = cfg_with(EdgeTarget::Volume, EdgeTarget::None, EdgeTarget::None);
         let mut frames = slide((3.0, 80.0), (3.0, 66.0)); // 14 mm up: 7 steps

@@ -97,6 +97,8 @@ struct Shared {
     epoch: AtomicU32,
     /// Set when the watchdog fired; cleared by `set_mode(Off)`.
     watchdog_latched: AtomicBool,
+    /// QPC microseconds of the last `touch_alive`; 0 = never.
+    alive_us: AtomicI64,
     /// Mirror of `HookState::held` for the engine.
     held: AtomicU8,
     installed: AtomicBool,
@@ -198,6 +200,10 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
             ctx.state.reset_freeze();
         }
         ctx.state.hold_mask = sh.hold_mask.load(SeqCst);
+        ctx.state.last_alive_us = match sh.alive_us.load(SeqCst) {
+            0 => i64::MIN,
+            t => t,
+        };
         ctx.state.max_freeze_us = (sh.max_freeze_ms.load(SeqCst).min(1 << 40) * 1000) as i64;
         let mode = Mode::from_u8(sh.mode.load(SeqCst));
         let lease_us = (sh.lease_ms.load(SeqCst).min(1 << 40) * 1000) as i64;
@@ -432,6 +438,18 @@ impl Hook {
     /// every fresh input frame while suppression is needed.
     pub fn renew(&self) {
         self.shared.last_renew_us.store(now_us(), SeqCst);
+    }
+
+    /// The engine saw a finger on the pad just now: restart the watchdog's idle window (the
+    /// absolute cap still applies). Lock-free; call it with `renew` while a live touch holds
+    /// the freeze. Without it a freeze still trips after `max_freeze_ms`.
+    pub fn touch_alive(&self) {
+        self.shared.alive_us.store(now_us().max(1), SeqCst);
+    }
+
+    /// True from the moment the watchdog fired (or the emergency combo) until `set_mode(Off)`.
+    pub fn watchdog_tripped(&self) -> bool {
+        self.shared.watchdog_latched.load(SeqCst)
     }
 
     /// Lease length (default [`DEFAULT_LEASE_MS`]).

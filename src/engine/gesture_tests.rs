@@ -1,9 +1,9 @@
 //! Gesture tests over synthetic frame sequences (11 ms steps, like the real device).
 
 use super::Frame;
-use super::dispatch::app_blocked;
 use super::recognizer::{Action, SnapDir, Thresholds};
 use super::replay;
+use super::resolve::app_blocked;
 use crate::config::{self, Config, Profile};
 use crate::input::Contact;
 
@@ -618,10 +618,12 @@ fn per_app_filter_is_case_insensitive_and_only_for_disabled() {
         Profile {
             exe_name: "Game.EXE".into(),
             enabled: false,
+            ..Profile::default()
         },
         Profile {
             exe_name: "notepad.exe".into(),
             enabled: true,
+            ..Profile::default()
         },
     ];
     assert!(app_blocked(&profiles, Some("game.exe")));
@@ -637,6 +639,25 @@ fn default_thresholds_are_as_documented() {
     assert_eq!(th.drag_px_per_mm, 12.0);
     assert_eq!(th.window_px_per_mm, 12.0);
     assert_eq!(th.window_tap_gap_us, 300_000);
+}
+
+#[test]
+fn default_sensitivity_gives_the_default_thresholds() {
+    assert_eq!(
+        Thresholds::from_sensitivity(&config::Sensitivity::default()),
+        Thresholds::default()
+    );
+    let s = config::Sensitivity {
+        drag_gain: 20.0,
+        swipe_mm: 25.0,
+        tap_ms: 250,
+        ..config::Sensitivity::default()
+    };
+    let th = Thresholds::from_sensitivity(&s);
+    assert_eq!(th.drag_px_per_mm, 20.0);
+    assert_eq!(th.multi_swipe_mm, 25.0);
+    assert_eq!(th.tap_max_us, 250_000);
+    assert_eq!(th.debounce_us, Thresholds::default().debounce_us);
 }
 
 // ---- recorded fixtures ----

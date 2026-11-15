@@ -401,6 +401,8 @@ pub struct WorkerStatus {
     pub value: Option<f32>,
     /// Last error, cleared by the next success.
     pub error: Option<BrightnessError>,
+    /// Counts every report of the worker (a read or a set, successful or not).
+    pub generation: u64,
 }
 
 type Shared = Arc<(Mutex<Mailbox>, Condvar)>;
@@ -511,6 +513,9 @@ fn worker_main(shared: Shared, status: Arc<Mutex<WorkerStatus>>) {
             }
         })();
         let mut st = status.lock().unwrap_or_else(|e| e.into_inner());
+        if result.as_ref().map_or(true, Option::is_some) {
+            st.generation += 1;
+        }
         match result {
             Ok(Some(v)) => {
                 st.value = Some(v);

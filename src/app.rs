@@ -14,7 +14,9 @@ use crate::config::{self, Config};
 use crate::engine::Engine;
 use crate::icons;
 use crate::nav::{NAV, Node, Page};
-use crate::pages::{Cmd, diagnostics::Diagnostics, features, general, general_io, home};
+use crate::pages::{
+    Cmd, diagnostics::Diagnostics, features, general, general_io, home, sensitivity,
+};
 use crate::resident::{self, Resident};
 use crate::search::{self, Entry};
 use crate::theme::{self, Tokens};
@@ -24,6 +26,8 @@ use crate::win_gestures;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 pub struct App {
+    /// The file on disk was written by a newer yubi: it is never overwritten from here.
+    read_only: bool,
     page: Page,
     cfg: Config,
     saved: Config,
@@ -57,11 +61,21 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(ctx: &egui::Context, engine: Engine) -> Self {
+    /// `loaded` is the one read of the config file (main reads it once: loading a v1 file rewrites
+    /// it, so a second read would lose the warnings).
+    pub fn new(ctx: &egui::Context, engine: Engine, loaded: config::Loaded) -> Self {
         let config_path = config::default_path();
-        let cfg = config::load(&config_path);
+        let config::Loaded {
+            config: cfg,
+            warnings,
+            future_version,
+        } = loaded;
         theme::apply(ctx, cfg.general.theme);
+        let mut general_state = general_io::GeneralState::new(ctx);
+        general_state.load_notes = warnings;
+        general_state.read_only = future_version.is_some();
         Self {
+            read_only: future_version.is_some(),
             page: Page::Home,
             saved: cfg.clone(),
             applied_theme: cfg.general.theme,
@@ -74,7 +88,7 @@ impl App {
             win_read_error: None,
             win_message: None,
             win_page_was_open: false,
-            general_state: general_io::GeneralState::new(ctx),
+            general_state,
             nav_collapsed: false,
             nav_expanded_narrow: false,
             group_open: [true; NAV.len()],
@@ -195,6 +209,9 @@ impl App {
     /// Save at most once per `SAVE_DEBOUNCE` while the config has unsaved changes (throttle, so a long
     /// slider drag writes a few times rather than waiting for release).
     fn save_if_due(&mut self, ctx: &egui::Context, force: bool) {
+        if self.read_only {
+            return;
+        }
         if self.cfg == self.saved {
             self.dirty_since = None;
             return;
@@ -410,6 +427,7 @@ impl App {
             Page::Window => return features::window(ui, t, cfg, &self.win_values),
             Page::Ring => features::ring(ui, t, cfg),
             Page::Profiles => features::profiles(ui, t, cfg),
+            Page::Sensitivity => sensitivity::sensitivity(ui, t, cfg),
             Page::Haptic => features::haptic(ui, t, cfg),
             Page::Monitor => self.diagnostics.monitor(ui, t),
             Page::Diagnostics => self.diagnostics.info(ui, t, now),
@@ -533,7 +551,7 @@ impl eframe::App for App {
         if let Some(r) = self.resident.as_mut() {
             r.shutdown();
         }
-        if self.devshot.is_none() && self.cfg != self.saved {
+        if self.devshot.is_none() && !self.read_only && self.cfg != self.saved {
             let _ = config::save(&self.config_path, &self.cfg);
         }
     }

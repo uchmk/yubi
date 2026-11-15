@@ -98,8 +98,13 @@ impl Recognizer {
         self.env.dims_mm = dims_mm;
     }
 
-    /// The foreground app has yubi switched off; latched with the next touch.
-    pub fn set_app_blocked(&mut self, blocked: bool) {
+    /// The foreground app (and whether its profile switches yubi off), as the engine last saw
+    /// it. A touch session latches it at its first raw touchdown and keeps those bindings until
+    /// every finger lifts. A change during the session is NOT a cancel: a drag presses the left
+    /// button, which activates the window under the cursor, so the foreground often changes right
+    /// after a drag or window move begins.
+    pub fn set_foreground(&mut self, exe: Option<&str>, blocked: bool) {
+        self.env.exe = exe.map(|e| e.trim().to_owned());
         self.env.app_blocked = blocked;
     }
 
@@ -116,7 +121,7 @@ impl Recognizer {
 
     /// Forget everything without emitting events (device gone, config changed, disabled).
     pub fn reset(&mut self) {
-        let (th, env) = (self.th, self.env);
+        let (th, env) = (self.th, self.env.clone());
         *self = Self::new(th);
         self.env = env;
     }
@@ -204,7 +209,8 @@ impl Recognizer {
     fn start_session(&mut self, t: u64, cfg: &Config) {
         // A drag that outlives its touch keeps the settings it started with.
         if self.drag.phase == DragPhase::Idle {
-            self.g = GestureCfg::from_config(cfg);
+            self.g = GestureCfg::from_config(cfg, self.env.exe.as_deref());
+            self.th = Thresholds::from_sensitivity(&cfg.sensitivity);
         }
         let win_candidate = self.g.window
             && self
@@ -213,7 +219,7 @@ impl Recognizer {
                 .is_some_and(|at| t.saturating_sub(at) <= self.th.window_tap_gap_us);
         self.window.tap_at = None;
         self.next_session += 1;
-        self.latched = Some(self.env);
+        self.latched = Some(self.env.clone());
         self.arb.clear();
         self.session = Some(Session {
             id: SessionId(self.next_session),
@@ -222,7 +228,7 @@ impl Recognizer {
             peak: 0,
             max_travel: 0.0,
             // The config is read once per gesture.
-            hold_us: u64::from(cfg.long_hold.hold_ms) * 1000,
+            hold_us: u64::from(cfg.sensitivity.hold_ms) * 1000,
             hold_since: None,
             hold_fired: false,
             win_candidate,
@@ -470,7 +476,7 @@ mod tests {
     #[test]
     fn long_hold_fires_once_from_tick() {
         let mut cfg = Config::default();
-        cfg.long_hold.hold_ms = 500;
+        cfg.sensitivity.hold_ms = 500;
         let mut r = Recognizer::default();
         let two = vec![c(1, 10.0, 10.0), c(2, 30.0, 10.0)];
         r.step(&frame(0, two.clone()), &cfg);
@@ -488,7 +494,7 @@ mod tests {
     #[test]
     fn moving_cancels_long_hold() {
         let mut cfg = Config::default();
-        cfg.long_hold.hold_ms = 300;
+        cfg.sensitivity.hold_ms = 300;
         let mut r = Recognizer::default();
         r.step(&frame(0, vec![c(1, 10.0, 10.0)]), &cfg);
         r.tick(100_000);
@@ -525,7 +531,7 @@ mod tests {
     fn replay_three_finger_long_hold() {
         let frames = replay::parse(include_str!("fixtures/three_finger_hold.jsonl")).unwrap();
         let mut cfg = Config::default();
-        cfg.long_hold.hold_ms = 500;
+        cfg.sensitivity.hold_ms = 500;
         let out = replay::run(&frames, &cfg);
         let hold: Vec<_> = out
             .iter()
@@ -582,22 +588,92 @@ mod tests {
     fn environment_is_latched_at_first_touchdown() {
         let cfg = Config::default();
         let mut r = Recognizer::default();
-        r.set_app_blocked(false);
+        r.set_foreground(Some("a.exe"), false);
         r.set_config_generation(1);
         r.step(&frame(0, vec![c(1, 10.0, 10.0)]), &cfg);
-        // Changes during the touch apply to the next session only.
-        r.set_app_blocked(true);
+        // A config change during the touch applies to the next session only.
         r.set_config_generation(2);
         r.step(&frame(11, vec![c(1, 10.0, 10.0)]), &cfg);
-        let latched = *r.latched().unwrap();
+        let latched = r.latched().unwrap().clone();
         assert!(!latched.app_blocked);
+        assert_eq!(latched.exe.as_deref(), Some("a.exe"));
         assert_eq!(latched.config_gen, 1);
         r.step(&frame(22, vec![]), &cfg);
         assert!(r.latched().is_none());
+        // Between touches the foreground may change freely; the next touch latches it.
+        r.set_foreground(Some("b.exe"), true);
         r.step(&frame(40, vec![c(1, 10.0, 10.0)]), &cfg);
-        let latched = *r.latched().unwrap();
+        let latched = r.latched().unwrap().clone();
         assert!(latched.app_blocked);
+        assert_eq!(latched.exe.as_deref(), Some("b.exe"));
         assert_eq!(latched.config_gen, 2);
+    }
+
+    #[test]
+    fn foreground_change_during_a_drag_does_not_end_it() {
+        let mut cfg = Config::default();
+        cfg.drag.enabled = true;
+        let mut r = Recognizer::default();
+        r.set_foreground(Some("a.exe"), false);
+        let mut t = 0;
+        let mut out = Vec::new();
+        let step = |r: &mut Recognizer, x: f32, t: u64| {
+            r.step(
+                &frame(
+                    t,
+                    vec![c(1, x, 10.0), c(2, x + 10.0, 10.0), c(3, x + 20.0, 10.0)],
+                ),
+                &cfg,
+            )
+        };
+        // Three fingers move far enough to begin a drag.
+        for k in 0..12 {
+            out.extend(step(&mut r, 10.0 + k as f32 * 2.0, t));
+            t += 11;
+        }
+        assert!(out.iter().any(|a| matches!(a, Action::DragBegin)));
+        // The left button press activates another app (and even a blocked one): the drag goes on
+        // with the bindings it latched at touchdown.
+        r.set_foreground(Some("b.exe"), true);
+        assert!(r.active() && !r.awaiting_all_up());
+        assert_eq!(r.latched().unwrap().exe.as_deref(), Some("a.exe"));
+        let after = step(&mut r, 40.0, t);
+        assert!(after.iter().any(|a| matches!(a, Action::DragMove { .. })));
+        assert!(!after.iter().any(|a| matches!(a, Action::DragEnd)));
+    }
+
+    #[test]
+    fn session_latches_per_app_bindings_and_sensitivity() {
+        let mut cfg = Config::default();
+        cfg.four.swipe_left = crate::config::Action::Find;
+        let mut p = crate::config::Profile {
+            exe_name: "code.exe".into(),
+            enabled: true,
+            ..Default::default()
+        };
+        p.overrides.insert(
+            "swipe.4.left".into(),
+            crate::config::Action::Keys("Ctrl+PageUp".into()),
+        );
+        cfg.profiles.push(p);
+        cfg.sensitivity.swipe_mm = 30.0;
+        cfg.sensitivity.hold_ms = 900;
+        let mut r = Recognizer::default();
+        r.set_foreground(Some("code.exe"), false);
+        r.step(&frame(0, vec![c(1, 10.0, 10.0)]), &cfg);
+        assert_eq!(
+            r.g.multi_for(4).unwrap().swipe_left,
+            crate::config::Action::Keys("Ctrl+PageUp".into())
+        );
+        assert_eq!(r.thresholds().multi_swipe_mm, 30.0);
+        assert_eq!(r.session.as_ref().unwrap().hold_us, 900_000);
+        let mut r = Recognizer::default();
+        r.set_foreground(Some("other.exe"), false);
+        r.step(&frame(0, vec![c(1, 10.0, 10.0)]), &cfg);
+        assert_eq!(
+            r.g.multi_for(4).unwrap().swipe_left,
+            crate::config::Action::Find
+        );
     }
 
     #[test]

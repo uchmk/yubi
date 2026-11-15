@@ -12,7 +12,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::Config;
+use crate::config::{self, Config};
 
 /// Imports larger than this are rejected before parsing.
 pub const MAX_IMPORT_BYTES: u64 = 1024 * 1024;
@@ -26,6 +26,14 @@ pub enum ConfigIoError {
     Parse(String),
     /// The config could not be serialized.
     Serialize(String),
+    /// The file was written by a newer yubi (its `schema_version`).
+    FutureVersion(u32),
+    /// An action or edge token this build does not know.
+    UnknownToken(String),
+    /// The same exe name appears in more than one profile.
+    DuplicateProfile(String),
+    /// A per-app setting for a gesture that has no global setting (`exe: id`).
+    UnbindableOverride(String),
 }
 
 impl fmt::Display for ConfigIoError {
@@ -38,6 +46,22 @@ impl fmt::Display for ConfigIoError {
             ),
             Self::Parse(m) => write!(f, "設定ファイルを読み取れません: {m}"),
             Self::Serialize(m) => write!(f, "設定を書き出せません: {m}"),
+            Self::FutureVersion(v) => write!(
+                f,
+                "この設定ファイルは新しい版の yubi で作られています (schema_version = {v})。読み込めません"
+            ),
+            Self::UnknownToken(t) => write!(
+                f,
+                "この版の yubi では読み取れない動作「{t}」が含まれています。読み込みを中止しました"
+            ),
+            Self::DuplicateProfile(e) => write!(
+                f,
+                "アプリ別の設定に「{e}」が重複しています。読み込みを中止しました"
+            ),
+            Self::UnbindableOverride(k) => write!(
+                f,
+                "アプリ別の設定「{k}」は割り当てられないジェスチャーです。読み込みを中止しました"
+            ),
         }
     }
 }
@@ -135,78 +159,25 @@ pub fn import_from(path: &Path) -> Result<Imported> {
 }
 
 fn parse_import(text: &str) -> Result<Imported> {
-    let raw: Config = toml::from_str(text).map_err(|e| ConfigIoError::Parse(e.to_string()))?;
-    let mut config = raw.clone();
-    config.normalize();
-    let warnings = clamp_warnings(&raw, &config);
-    Ok(Imported { config, warnings })
-}
-
-/// Differences between the parsed and the normalized config, as Japanese notes.
-fn clamp_warnings(raw: &Config, norm: &Config) -> Vec<String> {
-    let mut w = Vec::new();
-    let mut note = |name: &str, before: String, after: String| {
-        if before != after {
-            w.push(format!(
-                "{name} の値 {before} は範囲外のため {after} に補正しました"
-            ));
-        }
-    };
-    note(
-        "ドラッグの指の本数",
-        raw.drag.fingers.to_string(),
-        norm.drag.fingers.to_string(),
-    );
-    note(
-        "ドラッグの持ち上げ猶予 (ms)",
-        raw.drag.lift_timeout_ms.to_string(),
-        norm.drag.lift_timeout_ms.to_string(),
-    );
-    note(
-        "長押しの指の本数",
-        raw.long_hold.fingers.to_string(),
-        norm.long_hold.fingers.to_string(),
-    );
-    note(
-        "長押しの時間 (ms)",
-        raw.long_hold.hold_ms.to_string(),
-        norm.long_hold.hold_ms.to_string(),
-    );
-    note(
-        "リングメニューの指の本数",
-        raw.ring.fingers.to_string(),
-        norm.ring.fingers.to_string(),
-    );
-    note(
-        "リングメニューの長押し時間 (ms)",
-        raw.ring.hold_ms.to_string(),
-        norm.ring.hold_ms.to_string(),
-    );
-    note(
-        "軽い押し込みのしきい値",
-        format!("{}", raw.press.light_threshold),
-        format!("{}", norm.press.light_threshold),
-    );
-    note(
-        "深い押し込みのしきい値",
-        format!("{}", raw.press.deep_threshold),
-        format!("{}", norm.press.deep_threshold),
-    );
-    if raw.press.fingers.len() != norm.press.fingers.len() {
-        w.push(format!(
-            "押し込みの指の設定が {} 個だったため {} 個に補正しました",
-            raw.press.fingers.len(),
-            norm.press.fingers.len()
-        ));
+    let parsed = config::parse_text(text).map_err(|e| match e {
+        config::ParseError::Syntax(m) => ConfigIoError::Parse(m),
+        config::ParseError::FutureVersion(v) => ConfigIoError::FutureVersion(v),
+    })?;
+    // An import is a deliberate act: a token this build cannot read, or a profile that appears
+    // twice, would silently change what the user meant, so the file is refused (load only warns).
+    if let Some(token) = parsed.unknown_tokens.first() {
+        return Err(ConfigIoError::UnknownToken(token.clone()));
     }
-    if raw.corner.corners.len() != norm.corner.corners.len() {
-        w.push(format!(
-            "コーナーの設定が {} 個だったため {} 個に補正しました",
-            raw.corner.corners.len(),
-            norm.corner.corners.len()
-        ));
+    if let Some(exe) = parsed.duplicate_profiles.first() {
+        return Err(ConfigIoError::DuplicateProfile(exe.clone()));
     }
-    w
+    if let Some(k) = parsed.unbindable_overrides.first() {
+        return Err(ConfigIoError::UnbindableOverride(k.clone()));
+    }
+    Ok(Imported {
+        config: parsed.config,
+        warnings: parsed.warnings,
+    })
 }
 
 /// Copy `<dir>/config.toml` to `<dir>/config.backup-<unix-seconds>.toml` (never overwriting an
@@ -303,10 +274,79 @@ mod tests {
             "future_key = 1\n[long_hold]\nhold_ms = 60000\nfingers = 0\n[drag]\nfingers = 9\n",
         )
         .unwrap();
-        assert_eq!(got.config.long_hold.hold_ms, 2000);
+        assert_eq!(got.config.sensitivity.hold_ms, 1500);
         assert_eq!(got.config.drag.fingers, 5);
         assert_eq!(got.warnings.len(), 3, "{:?}", got.warnings);
         assert!(got.warnings.iter().any(|m| m.contains("60000")));
+    }
+
+    #[test]
+    fn import_rejects_unknown_tokens_future_versions_and_duplicate_profiles() {
+        let err = parse_import(
+            "schema_version = 2
+[four]
+swipe_up = \"teleport\"
+",
+        )
+        .unwrap_err();
+        assert!(matches!(&err, ConfigIoError::UnknownToken(t) if t == "teleport"));
+        assert!(err.to_string().contains("teleport"));
+        let err = parse_import(
+            "schema_version = 2
+[edge]
+left = \"warp\"
+",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("warp"));
+        let err = parse_import(
+            "schema_version = 3
+",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigIoError::FutureVersion(3)));
+        assert!(err.to_string().contains("schema_version = 3"));
+        let err = parse_import(
+            "schema_version = 2
+[[profiles]]
+exe_name = \"a.exe\"
+[[profiles]]
+exe_name = \"A.EXE\"
+",
+        )
+        .unwrap_err();
+        assert!(matches!(&err, ConfigIoError::DuplicateProfile(e) if e == "A.EXE"));
+        let err = parse_import(
+            "schema_version = 2
+[[profiles]]
+exe_name = \"a.exe\"
+[profiles.overrides]
+\"swipe.3.left\" = \"none\"
+",
+        )
+        .unwrap_err();
+        assert!(matches!(&err, ConfigIoError::UnbindableOverride(k) if k.contains("swipe.3.left")));
+        // Legacy tokens and brush_size are not errors: they load as none and are reported.
+        let got = parse_import(
+            "schema_version = 2
+[four]
+tap = \"volume\"
+[edge]
+left = \"brush_size\"
+",
+        )
+        .unwrap();
+        assert_eq!(got.config.four.tap, crate::config::Action::None);
+        assert!(got.warnings.len() >= 2, "{:?}", got.warnings);
+        // An old (schema 1) export imports through the migration.
+        let got = parse_import(
+            "[long_hold]
+hold_ms = 700
+",
+        )
+        .unwrap();
+        assert_eq!(got.config.sensitivity.hold_ms, 700);
+        assert_eq!(got.config.schema_version, 2);
     }
 
     #[test]

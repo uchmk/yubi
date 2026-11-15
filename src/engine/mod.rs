@@ -10,6 +10,7 @@ pub mod executor;
 pub mod gestures;
 pub mod recognizer;
 pub mod replay;
+pub mod resolve;
 pub mod session;
 pub mod tracking;
 pub mod types;
@@ -211,6 +212,7 @@ impl Engine {
                 }
             }),
             last_fg_poll: None,
+            prev_contacts: 0,
             last_release_retry: None,
             cfg: Config::default(),
             seen_generation: u64::MAX,
@@ -273,6 +275,8 @@ struct Worker {
     dispatch: Dispatcher,
     /// When the foreground app was last looked up (it is polled, not hooked).
     last_fg_poll: Option<Instant>,
+    /// Contacts in the previous frame (a touch begins when this is 0 and the next frame is not).
+    prev_contacts: usize,
     last_release_retry: Option<Instant>,
     cfg: Config,
     seen_generation: u64,
@@ -424,6 +428,11 @@ impl Worker {
         let (partial, dropped) = (self.counters.partial_frames(), self.counters.contacts());
 
         let actions = if self.enabled {
+            // The app is decided once per touch session: look it up right before the first
+            // contact of a session reaches the recognizer, which latches it.
+            if touch_began(self.prev_contacts, frame.contacts.len()) {
+                self.poll_foreground(true);
+            }
             self.recognizer.step(&frame, &self.cfg)
         } else {
             Vec::new()
@@ -431,6 +440,7 @@ impl Worker {
         if self.log {
             eprintln!("yubi: frame {:?}", frame);
         }
+        self.prev_contacts = frame.contacts.len();
         let snap = self.recognizer.snapshot();
         self.with_state(|s| {
             s.frames_total += 1;
@@ -462,9 +472,10 @@ impl Worker {
         }
         self.last_fg_poll = Some(Instant::now());
         let exe = crate::os::window::foreground().and_then(crate::os::process::exe_name_of);
-        let blocked = dispatch::app_blocked(&self.cfg.profiles, exe.as_deref());
+        let blocked = resolve::app_blocked(&self.cfg.profiles, exe.as_deref());
         self.dispatch.set_blocked(blocked);
-        self.recognizer.set_app_blocked(blocked);
+        // A live gesture keeps the app it latched at touchdown; the next touch uses this one.
+        self.recognizer.set_foreground(exe.as_deref(), blocked);
         let changed = self
             .state
             .lock()
@@ -483,10 +494,6 @@ impl Worker {
             if let Action::Debug(e) = &a {
                 if self.log {
                     eprintln!("yubi: gesture {e:?}");
-                }
-                if matches!(e, GestureEvent::TouchStart { .. }) {
-                    // The app is decided once per touch session, when the touch starts.
-                    self.poll_foreground(true);
                 }
                 let (e, n) = (*e, self.recognizer.snapshot().finger_count);
                 self.with_state(|s| {
@@ -519,8 +526,24 @@ impl Worker {
     }
 }
 
+/// True on the frame where a touch begins: the previous frame had no contact, this one has.
+fn touch_began(prev: usize, now: usize) -> bool {
+    prev == 0 && now > 0
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn foreground_is_forced_only_when_a_touch_begins() {
+        use super::touch_began;
+        assert!(touch_began(0, 1));
+        assert!(touch_began(0, 3));
+        assert!(!touch_began(1, 1));
+        assert!(!touch_began(2, 3));
+        assert!(!touch_began(3, 0));
+        assert!(!touch_began(0, 0));
+    }
+
     use super::*;
 
     #[test]

@@ -14,6 +14,9 @@ use crate::config_io::{self, Imported};
 use crate::haptic::permission::{self, PermissionError, PermissionState};
 use crate::os::file_dialog;
 
+/// Why 適用 and 元に戻す are off while the config file came from a newer yubi.
+pub const READ_ONLY_REASON: &str = "新しい版の yubi で作られた設定なので、書き換えません";
+
 pub const DEFAULT_EXPORT_NAME: &str = "yubi-settings.toml";
 
 /// What the haptic permission row shows.
@@ -101,6 +104,11 @@ pub struct GeneralState {
     pub haptic: HapticStatus,
     pub haptic_note: Option<Note>,
     visible: bool,
+    /// What loading the config file reported (migration, dropped entries, clamped values), shown
+    /// once at the top of the page until dismissed.
+    pub load_notes: Vec<String>,
+    /// The config file was written by a newer yubi: nothing may overwrite it.
+    pub read_only: bool,
 }
 
 impl GeneralState {
@@ -111,6 +119,8 @@ impl GeneralState {
             rx,
             ctx: ctx.clone(),
             io_busy: false,
+            load_notes: Vec::new(),
+            read_only: false,
             io_note: None,
             preview: None,
             undo: None,
@@ -174,6 +184,11 @@ impl GeneralState {
         let Some(mut p) = self.preview.take() else {
             return;
         };
+        if self.read_only {
+            self.preview = Some(p);
+            self.io_note = Some(Note::err(READ_ONLY_REASON));
+            return;
+        }
         if p.base != *cfg {
             // Edited (or autostart toggled) while the preview was open: compare again and ask again.
             let path = p.path.clone();
@@ -183,7 +198,7 @@ impl GeneralState {
             ));
             return;
         }
-        match apply_import(cfg, config_path, &p.imported.config) {
+        match apply_import(cfg, config_path, &p.imported.config, self.read_only) {
             Ok(undo) => {
                 self.undo = Some(undo);
                 self.io_note = Some(Note::ok(
@@ -201,7 +216,7 @@ impl GeneralState {
         let Some(u) = self.undo.take() else {
             return;
         };
-        match undo_apply(cfg, config_path, &u) {
+        match undo_apply(cfg, config_path, &u, self.read_only) {
             Ok(()) => self.io_note = Some(Note::ok("読み込み前の設定に戻しました。")),
             Err(e) => {
                 self.undo = Some(u);
@@ -286,17 +301,20 @@ impl GeneralState {
         }
     }
 
-    /// Screenshot helper (`YUBI_SHOT_GENERAL=preview`): show a sample import preview.
+    /// Screenshot helper (`YUBI_SHOT_GENERAL=preview` or `readonly`): show a sample import preview
+    /// (`readonly` also switches the page to the newer-file state).
     pub fn demo(&mut self, cfg: &Config) {
-        if std::env::var_os("YUBI_SHOT").is_none()
-            || std::env::var("YUBI_SHOT_GENERAL").as_deref() != Ok("preview")
-            || self.preview.is_some()
-        {
+        if std::env::var_os("YUBI_SHOT").is_none() || self.preview.is_some() {
             return;
+        }
+        match std::env::var("YUBI_SHOT_GENERAL").as_deref() {
+            Ok("preview") => {}
+            Ok("readonly") => self.read_only = true,
+            _ => return,
         }
         let mut sample = cfg.clone();
         sample.drag.fingers = 4;
-        sample.long_hold.hold_ms = 2000;
+        sample.sensitivity.hold_ms = 1500;
         sample.press.light_threshold += 0.1;
         sample.five.swipe_up = config::Action::Keys("Win+Tab".into());
         let mut imported = Imported {
@@ -343,10 +361,18 @@ fn make_preview(cfg: &Config, path: PathBuf, imported: &mut Imported) -> Preview
     }
 }
 
-/// Save the live config, back it up, then replace it with `new` and save.
-fn apply_import(cfg: &mut Config, config_path: &Path, new: &Config) -> Result<Undo, String> {
+/// Back up the file that is on disk, then replace the live config with `new` and save it. Refuses
+/// while the file came from a newer yubi (`read_only`).
+fn apply_import(
+    cfg: &mut Config,
+    config_path: &Path,
+    new: &Config,
+    read_only: bool,
+) -> Result<Undo, String> {
+    if read_only {
+        return Err(READ_ONLY_REASON.to_owned());
+    }
     let dir = config_path.parent().unwrap_or_else(|| Path::new("."));
-    config::save(config_path, cfg).map_err(|e| format!("現在の設定を保存できません: {e}"))?;
     let backup = config_io::backup_current(dir).map_err(|e| e.to_string())?;
     let previous = cfg.clone();
     config::save(config_path, new).map_err(|e| format!("設定を保存できません: {e}"))?;
@@ -355,7 +381,15 @@ fn apply_import(cfg: &mut Config, config_path: &Path, new: &Config) -> Result<Un
 }
 
 /// Restore from the backup file (or the in-memory copy when there was nothing to back up).
-fn undo_apply(cfg: &mut Config, config_path: &Path, u: &Undo) -> Result<(), String> {
+fn undo_apply(
+    cfg: &mut Config,
+    config_path: &Path,
+    u: &Undo,
+    read_only: bool,
+) -> Result<(), String> {
+    if read_only {
+        return Err(READ_ONLY_REASON.to_owned());
+    }
     let mut restored = match &u.backup {
         Some(b) => config_io::import_from(b)
             .map(|i| i.config)
@@ -373,7 +407,10 @@ fn section_label(key: &str) -> &str {
         "gestures_enabled" => "ジェスチャー全体",
         "general" => "全般",
         "drag" => "ドラッグ",
+        "four" => "4本指ジェスチャー",
         "five" => "5本指ジェスチャー",
+        "sensitivity" => "感度",
+        "schema_version" => "設定ファイルの版",
         "press" => "押し込みと触覚",
         "long_hold" => "ロングホールド",
         "finger_hold" => "フィンガーホールド",
@@ -445,7 +482,6 @@ fn setting_label(path: &str) -> String {
         "press.deep_threshold" => "深い押し込みのしきい値",
         "press.haptic_strength" => "触覚の強さ",
         "press.fingers" => "指ごとの押し込み操作",
-        "long_hold.hold_ms" | "ring.hold_ms" => "長押しの時間",
         "long_hold.action" => "長押しの操作",
         "finger_hold.combos" | "thumb_hold.combos" => "組み合わせ",
         "corner.corners" => "コーナーの操作",
@@ -457,7 +493,12 @@ fn setting_label(path: &str) -> String {
         "window.corner_resize" => "コーナースワイプでサイズ変更",
         "ring.items" => "リングメニューの項目",
         "profiles" => "アプリ設定",
-        other => return other.to_string(),
+        other => {
+            return other
+                .strip_prefix("sensitivity.")
+                .and_then(config::Sensitivity::label_of)
+                .map_or_else(|| other.to_string(), str::to_string);
+        }
     }
     .to_string()
 }
@@ -582,14 +623,60 @@ mod tests {
         live.drag.fingers = 4;
         let mut new = Config::default();
         new.drag.fingers = 3;
-        new.long_hold.hold_ms = 900;
-        let undo = apply_import(&mut live, &path, &new).unwrap();
+        new.sensitivity.hold_ms = 900;
+        // What is on disk is what gets backed up (and the live config is not saved first).
+        config::save(&path, &live).unwrap();
+        let undo = apply_import(&mut live, &path, &new, false).unwrap();
         assert_eq!(live, new);
         assert!(undo.backup.as_ref().is_some_and(|b| b.exists()));
         assert_eq!(config::load(&path), new);
-        undo_apply(&mut live, &path, &undo).unwrap();
+        undo_apply(&mut live, &path, &undo, false).unwrap();
         assert_eq!(live.drag.fingers, 4);
         assert_eq!(config::load(&path).drag.fingers, 4);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_backs_up_the_file_on_disk_not_the_live_config() {
+        let dir = temp_dir("disk-backup");
+        let path = dir.join("config.toml");
+        let mut on_disk = Config::default();
+        on_disk.drag.fingers = 5;
+        config::save(&path, &on_disk).unwrap();
+        let mut live = Config::default();
+        live.drag.fingers = 4;
+        let undo = apply_import(&mut live, &path, &Config::default(), false).unwrap();
+        let b = undo.backup.unwrap();
+        assert_eq!(config::load(&b).drag.fingers, 5);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_only_refuses_apply_and_undo_and_leaves_the_file() {
+        let dir = temp_dir("readonly");
+        let path = dir.join("config.toml");
+        let future = "schema_version = 9
+";
+        fs::write(&path, future).unwrap();
+        let mut live = Config::default();
+        assert!(apply_import(&mut live, &path, &Config::default(), true).is_err());
+        let undo = Undo {
+            previous: Config::default(),
+            backup: None,
+        };
+        assert!(undo_apply(&mut live, &path, &undo, true).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), future);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "no backup made");
+        let mut st = GeneralState::new(&egui::Context::default());
+        st.read_only = true;
+        let mut imp = Imported {
+            config: Config::default(),
+            warnings: Vec::new(),
+        };
+        st.preview = Some(make_preview(&live, path.clone(), &mut imp));
+        st.apply_preview(&mut live, &path);
+        assert!(st.preview.is_some());
+        assert_eq!(fs::read_to_string(&path).unwrap(), future);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -633,6 +720,8 @@ mod tests {
     fn labels_are_japanese() {
         assert_eq!(setting_label("drag.fingers"), "指の本数");
         assert_eq!(setting_label("x.unknown"), "x.unknown");
+        assert_eq!(setting_label("sensitivity.hold_ms"), "長押しの時間");
+        assert_eq!(setting_label("sensitivity.nope"), "sensitivity.nope");
     }
 
     #[test]

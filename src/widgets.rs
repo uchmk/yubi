@@ -183,6 +183,8 @@ impl Group<'_> {
         self.raw_row(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 control(ui);
+                // A clear gap between the control and the (wrapping) description.
+                ui.add_space(t.space_lg);
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     if let Some(glyph) = icon.filter(|_| fonts::icons_available()) {
                         let (rect, _) = ui.allocate_exact_size(
@@ -542,12 +544,31 @@ pub fn action_picker(ui: &mut Ui, t: &Tokens, id: impl Hash + Debug, action: &mu
     if combo(ui, t, id, &mut kind, &ActionKind::ALL, ActionKind::label) {
         action.set_kind(kind);
     }
-    if let Action::Keys(keys) = action {
-        ui.add(
-            egui::TextEdit::singleline(keys)
-                .hint_text("例: Ctrl+Alt+T")
-                .desired_width(t.text_input_w),
-        );
+    match action {
+        Action::Keys(keys) => {
+            ui.add(
+                egui::TextEdit::singleline(keys)
+                    .hint_text("例: Ctrl+Alt+T")
+                    .desired_width(t.text_input_w),
+            );
+        }
+        Action::VolumeStep(n) | Action::BrightnessStep(n) => step_field(ui, n),
+        _ => {}
+    }
+}
+
+/// The signed step of a volume or brightness action, in percentage points.
+pub fn step_field(ui: &mut Ui, n: &mut i8) {
+    ui.add(
+        egui::DragValue::new(n)
+            .range(-crate::config::MAX_STEP..=crate::config::MAX_STEP)
+            .speed(0.2)
+            .prefix("1回に ")
+            .suffix(" %")
+            .custom_formatter(|v, _| format!("{v:+}")),
+    );
+    if *n == 0 {
+        *n = 1;
     }
 }
 

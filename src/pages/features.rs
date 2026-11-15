@@ -4,7 +4,8 @@
 use eframe::egui::{self, Align, Layout, RichText, Ui};
 
 use crate::config::{
-    Combo, Config, EdgeTarget, Finger, HapticStrength, HoldCombos, HoldTrigger, Profile, RingItem,
+    Combo, Config, EdgeKind, EdgeTarget, Finger, HapticStrength, HoldCombos, HoldTrigger, Profile,
+    RingItem,
 };
 use crate::icons;
 use crate::nav::Page;
@@ -251,9 +252,9 @@ pub fn long_hold(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
             );
             g.slider_row(
                 "長押しの時間",
-                "操作が始まるまでに指を置き続ける時間です。",
-                SliderSpec::int(100, 2000, 50, " ms"),
-                &mut l.hold_ms,
+                "操作が始まるまでに指を置き続ける時間です。長押しとリングメニューで共通で、「感度」ページの値と同じです。",
+                SliderSpec::int(300, 1500, 50, " ms"),
+                &mut cfg.sensitivity.hold_ms,
             );
             g.action_row(
                 "実行する操作",
@@ -365,17 +366,63 @@ pub fn edge(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
                 ("右端", &mut e.right, "edge-right"),
                 ("上端", &mut e.top, "edge-top"),
             ] {
-                g.combo_row(
-                    name,
-                    "なぞって調整する対象です。",
-                    id,
-                    value,
-                    &EdgeTarget::ALL,
-                    EdgeTarget::label,
-                );
+                edge_target_rows(g, t, name, id, value);
             }
         });
     });
+}
+
+/// A row with the target picker for one edge, plus key and distance rows for a custom target.
+fn edge_target_rows(
+    g: &mut widgets::Group<'_>,
+    t: &Tokens,
+    name: &str,
+    id: &str,
+    value: &mut EdgeTarget,
+) {
+    let mut kind = value.kind();
+    g.row(None, name, "なぞって調整する対象です。", |ui| {
+        let w = t.combo_w * 1.6;
+        if combo_sized(ui, t, w, id, &mut kind, &EdgeKind::ALL, EdgeKind::label) {
+            value.set_kind(kind);
+        }
+    });
+    if let EdgeTarget::Custom(c) = value {
+        for (title, desc, text, hint) in [
+            (
+                "進む方向のキー",
+                "指を進めたときに送るキーです。",
+                &mut c.forward,
+                "例: Ctrl+Tab",
+            ),
+            (
+                "戻る方向のキー",
+                "指を戻したときに送るキーです。",
+                &mut c.back,
+                "例: Ctrl+Shift+Tab",
+            ),
+        ] {
+            g.row(None, title, desc, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(text)
+                        .hint_text(hint)
+                        .desired_width(t.text_input_w),
+                );
+            });
+        }
+        g.slider_row(
+            "1ステップの距離",
+            "なぞる距離がこの値に達するたびにキーを送ります。",
+            SliderSpec {
+                min: 1.0,
+                max: 6.0,
+                step: 0.5,
+                decimals: 1,
+                suffix: " mm",
+            },
+            &mut c.step_mm,
+        );
+    }
 }
 
 pub fn window(
@@ -419,6 +466,7 @@ pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
     ui.add_enabled_ui(on, |ui| {
         section_header(ui, t, "呼び出し");
         group(ui, t, |g| {
+            let hold_ms = &mut cfg.sensitivity.hold_ms;
             let r = &mut cfg.ring;
             g.slider_row(
                 "指の本数",
@@ -428,9 +476,9 @@ pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
             );
             g.slider_row(
                 "長押しの時間",
-                "メニューが現れるまでに指を置き続ける時間です。",
-                SliderSpec::int(100, 2000, 50, " ms"),
-                &mut r.hold_ms,
+                "メニューが現れるまでに指を置き続ける時間です。長押しと共通で、「感度」ページの値と同じです。",
+                SliderSpec::int(300, 1500, 50, " ms"),
+                hold_ms,
             );
         });
         section_header(ui, t, "メニュー項目");
@@ -444,17 +492,12 @@ pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
                             remove = Some(i);
                         }
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            let w = ((ui.available_width() - t.space_sm) / 2.0).max(t.space_xl);
                             ui.add(
                                 egui::TextEdit::singleline(&mut item.label)
                                     .hint_text("表示名")
-                                    .desired_width(w),
+                                    .desired_width(t.text_input_w / 2.0),
                             );
-                            ui.add(
-                                egui::TextEdit::singleline(&mut item.command)
-                                    .hint_text("コマンド")
-                                    .desired_width(w),
-                            );
+                            widgets::action_picker(ui, t, ("ring-item", i), &mut item.action);
                         });
                     });
                 });
@@ -508,6 +551,7 @@ pub fn profiles(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
         cfg.profiles.push(Profile {
             exe_name: String::new(),
             enabled: true,
+            ..Profile::default()
         });
     }
 }

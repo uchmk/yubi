@@ -5,23 +5,17 @@
 
 use std::fmt;
 
-use crate::config::{self, Config};
+use super::resolve::resolve;
+use crate::config::{self, Config, Sensitivity};
 
 pub type Point = (f32, f32);
 
-/// Stable token of a gesture ("tap.3", "swipe.4.left", "pinch.5.in"). These become the binding
-/// keys of the schema v2 config, so the spelling must not change.
-#[allow(
-    dead_code,
-    reason = "the schema v2 bindings and the overlay use the gesture IDs next"
-)]
+/// Stable token of a gesture ("tap.3", "swipe.4.left", "pinch.5.in"). These are the keys of the
+/// per-app overrides in the schema v2 config, so the spelling must not change. Ids of gestures the
+/// recognizer does not detect yet (press, hold, corner) are reserved here already.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GestureId(String);
 
-#[allow(
-    dead_code,
-    reason = "the schema v2 bindings and the overlay use the gesture IDs next"
-)]
 impl GestureId {
     pub fn tap(fingers: usize) -> Self {
         Self(format!("tap.{fingers}"))
@@ -38,10 +32,87 @@ impl GestureId {
         ))
     }
 
+    /// Light or deep press with `fingers` fingers (reserved).
+    pub fn press(fingers: usize, deep: bool) -> Self {
+        Self(format!(
+            "press.{fingers}.{}",
+            if deep { "deep" } else { "light" }
+        ))
+    }
+
+    /// The long hold with the configured finger count (reserved).
+    pub fn long_hold() -> Self {
+        Self("hold.long".to_owned())
+    }
+
+    /// A press or swipe starting in a pad corner (0 = top-left, 1 = top-right, 2 = bottom-left,
+    /// 3 = bottom-right; reserved).
+    pub fn corner(index: usize, swipe: bool) -> Self {
+        Self(format!(
+            "corner.{}.{}",
+            CORNER_TOKENS[index % 4],
+            if swipe { "swipe" } else { "tap" }
+        ))
+    }
+
+    /// A finger-hold or thumb-hold combo (reserved).
+    pub fn hold_combo(
+        thumb_hold: bool,
+        hold: config::Finger,
+        trigger: config::HoldTrigger,
+    ) -> Self {
+        Self(format!(
+            "hold.{}.{}.{}",
+            if thumb_hold { "thumb" } else { "finger" },
+            hold.token(),
+            trigger.token()
+        ))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Every id the config can bind, in a fixed order.
+    pub fn all() -> Vec<Self> {
+        let mut out = Vec::new();
+        for n in 3..=5 {
+            out.push(Self::tap(n));
+        }
+        for n in 3..=5 {
+            for d in SwipeDir::ALL {
+                out.push(Self::swipe(n, d));
+            }
+            out.push(Self::pinch(n, true));
+            out.push(Self::pinch(n, false));
+        }
+        for n in 1..=5 {
+            out.push(Self::press(n, false));
+            out.push(Self::press(n, true));
+        }
+        out.push(Self::long_hold());
+        for i in 0..4 {
+            out.push(Self::corner(i, false));
+            out.push(Self::corner(i, true));
+        }
+        for thumb in [false, true] {
+            for f in config::Finger::ALL {
+                for t in config::HoldTrigger::ALL {
+                    out.push(Self::hold_combo(thumb, f, t));
+                }
+            }
+        }
+        out
+    }
+
+    /// The id spelled `token`, if there is one.
+    pub fn parse(token: &str) -> Option<Self> {
+        Self::all().into_iter().find(|id| id.as_str() == token)
+    }
 }
+
+/// Spelling of the pad corners in gesture ids.
+const CORNER_TOKENS: [&str; 4] = ["tl", "tr", "bl", "br"];
 
 impl fmt::Display for GestureId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -69,7 +140,6 @@ pub enum EffectKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "only named through gesture IDs for now")]
 pub enum SwipeDir {
     Left,
     Right,
@@ -77,8 +147,9 @@ pub enum SwipeDir {
     Down,
 }
 
-#[allow(dead_code, reason = "only named through gesture IDs for now")]
 impl SwipeDir {
+    pub const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Up, Self::Down];
+
     fn token(self) -> &'static str {
         match self {
             Self::Left => "left",
@@ -102,7 +173,6 @@ pub enum MultiKind {
 }
 
 impl MultiKind {
-    #[allow(dead_code, reason = "the schema v2 bindings use the gesture IDs next")]
     pub fn gesture_id(self, fingers: usize) -> GestureId {
         match self {
             Self::Tap => GestureId::tap(fingers),
@@ -271,6 +341,29 @@ impl Default for Thresholds {
     }
 }
 
+impl Thresholds {
+    /// The default thresholds with every user-tunable value taken from `[sensitivity]`.
+    /// Debounce, stale and the flick sampling constants are not user settings.
+    pub fn from_sensitivity(s: &Sensitivity) -> Self {
+        let ms = |v: u16| u64::from(v) * 1000;
+        Self {
+            tap_travel_mm: s.tap_travel_mm,
+            tap_max_us: ms(s.tap_ms),
+            hold_travel_mm: s.hold_travel_mm,
+            drag_start_mm: s.drag_start_mm,
+            drag_px_per_mm: s.drag_gain,
+            window_tap_gap_us: ms(s.window_gap_ms),
+            window_start_mm: s.window_start_mm,
+            window_px_per_mm: s.window_gain,
+            flick_speed_mm_s: s.flick_mm_s,
+            multi_pinch_in: s.pinch_in,
+            multi_pinch_out: s.pinch_out,
+            multi_swipe_mm: s.swipe_mm,
+            ..Self::default()
+        }
+    }
+}
+
 /// The bindings of one multi-finger count.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MultiCfg {
@@ -330,29 +423,21 @@ pub struct GestureCfg {
 }
 
 impl GestureCfg {
-    pub fn from_config(cfg: &Config) -> Self {
+    /// The settings for a touch session that began while `exe` was in the foreground. Every
+    /// multi-finger binding goes through the resolver, so a per-app override applies.
+    pub fn from_config(cfg: &Config, exe: Option<&str>) -> Self {
         let drag_n = usize::from(cfg.drag.fingers.clamp(3, 5));
         let swipes_free = |n: usize| !(cfg.drag.enabled && drag_n == n);
-        let four = cfg.four.enabled.then(|| MultiCfg {
-            tap: cfg.four.tap.clone(),
-            swipe_left: cfg.four.swipe_left.clone(),
-            swipe_right: cfg.four.swipe_right.clone(),
-            swipe_up: cfg.four.swipe_up.clone(),
-            swipe_down: cfg.four.swipe_down.clone(),
-            pinch_in: cfg.four.pinch_in.clone(),
-            pinch_out: cfg.four.pinch_out.clone(),
-            swipes: swipes_free(4),
-        });
-        let five = cfg.five.enabled.then(|| MultiCfg {
-            tap: config::Action::None,
-            swipe_left: config::Action::None,
-            swipe_right: config::Action::None,
-            swipe_up: cfg.five.swipe_up.clone(),
-            swipe_down: cfg.five.swipe_down.clone(),
-            pinch_in: cfg.five.pinch_in.clone(),
-            pinch_out: cfg.five.pinch_out.clone(),
-            swipes: swipes_free(5),
-        });
+        let multi = |n: usize| MultiCfg {
+            tap: resolve(cfg, exe, &MultiKind::Tap.gesture_id(n)),
+            swipe_left: resolve(cfg, exe, &MultiKind::SwipeLeft.gesture_id(n)),
+            swipe_right: resolve(cfg, exe, &MultiKind::SwipeRight.gesture_id(n)),
+            swipe_up: resolve(cfg, exe, &MultiKind::SwipeUp.gesture_id(n)),
+            swipe_down: resolve(cfg, exe, &MultiKind::SwipeDown.gesture_id(n)),
+            pinch_in: resolve(cfg, exe, &MultiKind::PinchIn.gesture_id(n)),
+            pinch_out: resolve(cfg, exe, &MultiKind::PinchOut.gesture_id(n)),
+            swipes: swipes_free(n),
+        };
         Self {
             drag: cfg.drag.enabled,
             drag_n,
@@ -360,7 +445,11 @@ impl GestureCfg {
             keep_drag: cfg.drag.keep_drag_on_release,
             window: cfg.window.enabled && cfg.window.move_with_three_finger,
             flick: cfg.window.flick_snap,
-            multi: [None, four, five],
+            multi: [
+                None,
+                cfg.four.enabled.then(|| multi(4)),
+                cfg.five.enabled.then(|| multi(5)),
+            ],
         }
     }
 
@@ -452,14 +541,14 @@ mod tests {
         let mut cfg = Config::default();
         cfg.drag.enabled = true;
         cfg.drag.fingers = 4;
-        let g = GestureCfg::from_config(&cfg);
+        let g = GestureCfg::from_config(&cfg, None);
         let four = g.multi_for(4).unwrap();
         assert!(!four.swipes);
         assert!(four.bound(MultiKind::SwipeLeft).is_none());
         // Pinch and tap stay available (here: unbound by default).
         assert!(four.bound(MultiKind::PinchIn).is_none());
         cfg.drag.fingers = 3;
-        let g = GestureCfg::from_config(&cfg);
+        let g = GestureCfg::from_config(&cfg, None);
         assert!(
             g.multi_for(4)
                 .unwrap()

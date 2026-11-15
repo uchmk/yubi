@@ -26,7 +26,7 @@ pub struct ContactTrack {
 
 /// Device and settings state captured at the first raw touchdown of a session, before any
 /// gesture can emit an action. Later changes only apply to the next session.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Environment {
     /// Pad width and height in mm, when known.
     pub dims_mm: Option<(f32, f32)>,
@@ -34,6 +34,8 @@ pub struct Environment {
     pub config_gen: u64,
     /// The foreground app has yubi switched off.
     pub app_blocked: bool,
+    /// The foreground app's exe name, which picks the per-app profile for the session.
+    pub exe: Option<String>,
 }
 
 /// What one frame changed.

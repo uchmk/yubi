@@ -5,7 +5,7 @@ use std::path::Path;
 use eframe::egui::{RichText, Ui};
 
 use super::Cmd;
-use super::general_io::{GeneralState, HapticStatus, Note, Preview};
+use super::general_io::{GeneralState, HapticStatus, Note, Preview, READ_ONLY_REASON};
 use crate::config::{Config, ThemeChoice};
 use crate::icons;
 use crate::nav::Page;
@@ -35,6 +35,24 @@ pub fn general(
     st.poll(cfg);
     st.demo(cfg);
     widgets::page_header(ui, t, Page::General.label(), Page::General.subtitle());
+    if !st.load_notes.is_empty() {
+        section_header(ui, t, "起動時の確認");
+        let notes = st.load_notes.clone();
+        let mut dismiss = false;
+        group(ui, t, |g| {
+            for n in &notes {
+                g.wrapped_row(|ui| {
+                    ui.label(RichText::new(n).size(t.fs_small).color(t.text));
+                });
+            }
+            g.wrapped_row(|ui| {
+                dismiss = button(ui, t, "閉じる").clicked();
+            });
+        });
+        if dismiss {
+            st.load_notes.clear();
+        }
+    }
     section_header(ui, t, "外観");
     group(ui, t, |g| {
         g.combo_row(
@@ -166,7 +184,7 @@ fn transfer_rows(
                 st.start_import();
             }
         });
-        ui.add_enabled_ui(st.can_undo() && !st.io_busy, |ui| {
+        ui.add_enabled_ui(st.can_undo() && !st.io_busy && !st.read_only, |ui| {
             if button(ui, t, "元に戻す")
                 .on_hover_text(
                     "読み込み前の状態にすべての設定を戻します。その後の変更は失われます。",
@@ -176,7 +194,13 @@ fn transfer_rows(
                 st.undo_import(cfg, config_path);
             }
         });
-        if st.can_undo() && !st.io_busy {
+        if st.read_only {
+            ui.label(
+                RichText::new(READ_ONLY_REASON)
+                    .size(t.fs_small)
+                    .color(t.text_muted),
+            );
+        } else if st.can_undo() && !st.io_busy {
             ui.label(
                 RichText::new(
                     "元に戻すと、読み込み前の状態にすべての設定が戻り、その後の変更は失われます。",
@@ -200,11 +224,18 @@ fn transfer_rows(
         preview_rows(g, t, &p);
         g.wrapped_row(|ui| {
             let changed = !p.changes.is_empty();
-            ui.add_enabled_ui(changed, |ui| {
+            ui.add_enabled_ui(changed && !st.read_only, |ui| {
                 if accent_button(ui, t, "適用").clicked() {
                     st.apply_preview(cfg, config_path);
                 }
             });
+            if st.read_only {
+                ui.label(
+                    RichText::new(READ_ONLY_REASON)
+                        .size(t.fs_small)
+                        .color(t.text_muted),
+                );
+            }
             if button(ui, t, "キャンセル").clicked() {
                 st.cancel_preview();
             }

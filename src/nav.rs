@@ -18,6 +18,7 @@ pub enum Page {
     Window,
     Ring,
     Profiles,
+    Sensitivity,
     Haptic,
     Monitor,
     Diagnostics,
@@ -33,7 +34,7 @@ pub enum Node {
     },
 }
 
-pub const NAV: [Node; 6] = [
+pub const NAV: [Node; 7] = [
     Node::Item(Page::Home),
     Node::Group {
         label: "操作の割り当て",
@@ -52,6 +53,7 @@ pub const NAV: [Node; 6] = [
     },
     Node::Item(Page::Ring),
     Node::Item(Page::Profiles),
+    Node::Item(Page::Sensitivity),
     Node::Group {
         label: "デバイス",
         pages: &[Page::Haptic, Page::Monitor, Page::Diagnostics],
@@ -102,6 +104,7 @@ impl Page {
             Self::Window => "ウィンドウ操作",
             Self::Ring => "リングメニュー",
             Self::Profiles => "アプリ設定",
+            Self::Sensitivity => "感度",
             Self::Haptic => "押し込みと触覚",
             Self::Monitor => "入力モニター",
             Self::Diagnostics => "診断",
@@ -125,6 +128,7 @@ impl Page {
             Self::Window => "ウィンドウの移動・スナップ・サイズ変更を設定します。",
             Self::Ring => "指を置き続けると現れるリング状のメニューです。",
             Self::Profiles => "アプリごとにジェスチャーの有効・無効を切り替えます。",
+            Self::Sensitivity => "ドラッグの速さ、タップやスワイプの判定の厳しさを調整します。",
             Self::Haptic => "押し込みの深さのしきい値と、触覚フィードバックの強さです。",
             Self::Monitor => "トラックパッド上の接触をリアルタイムで表示します。",
             Self::Diagnostics => "デバイス情報、値の範囲、レポートレートを確認します。",
@@ -147,6 +151,7 @@ impl Page {
             Self::Window => icons::WINDOW,
             Self::Ring => icons::RING,
             Self::Profiles => icons::APPS,
+            Self::Sensitivity => icons::SENSITIVITY,
             Self::Haptic => icons::HAPTIC,
             Self::Monitor => icons::MONITOR,
             Self::Diagnostics => icons::DIAGNOSTICS,
@@ -190,7 +195,7 @@ mod tests {
     #[test]
     fn every_page_is_in_the_nav() {
         let pages = all_pages();
-        assert_eq!(pages.len(), 17);
+        assert_eq!(pages.len(), 18);
         assert!(pages.contains(&Page::Home) && pages.contains(&Page::General));
     }
 }

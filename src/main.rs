@@ -57,7 +57,8 @@ fn main() -> eframe::Result {
             fonts::install(&cc.egui_ctx);
             let ctx = cc.egui_ctx.clone();
             let config_path = config::default_path();
-            let cfg = config::load(&config_path);
+            let loaded = config::load_report(&config_path);
+            let cfg = loaded.config.clone();
             let tray = if plain {
                 None
             } else {
@@ -70,7 +71,7 @@ fn main() -> eframe::Result {
                     .send_viewport_cmd(egui::ViewportCommand::Visible(true));
             }
             let engine = engine::Engine::start(cfg, move || ctx.request_repaint(), record);
-            let mut app = app::App::new(&cc.egui_ctx, engine);
+            let mut app = app::App::new(&cc.egui_ctx, engine, loaded);
             app.set_resident(tray, background);
             Ok(Box::new(app))
         }),

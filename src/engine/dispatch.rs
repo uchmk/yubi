@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use super::executor::{Executor, InputSink, Key, MouseButton};
 use super::recognizer::{Action, GestureEvent, SnapDir, Thresholds};
 use super::types::MultiKind;
-use crate::config::{self, Profile};
+use crate::config;
 use crate::os::keys::KeyCombo;
 
 pub const ELEVATED_NOTE: &str = "管理者のウィンドウは動かせません";
@@ -20,16 +20,6 @@ const RELEASED_LATER_NOTE: &str = "ボタンを離しました";
 pub const WORKER_NOTE: &str = "ウィンドウ操作を開始できませんでした";
 pub const NO_CURSOR_NOTE: &str = "カーソル位置を取得できませんでした";
 const LEFT: Key = Key::Mouse(MouseButton::Left);
-
-/// True if a profile for `exe` (case-insensitive) turns yubi off for that app.
-pub fn app_blocked(profiles: &[Profile], exe: Option<&str>) -> bool {
-    let Some(exe) = exe else {
-        return false;
-    };
-    profiles
-        .iter()
-        .any(|p| !p.enabled && p.exe_name.trim().eq_ignore_ascii_case(exe))
-}
 
 /// Turns fractional pixel movement into whole pixels, carrying the remainder to the next call.
 #[derive(Debug, Default, Clone, Copy)]
@@ -59,7 +49,12 @@ pub enum Plan {
     /// Press these in order, release in reverse.
     Keys(Vec<Key>),
     Click(MouseButton),
-    /// Not implemented yet (volume, brightness, ring menu) or "none".
+    /// Change the master volume by this many percentage points.
+    Volume(i8),
+    /// Change the display brightness by this many percentage points.
+    Brightness(i8),
+    ToggleMute,
+    /// Not implemented yet (ring menu) or "none".
     Nothing,
     /// The action cannot run; the text is for the diagnostics page.
     Invalid(String),
@@ -99,8 +94,11 @@ pub fn plan_for(action: &config::Action) -> Plan {
         A::MiddleClick => Plan::Click(MouseButton::Middle),
         A::RightClick => Plan::Click(MouseButton::Right),
         A::Keys(s) => keys_plan(s),
-        // Volume and brightness come with M3b, the ring menu with M3c.
-        A::Volume | A::Brightness | A::RingMenu | A::None => Plan::Nothing,
+        A::VolumeStep(n) => Plan::Volume(*n),
+        A::BrightnessStep(n) => Plan::Brightness(*n),
+        A::ToggleMute => Plan::ToggleMute,
+        // The ring menu comes with M3c.
+        A::RingMenu | A::None => Plan::Nothing,
     }
 }
 
@@ -140,6 +138,8 @@ pub struct Dispatcher {
     /// A window move was accepted and not yet ended.
     win_active: bool,
     last_multi: Option<(usize, MultiKind)>,
+    /// Volume and brightness, opened on first use (engine thread only).
+    sys: SystemOps,
 }
 
 impl Dispatcher {
@@ -179,6 +179,7 @@ impl Dispatcher {
             win_join: None,
             win_active: false,
             last_multi: None,
+            sys: SystemOps::default(),
         }
     }
 
@@ -345,9 +346,127 @@ impl Dispatcher {
             } else {
                 SEND_FAILED_NOTE.to_owned()
             }),
+            Plan::Volume(n) => Some(match self.sys.volume_step(n) {
+                Ok(v) => format!("{source} → {label}（{}%）", percent(v)),
+                Err(e) => e,
+            }),
+            Plan::ToggleMute => Some(match self.sys.toggle_mute() {
+                Ok(muted) => format!(
+                    "{source} → {}",
+                    if muted {
+                        "ミュート"
+                    } else {
+                        "ミュート解除"
+                    }
+                ),
+                Err(e) => e,
+            }),
+            Plan::Brightness(n) => Some(match self.sys.brightness_step(n) {
+                Ok(v) => format!("{source} → {label}（{}%）", percent(v)),
+                Err(e) => e,
+            }),
             Plan::Nothing => Some(format!("{source} → {label}（まだ動作しません）")),
             Plan::Invalid(msg) => Some(msg),
         }
+    }
+}
+
+/// A fraction 0..=1 as a whole percentage.
+fn percent(v: f32) -> u32 {
+    (v * 100.0).round().clamp(0.0, 100.0) as u32
+}
+
+/// The fraction a step of `n` percentage points adds.
+pub fn step_fraction(n: i8) -> f32 {
+    f32::from(n) / 100.0
+}
+
+const VOLUME_FAILED_NOTE: &str = "音量を変えられませんでした";
+const BRIGHTNESS_UNKNOWN_NOTE: &str = "明るさを読み取っています。もう一度お試しください";
+const BRIGHTNESS_FAILED_NOTE: &str = "明るさを変えられませんでした";
+
+thread_local! {
+    /// The audio endpoint is a COM object that must stay on the thread that opened it (the engine
+    /// thread), so it lives here instead of in the `Send` dispatcher.
+    static VOLUME: std::cell::RefCell<Option<crate::os::volume::Volume>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` on the engine thread's audio endpoint, opening it on first use.
+fn with_volume<T>(
+    f: impl FnOnce(&crate::os::volume::Volume) -> windows::core::Result<T>,
+) -> Result<T, String> {
+    VOLUME.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot =
+                Some(crate::os::volume::Volume::open().map_err(|_| VOLUME_FAILED_NOTE.to_owned())?);
+        }
+        let vol = slot.as_ref().ok_or_else(|| VOLUME_FAILED_NOTE.to_owned())?;
+        f(vol).map_err(|_| {
+            // A device change invalidates the endpoint: reopen it on the next use.
+            *slot = None;
+            VOLUME_FAILED_NOTE.to_owned()
+        })
+    })
+}
+
+/// The OS side of the volume and brightness actions. Both are opened on first use.
+#[derive(Default)]
+struct SystemOps {
+    brightness: Option<crate::os::brightness::BrightnessWorker>,
+    /// The brightness the last step asked for (the worker applies it later) and the worker's
+    /// report generation when it was asked. It lives across gestures, so two quick gestures both
+    /// count, until the worker reports back (see [`pending_brightness`]).
+    brightness_target: Option<(f32, u64)>,
+}
+
+/// The step target that is still waiting for the worker, or `None` once the worker has reported:
+/// a failed set, or the value we asked for. A report of an older value (a newer set is still
+/// queued) keeps the target.
+fn pending_brightness(
+    target: Option<(f32, u64)>,
+    status: &crate::os::brightness::WorkerStatus,
+) -> Option<(f32, u64)> {
+    let (v, generation) = target?;
+    if status.generation == generation {
+        return target;
+    }
+    let applied = status.value.is_some_and(|c| (c - v).abs() < 0.005);
+    if status.error.is_none() && !applied {
+        target
+    } else {
+        None
+    }
+}
+
+impl SystemOps {
+    fn volume_step(&mut self, n: i8) -> Result<f32, String> {
+        with_volume(|v| v.step(step_fraction(n)))
+    }
+
+    fn toggle_mute(&mut self) -> Result<bool, String> {
+        with_volume(|v| v.toggle_mute())
+    }
+
+    /// Never blocks: the worker thread talks to the display. The first call only asks for a read.
+    fn brightness_step(&mut self, n: i8) -> Result<f32, String> {
+        let worker = self
+            .brightness
+            .get_or_insert_with(crate::os::brightness::BrightnessWorker::spawn);
+        let status = worker.status();
+        self.brightness_target = pending_brightness(self.brightness_target, &status);
+        let Some(current) = self.brightness_target.map(|t| t.0).or(status.value) else {
+            worker.refresh();
+            return Err(match status.error {
+                Some(_) => BRIGHTNESS_FAILED_NOTE.to_owned(),
+                None => BRIGHTNESS_UNKNOWN_NOTE.to_owned(),
+            });
+        };
+        let v = crate::os::volume::step_value(current, step_fraction(n));
+        worker.set(v);
+        self.brightness_target = Some((v, status.generation));
+        Ok(v)
     }
 }
 
@@ -429,8 +548,32 @@ fn run_worker(rx: Receiver<WinCmd>, notify: impl Fn(String)) {
 
 #[cfg(test)]
 mod tests {
+    use super::pending_brightness;
+    use crate::os::brightness::WorkerStatus;
+
+    #[test]
+    fn brightness_target_survives_until_the_worker_reports() {
+        let st = |value, generation, failed: bool| WorkerStatus {
+            value,
+            error: failed.then_some(crate::os::brightness::BrightnessError::Unsupported),
+            generation,
+        };
+        let t = Some((0.6, 4));
+        // Nothing reported since the set: a second quick gesture steps from the target.
+        assert_eq!(pending_brightness(t, &st(Some(0.5), 4, false)), t);
+        // An earlier set landed while a newer one is queued: still pending.
+        assert_eq!(pending_brightness(t, &st(Some(0.55), 5, false)), t);
+        // The asked value was applied: the worker value is authoritative again.
+        assert_eq!(pending_brightness(t, &st(Some(0.6), 5, false)), None);
+        // A failed set drops the target.
+        assert_eq!(pending_brightness(t, &st(Some(0.5), 5, true)), None);
+        assert_eq!(pending_brightness(None, &st(None, 0, false)), None);
+    }
+
     use super::*;
+    use crate::config::Profile;
     use crate::engine::executor::SynthEvent;
+    use crate::engine::resolve::app_blocked;
     use std::cell::Cell;
     use std::rc::Rc;
     use std::sync::mpsc::Receiver;
@@ -462,6 +605,7 @@ mod tests {
         Profile {
             exe_name: exe.to_owned(),
             enabled,
+            ..Profile::default()
         }
     }
 
@@ -541,7 +685,9 @@ mod tests {
             plan_for(&A::Keys("Ctrl+".into())),
             Plan::Invalid(_)
         ));
-        assert_eq!(plan_for(&A::Volume), Plan::Nothing);
+        assert_eq!(plan_for(&A::VolumeStep(5)), Plan::Volume(5));
+        assert_eq!(plan_for(&A::BrightnessStep(-5)), Plan::Brightness(-5));
+        assert_eq!(plan_for(&A::ToggleMute), Plan::ToggleMute);
         assert_eq!(plan_for(&A::None), Plan::Nothing);
     }
 

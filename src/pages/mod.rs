@@ -3,6 +3,7 @@ pub mod features;
 pub mod general;
 pub mod general_io;
 pub mod home;
+pub mod sensitivity;
 
 use crate::nav::Page;
 

@@ -1,12 +1,12 @@
 //! アプリごとの割り当て: the list of per-app profiles and the editor of one profile's overrides.
 //! Overrides are only offered for the gestures the resolver honours (see `overview::overridable_ids`).
 
-use eframe::egui::{self, RichText, Ui};
+use eframe::egui::{self, Align, Layout, RichText, Ui};
 
 use super::Cmd;
 use super::overview::{feature_on, gesture_name, overridable_ids, page_of, profile_title};
 use crate::config::{
-    Action, ActionKind, Config, CustomEdge, EDGE_KEYS, EdgeKind, EdgeTarget, Profile,
+    Action, ActionKind, Config, Cursor, CustomEdge, EDGE_KEYS, EdgeKind, EdgeTarget, Profile,
 };
 use crate::engine::resolve::{basename, profile_matches};
 use crate::icons;
@@ -135,7 +135,7 @@ pub fn apply_edge_choice(p: &mut Profile, key: &str, choice: EdgeChoice) {
 
 /// How many gestures and edges the profile replaces.
 pub fn override_count(p: &Profile) -> usize {
-    p.overrides.len() + p.edge_overrides.len()
+    p.overrides.len() + p.edge_overrides.len() + usize::from(p.cursor_speed.is_some())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -446,6 +446,7 @@ fn detail(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState, i: usiz
         })
         .collect();
 
+    let global_speed = cfg.cursor.speed;
     let p = &mut cfg.profiles[i];
     let count = override_count(p);
     ui.add_enabled_ui(!blocked, |ui| {
@@ -456,6 +457,9 @@ fn detail(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState, i: usiz
                     .color(t.text_muted),
             );
         }
+        section_header(ui, t, "カーソル");
+        group(ui, t, |g| cursor_row(g, t, p, global_speed));
+
         let options = Choice::options();
         for page in [Page::Four, Page::Five, Page::CustomPress] {
             let rows: Vec<&Info> = infos.iter().filter(|x| x.page == page).collect();
@@ -539,9 +543,98 @@ fn detail(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState, i: usiz
             {
                 p.overrides.clear();
                 p.edge_overrides.clear();
+                p.cursor_speed = None;
             }
         }
     });
+}
+
+/// The per-app cursor speed: 「全体と同じ」 or a value of its own. It only applies while yubi
+/// manages the cursor speed globally (the resolver returns nothing otherwise).
+fn cursor_row(g: &mut widgets::Group<'_>, t: &Tokens, p: &mut Profile, global: Option<u8>) {
+    let support = crate::os::touchpad::support();
+    let usable = support.is_ok();
+    let managed = global.is_some();
+    let desc = match (&support, global) {
+        (Err(e), _) => e.reason().to_owned(),
+        (Ok(()), Some(v)) => format!("全体: {v}"),
+        (Ok(()), None) => "全体: 管理していません".to_owned(),
+    };
+    g.row(None, "カーソルの速度", &desc, |ui| {
+        ui.add_enabled_ui(usable && managed, |ui| {
+            let mut choice = SpeedChoice::of(p.cursor_speed);
+            if combo_sized(
+                ui,
+                t,
+                t.combo_w,
+                "profile-cursor-speed",
+                &mut choice,
+                &[SpeedChoice::Inherit, SpeedChoice::Own],
+                SpeedChoice::label,
+            ) {
+                apply_speed_choice(p, choice == SpeedChoice::Own, global);
+            }
+        });
+    });
+    if let Some(v) = p.cursor_speed.as_mut() {
+        let (lo, hi) = Cursor::RANGE;
+        let spec = SliderSpec::int(u16::from(lo), u16::from(hi), 1, "");
+        g.row(None, "このアプリの値", "", |ui| {
+            ui.add_enabled_ui(usable && managed, |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // The first widget added sits rightmost.
+                    ui.label(RichText::new(v.to_string()).size(t.fs_body));
+                    ui.add_space(t.space_sm);
+                    ui.label(RichText::new("速い").size(t.fs_small).color(t.text_muted));
+                    let mut x = f64::from(*v);
+                    if widgets::slider(ui, t, &mut x, spec) {
+                        *v = <u8 as widgets::Num>::from_f64(x);
+                    }
+                    ui.label(RichText::new("遅い").size(t.fs_small).color(t.text_muted));
+                });
+            });
+        });
+    }
+    if usable && !managed {
+        g.wrapped_row(|ui| {
+            ui.label(
+                RichText::new(
+                    "アプリごとの速さは、全体で「yubi でカーソルの速度を管理する」がオンのときだけ使われます。",
+                )
+                .size(t.fs_small)
+                .color(t.text_muted),
+            );
+        });
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpeedChoice {
+    Inherit,
+    Own,
+}
+
+impl SpeedChoice {
+    fn of(v: Option<u8>) -> Self {
+        if v.is_some() {
+            Self::Own
+        } else {
+            Self::Inherit
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Inherit => "全体と同じ",
+            Self::Own => "このアプリの値",
+        }
+    }
+}
+
+/// Switch the profile between 「全体と同じ」 and a value of its own (starting at the global one).
+fn apply_speed_choice(p: &mut Profile, own: bool, global: Option<u8>) {
+    p.cursor_speed =
+        own.then(|| Cursor::clamp_speed(global.unwrap_or(crate::os::touchpad::SPEED_DEFAULT)));
 }
 
 fn custom_edge_rows(g: &mut widgets::Group<'_>, t: &Tokens, c: &mut CustomEdge) {
@@ -651,6 +744,17 @@ mod tests {
         apply_edge_choice(&mut p, "edge.left", EdgeChoice::Inherit);
         assert!(p.edge_overrides.is_empty());
         assert_eq!(EdgeChoice::of(None), EdgeChoice::Inherit);
+    }
+
+    #[test]
+    fn the_cursor_speed_choice_starts_at_the_global_value() {
+        let mut p = profile("a.exe");
+        apply_speed_choice(&mut p, true, Some(14));
+        assert_eq!(p.cursor_speed, Some(14));
+        assert_eq!(override_count(&p), 1);
+        apply_speed_choice(&mut p, false, Some(14));
+        assert_eq!(p.cursor_speed, None);
+        assert_eq!(SpeedChoice::of(None), SpeedChoice::Inherit);
     }
 
     #[test]

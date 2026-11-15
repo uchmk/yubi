@@ -37,6 +37,8 @@ pub struct CursorSpeed<B: Backend> {
     original: Option<u8>,
     /// The last value yubi set.
     applied: Option<u8>,
+    /// A short Japanese note about the last failure, for the UI; cleared by `take_note`.
+    note: Option<&'static str>,
 }
 
 impl<B: Backend> CursorSpeed<B> {
@@ -46,7 +48,17 @@ impl<B: Backend> CursorSpeed<B> {
             marker,
             original: None,
             applied: None,
+            note: None,
         }
+    }
+
+    #[cfg(test)]
+    pub fn into_backend(self) -> B {
+        self.backend
+    }
+
+    pub fn take_note(&mut self) -> Option<&'static str> {
+        self.note.take()
     }
 
     /// At start: a marker file means an earlier yubi died with a temporary value live; put the
@@ -77,13 +89,15 @@ impl<B: Backend> CursorSpeed<B> {
                     let Some(cur) = self.backend.get() else {
                         return;
                     };
-                    self.original = Some(cur);
-                    if let Some(path) = &self.marker {
-                        if let Some(dir) = path.parent() {
-                            let _ = std::fs::create_dir_all(dir);
-                        }
-                        let _ = std::fs::write(path, cur.to_string());
+                    if let Some(path) = &self.marker
+                        && !write_marker(path, cur)
+                    {
+                        // Without the marker a crash could not be undone: leave the speed alone.
+                        self.note =
+                            Some("カーソルの速度を記録できなかったため、変更しませんでした");
+                        return;
                     }
+                    self.original = Some(cur);
                 }
                 if self.backend.set(v) {
                     self.applied = Some(v);
@@ -107,6 +121,17 @@ impl<B: Backend> CursorSpeed<B> {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+/// Write the marker through a temp file and a rename, so a truncated marker never appears.
+fn write_marker(path: &std::path::Path, value: u8) -> bool {
+    if let Some(dir) = path.parent()
+        && std::fs::create_dir_all(dir).is_err()
+    {
+        return false;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, value.to_string()).is_ok() && std::fs::rename(&tmp, path).is_ok()
 }
 
 #[cfg(test)]
@@ -200,6 +225,23 @@ mod tests {
         c.recover();
         assert_eq!(f.value, 10);
         assert!(!marker.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_marker_write_leaves_the_speed_alone() {
+        let dir = std::env::temp_dir().join(format!("yubi-cursor-nomark-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The marker path is a directory, so the rename cannot succeed.
+        let marker = dir.join("m");
+        std::fs::create_dir_all(&marker).unwrap();
+        let mut f = fake(10);
+        let mut c = CursorSpeed::new(&mut f, Some(marker));
+        c.sync(Some(18));
+        assert!(c.take_note().is_some());
+        assert!(c.original.is_none());
+        assert!(f.writes.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

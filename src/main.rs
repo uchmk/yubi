@@ -71,7 +71,7 @@ fn main() -> eframe::Result {
                 cc.egui_ctx
                     .send_viewport_cmd(egui::ViewportCommand::Visible(true));
             }
-            let engine = engine::Engine::start(cfg, move || ctx.request_repaint(), record);
+            let engine = engine::Engine::start(cfg, move || ctx.request_repaint(), record, !plain);
             let mut app = app::App::new(&cc.egui_ctx, engine, loaded);
             app.set_resident(tray, background);
             Ok(Box::new(app))

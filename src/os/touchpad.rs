@@ -121,7 +121,9 @@ pub fn support() -> Result<(), Unsupported> {
     static CACHE: OnceLock<Result<(), Unsupported>> = OnceLock::new();
     CACHE
         .get_or_init(|| {
-            if std::env::var_os("YUBI_CURSOR_UNSUPPORTED").is_some() {
+            if std::env::var_os("YUBI_SHOT").is_some()
+                && std::env::var_os("YUBI_CURSOR_UNSUPPORTED").is_some()
+            {
                 return Err(Unsupported::Refused);
             }
             let p = get().ok_or(Unsupported::Refused)?;

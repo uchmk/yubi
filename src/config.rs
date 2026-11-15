@@ -391,7 +391,13 @@ fn lenient_count<'de, D: Deserializer<'de>>(d: D, what: &str, default: u8) -> Re
 /// alone, with a note); a number out of range saturates and `Config::normalize` clamps it.
 fn cursor_speed<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u8>, D::Error> {
     Ok(match CountWire::deserialize(d)? {
-        CountWire::Int(n) => Some(n.clamp(0, i64::from(u8::MAX)) as u8),
+        CountWire::Int(n) => {
+            let stored = n.clamp(0, i64::from(u8::MAX)) as u8;
+            if i64::from(stored) != n {
+                scan_note(|s| s.raw_speeds.push((stored, n)));
+            }
+            Some(stored)
+        }
         CountWire::Other(_) => {
             scan_note(|s| {
                 s.bad.push(
@@ -452,6 +458,9 @@ struct Scan {
     /// Whole-number sensitivity values the file held that do not fit the stored type, by their
     /// Japanese name: the clamp report shows these, not the saturated stored value.
     raw_nums: Vec<(&'static str, f64)>,
+    /// Cursor speeds from the file that saturated to `u8` (stored value, value as written), in
+    /// file order: the clamp report shows what was written.
+    raw_speeds: Vec<(u8, i64)>,
 }
 
 thread_local! {
@@ -1819,8 +1828,20 @@ fn finite_or(v: f32, fallback: f32) -> f32 {
 ///
 /// `raw_nums` holds numbers from the file that the parsed `raw` could not keep (a `u16`
 /// saturates): those are shown as written.
-fn clamp_report(raw: &Config, norm: &Config, raw_nums: &[(&'static str, f64)]) -> Vec<String> {
+fn clamp_report(
+    raw: &Config,
+    norm: &Config,
+    raw_nums: &[(&'static str, f64)],
+    raw_speeds: &[(u8, i64)],
+) -> Vec<String> {
     let mut w = Vec::new();
+    let mut raw_speeds = raw_speeds.to_vec();
+    let mut written = |v: u8| {
+        raw_speeds
+            .iter()
+            .position(|(s, _)| *s == v)
+            .map_or_else(|| v.to_string(), |i| raw_speeds.remove(i).1.to_string())
+    };
     let mut note = |name: &str, before: String, after: String| {
         if before != after {
             w.push(format!(
@@ -1899,13 +1920,13 @@ fn clamp_report(raw: &Config, norm: &Config, raw_nums: &[(&'static str, f64)]) -
         }
     }
     if let (Some(b), Some(a)) = (raw.cursor.speed, norm.cursor.speed) {
-        note("カーソルの速度", b.to_string(), a.to_string());
+        note("カーソルの速度", written(b), a.to_string());
     }
     for (rp, np) in raw.profiles.iter().zip(&norm.profiles) {
         if let (Some(b), Some(a)) = (rp.cursor_speed, np.cursor_speed) {
             note(
                 &format!("「{}」のカーソルの速度", rp.exe_name.trim()),
-                b.to_string(),
+                written(b),
                 a.to_string(),
             );
         }
@@ -2150,7 +2171,12 @@ pub fn parse_text(text: &str) -> Result<Parsed, ParseError> {
         }
     }
     config.profiles = profiles;
-    warnings.extend(clamp_report(&raw, &config, &scan.raw_nums));
+    warnings.extend(clamp_report(
+        &raw,
+        &config,
+        &scan.raw_nums,
+        &scan.raw_speeds,
+    ));
     Ok(Parsed {
         config,
         warnings,
@@ -3569,6 +3595,18 @@ cursor_speed = \"fast\"
             p.warnings.iter().any(|w| w.contains("整数ではない")),
             "{:?}",
             p.warnings
+        );
+        let big = parse_text(
+            "schema_version = 2
+[cursor]
+speed = 300
+",
+        )
+        .unwrap();
+        assert!(
+            big.warnings.iter().any(|w| w.contains("300 は範囲外")),
+            "{:?}",
+            big.warnings
         );
     }
 }

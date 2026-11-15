@@ -182,6 +182,7 @@ impl Engine {
         cfg: Config,
         wake: impl Fn() + Send + Sync + 'static,
         record: Option<PathBuf>,
+        manage_cursor: bool,
     ) -> Self {
         let wake = Arc::new(wake);
         let mut input = input::spawn({
@@ -239,6 +240,7 @@ impl Engine {
                     .parent()
                     .map(|d| d.join("cursor-original.txt")),
             ),
+            manage_cursor,
             prev_contacts: 0,
             last_release_retry: None,
             haptics: None,
@@ -314,6 +316,8 @@ struct Worker {
     fg_exe: Option<String>,
     /// The touchpad cursor speed, switched per app (see `cursor`).
     cursor: cursor::CursorSpeed<cursor::Os>,
+    /// False for throwaway runs (`--record`, screenshots): they never touch the cursor speed.
+    manage_cursor: bool,
     /// Contacts in the previous frame (a touch begins when this is 0 and the next frame is not).
     prev_contacts: usize,
     last_release_retry: Option<Instant>,
@@ -340,7 +344,9 @@ impl Worker {
                 }
             }
         }
-        self.cursor.recover();
+        if self.manage_cursor {
+            self.cursor.recover();
+        }
         while !self.stop.load(Ordering::SeqCst) {
             self.sync_config();
             self.sync_interrupts();
@@ -458,6 +464,8 @@ impl Worker {
         if paused {
             self.release_everything();
         }
+        // Paused: Windows' own speed is back; on resume the effective one is applied again.
+        self.sync_cursor();
         self.with_state(|s| s.paused = paused);
         (self.wake)();
     }
@@ -583,8 +591,15 @@ impl Worker {
     /// Windows call is a quick in-process one (well under a millisecond) and runs on this thread,
     /// never the UI's; `sync` writes only when the value changes.
     fn sync_cursor(&mut self) {
-        let want = resolve::effective_cursor_speed(&self.cfg, self.fg_exe.as_deref());
+        if !self.manage_cursor {
+            return;
+        }
+        let want = cursor_target(&self.cfg, self.fg_exe.as_deref(), self.paused);
         self.cursor.sync(want);
+        if let Some(note) = self.cursor.take_note() {
+            self.with_state(|s| s.last_action = Some(note.to_owned()));
+            (self.wake)();
+        }
     }
 
     fn apply(&mut self, actions: Vec<Action>) {
@@ -673,6 +688,23 @@ impl Worker {
 
 /// The contacts the recognizer starts sessions from (the same predicate as its own filter): a
 /// resting palm or a low-confidence contact does not count.
+/// The cursor speed yubi wants: nothing (Windows' own) while paused.
+fn cursor_target(cfg: &Config, exe: Option<&str>, paused: bool) -> Option<u8> {
+    if paused {
+        None
+    } else {
+        resolve::effective_cursor_speed(cfg, exe)
+    }
+}
+
+/// A panic in the engine thread unwinds through here, so the user's speed still comes back (an
+/// abort would skip it; the marker file then covers it at the next start).
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.cursor.restore();
+    }
+}
+
 fn active_contacts(frame: &Frame) -> usize {
     frame
         .contacts
@@ -688,6 +720,31 @@ fn touch_began(prev: usize, now: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cursor_speed_is_handed_back_while_paused() {
+        let mut cfg = Config::default();
+        cfg.cursor.speed = Some(12);
+        assert_eq!(cursor_target(&cfg, None, false), Some(12));
+        assert_eq!(cursor_target(&cfg, None, true), None);
+        let mut speed = cursor::CursorSpeed::new(FakeOs(10, Vec::new()), None);
+        speed.sync(cursor_target(&cfg, None, false));
+        speed.sync(cursor_target(&cfg, None, true));
+        speed.sync(cursor_target(&cfg, None, false));
+        assert_eq!(speed.into_backend().1, vec![12, 10, 12]);
+    }
+
+    struct FakeOs(u8, Vec<u8>);
+    impl cursor::Backend for FakeOs {
+        fn get(&mut self) -> Option<u8> {
+            Some(self.0)
+        }
+        fn set(&mut self, speed: u8) -> bool {
+            self.0 = speed;
+            self.1.push(speed);
+            true
+        }
+    }
+
     #[test]
     fn foreground_is_forced_only_when_a_touch_begins() {
         use super::touch_began;

@@ -26,6 +26,10 @@ pub enum Fixture {
     NoProfiles,
     /// A few profiles with overrides, a stopped app and long names; some conflicting settings.
     DemoProfiles,
+    /// `DemoProfiles` with the cursor speed managed (12) and a 16 in the first profile.
+    DemoSpeedOn,
+    /// `DemoProfiles` with the cursor speed not managed.
+    DemoSpeedOff,
 }
 
 impl Fixture {
@@ -34,6 +38,12 @@ impl Fixture {
         match self {
             Self::Keep => {}
             Self::NoProfiles => cfg.profiles.clear(),
+            Self::DemoSpeedOn | Self::DemoSpeedOff => {
+                Self::DemoProfiles.apply(cfg);
+                let on = self == Self::DemoSpeedOn;
+                cfg.cursor.speed = on.then_some(12);
+                cfg.profiles[0].cursor_speed = on.then_some(16);
+            }
             Self::DemoProfiles => {
                 cfg.gestures_enabled = true;
                 cfg.four.enabled = true;
@@ -211,9 +221,27 @@ impl DevShot {
                     Fixture::DemoProfiles,
                     Some(2),
                 ),
+                (
+                    "apps-detail-speed-on",
+                    Page::Profiles,
+                    Fixture::DemoSpeedOn,
+                    Some(0),
+                ),
+                (
+                    "apps-detail-speed-off",
+                    Page::Profiles,
+                    Fixture::DemoSpeedOff,
+                    Some(0),
+                ),
                 ("overview", Page::Overview, Fixture::DemoProfiles, None),
                 ("overview-empty", Page::Overview, Fixture::NoProfiles, None),
             ] {
+                // The speed row sits low in the editor: a taller window shows it without scrolling.
+                let size = if n.contains("speed") {
+                    Vec2::new(size.x, 1000.0)
+                } else {
+                    size
+                };
                 shots.push(Shot {
                     name: format!("cfg-{size_name}-{n}"),
                     page,

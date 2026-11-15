@@ -100,15 +100,15 @@ pub fn press_scene(ui: &mut Ui, t: &Tokens, anim: Anim, fingers: usize) -> usize
         finger(&p, t, c, dot, frame.finger);
     }
 
-    // Depth bar: filled from the bottom, with the two marks.
+    // Depth bar: filled from the top down (a press goes in), with the two marks.
     let bar = Rect::from_min_size(
         Pos2::new(pad.right() + 22.0, pad.top()),
         Vec2::new(12.0, pad.height()),
     );
     p.rect_filled(bar, 3.0, track(t));
     let fill = Rect::from_min_max(
-        Pos2::new(bar.left(), bar.bottom() - bar.height() * frame.depth),
-        bar.right_bottom(),
+        bar.left_top(),
+        Pos2::new(bar.right(), bar.top() + bar.height() * frame.depth),
     );
     p.rect_filled(fill, 3.0, t.accent);
     let font = FontId::proportional(t.fs_small);
@@ -116,7 +116,7 @@ pub fn press_scene(ui: &mut Ui, t: &Tokens, anim: Anim, fingers: usize) -> usize
         (PRESS_DEEP, "深い押し込み", frame.deep),
         (PRESS_LIGHT, "軽い押し込み", frame.light),
     ] {
-        let y = bar.bottom() - bar.height() * at;
+        let y = bar.top() + bar.height() * at;
         let color = if hit { t.text } else { t.text_muted };
         p.line_segment(
             [

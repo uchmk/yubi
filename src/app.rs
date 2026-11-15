@@ -1,46 +1,25 @@
-//! App shell: left navigation, page routing, input draining, debounced config saves.
+//! App shell: top bar with search, navigation pane, page routing, input draining, debounced saves.
 
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Button, Frame, Margin, Panel, RichText, ScrollArea, Stroke, Ui, Vec2};
+use eframe::egui::{
+    self, Area, CentralPanel, Frame, Id, Key, Margin, Order, Panel, Pos2, RichText, ScrollArea,
+    Sense, Shape, Stroke, Ui,
+};
 
 use crate::config::{self, Config};
+use crate::icons;
 use crate::input::InputEvent;
-use crate::pages::{diagnostics::Diagnostics, settings};
-use crate::theme::Tokens;
+use crate::nav::{NAV, Node, Page};
+use crate::pages::{Cmd, diagnostics::Diagnostics, features, general, home};
+use crate::search::{self, Entry};
+use crate::theme::{self, Tokens};
+use crate::widgets::{device_status, icon_button, nav_group_header, nav_item, paint_icon};
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Page {
-    Diagnostics,
-    Gestures,
-    Press,
-    Profiles,
-    Ring,
-}
-
-impl Page {
-    const ALL: [Self; 5] = [
-        Self::Diagnostics,
-        Self::Gestures,
-        Self::Press,
-        Self::Profiles,
-        Self::Ring,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Diagnostics => "診断",
-            Self::Gestures => "ジェスチャー",
-            Self::Press => "押し込みと触覚",
-            Self::Profiles => "アプリ別プロファイル",
-            Self::Ring => "リングメニュー",
-        }
-    }
-}
 
 pub struct App {
     page: Page,
@@ -50,20 +29,39 @@ pub struct App {
     dirty_since: Option<Instant>,
     rx: Receiver<InputEvent>,
     diagnostics: Diagnostics,
+    applied_theme: config::ThemeChoice,
+    /// User preference for the nav pane when the window is wide.
+    nav_collapsed: bool,
+    /// User override for the nav pane when the window is narrow (rail by default, full when true).
+    nav_expanded_narrow: bool,
+    group_open: [bool; NAV.len()],
+    query: String,
+    search_open: bool,
+    search_index: Vec<Entry>,
+    devshot: Option<crate::devshot::DevShot>,
 }
 
 impl App {
-    pub fn new(rx: Receiver<InputEvent>) -> Self {
+    pub fn new(ctx: &egui::Context, rx: Receiver<InputEvent>) -> Self {
         let config_path = config::default_path();
         let cfg = config::load(&config_path);
+        theme::apply(ctx, cfg.general.theme);
         Self {
-            page: Page::Diagnostics,
+            page: Page::Home,
             saved: cfg.clone(),
+            applied_theme: cfg.general.theme,
             cfg,
             config_path,
             dirty_since: None,
             rx,
             diagnostics: Diagnostics::default(),
+            nav_collapsed: false,
+            nav_expanded_narrow: false,
+            group_open: [true; NAV.len()],
+            query: String::new(),
+            search_open: false,
+            search_index: search::index(),
+            devshot: crate::devshot::DevShot::from_env(),
         }
     }
 
@@ -91,78 +89,282 @@ impl App {
         ctx.request_repaint_after(SAVE_DEBOUNCE);
     }
 
-    fn sidebar(&mut self, ui: &mut Ui, t: &Tokens) {
-        ui.add_space(t.space_sm);
-        ui.label(RichText::new("yubi").strong().size(18.0));
-        ui.add_space(t.space_md);
-        let width = ui.available_width();
-        for page in Page::ALL {
-            let selected = self.page == page;
-            // The marker and bold text show the selection without relying on color alone.
-            let text = if selected {
-                RichText::new(format!("▎{}", page.label()))
-                    .strong()
-                    .color(t.accent)
-            } else {
-                RichText::new(page.label())
-            };
-            let button = Button::new(text)
-                .min_size(Vec2::new(width, 32.0))
-                .fill(if selected {
-                    t.accent_soft
-                } else {
-                    egui::Color32::TRANSPARENT
-                })
-                .stroke(Stroke::NONE)
-                .truncate();
-            if ui.add(button).clicked() {
-                self.page = page;
+    fn run(&mut self, cmd: Cmd) {
+        match cmd {
+            Cmd::Goto(p) => self.page = p,
+            Cmd::OpenConfigFolder => {
+                if let Some(dir) = self.config_path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                    let _ = Command::new("explorer").arg(dir).spawn();
+                }
             }
         }
+    }
+
+    fn top_bar(&mut self, ui: &mut Ui, t: &Tokens, narrow: bool) {
+        let mut goto = None;
+        let mut text_rect = egui::Rect::NOTHING;
+        ui.horizontal_centered(|ui| {
+            if icon_button(ui, t, icons::MENU, "ナビゲーションの切り替え").clicked() {
+                if narrow {
+                    self.nav_expanded_narrow = !self.nav_expanded_narrow;
+                } else {
+                    self.nav_collapsed = !self.nav_collapsed;
+                }
+            }
+            ui.label(RichText::new("yubi").font(t.font_semibold(t.fs_section)));
+            ui.add_space(t.space_lg);
+            let resp = ui.add_sized(
+                [t.search_w, t.search_h],
+                egui::TextEdit::singleline(&mut self.query)
+                    .hint_text("設定を検索")
+                    .margin(Margin::symmetric(t.space_md as i8, t.space_xs as i8))
+                    .align(egui::Align2::LEFT_CENTER),
+            );
+            text_rect = resp.rect;
+            paint_icon(
+                ui.painter(),
+                Pos2::new(resp.rect.right() - t.space_md, resp.rect.center().y),
+                icons::SEARCH,
+                t.fs_small,
+                t.text_muted,
+            );
+            if resp.changed() || resp.gained_focus() {
+                self.search_open = true;
+            }
+            if resp.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+                self.search_open = false;
+                self.query.clear();
+            }
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                goto = search::filter(&self.search_index, &self.query)
+                    .first()
+                    .map(|e| e.page);
+            }
+        });
+        if let Some(p) = goto {
+            self.finish_search(p);
+            return;
+        }
+        if self.search_open && !self.query.trim().is_empty() {
+            let pos = text_rect.left_bottom() + egui::vec2(0.0, t.space_xs);
+            let ctx = ui.ctx().clone();
+            let results: Vec<(Page, &str, &str)> = search::filter(&self.search_index, &self.query)
+                .into_iter()
+                .take(t.search_results_max)
+                .map(|e| (e.page, e.title, e.desc))
+                .collect();
+            let area = Area::new(Id::unique("search_results"))
+                .order(Order::Foreground)
+                .fixed_pos(pos)
+                .show(&ctx, |ui| {
+                    Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_width(t.search_w);
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        if results.is_empty() {
+                            ui.label(RichText::new("一致する項目がありません").color(t.text_muted));
+                        }
+                        for (i, (page, title, desc)) in results.iter().enumerate() {
+                            let bg = ui.painter().add(Shape::Noop);
+                            let inner = ui
+                                .scope(|ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.add_space(t.space_xs);
+                                    ui.label(RichText::new(*title).size(t.fs_body));
+                                    ui.label(
+                                        RichText::new(format!("{} · {desc}", page.label()))
+                                            .size(t.fs_small)
+                                            .color(t.text_muted),
+                                    );
+                                    ui.add_space(t.space_xs);
+                                })
+                                .response;
+                            let r = ui.interact(
+                                inner.rect,
+                                Id::unique(("search_row", i)),
+                                Sense::click(),
+                            );
+                            if r.hovered() {
+                                ui.painter().set(
+                                    bg,
+                                    Shape::rect_filled(inner.rect, t.radius_md, t.card_hover),
+                                );
+                            }
+                            if r.clicked() {
+                                goto = Some(*page);
+                            }
+                        }
+                    });
+                });
+            if let Some(p) = goto {
+                self.finish_search(p);
+                return;
+            }
+            let clicked_outside = ui.input(|i| i.pointer.any_pressed())
+                && ui
+                    .input(|i| i.pointer.interact_pos())
+                    .is_some_and(|p| !text_rect.contains(p) && !area.response.rect.contains(p));
+            if clicked_outside {
+                self.search_open = false;
+            }
+        }
+    }
+
+    fn finish_search(&mut self, page: Page) {
+        self.page = page;
+        self.search_open = false;
+        self.query.clear();
+    }
+
+    fn nav(&mut self, ui: &mut Ui, t: &Tokens, collapsed: bool) {
+        let connected = self.diagnostics.connected();
+        let mut goto = None;
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = t.nav_gap;
+                device_status(ui, t, collapsed, connected);
+                ui.add_space(t.space_xs);
+                for (gi, node) in NAV.iter().enumerate() {
+                    let mut item = |ui: &mut Ui, page: Page| {
+                        let r = nav_item(
+                            ui,
+                            t,
+                            collapsed,
+                            self.page == page,
+                            page.icon(),
+                            page.label(),
+                        );
+                        if r.clicked() {
+                            goto = Some(page);
+                        }
+                    };
+                    match node {
+                        Node::Item(p) => item(ui, *p),
+                        Node::Group { label, pages } => {
+                            if collapsed {
+                                for p in *pages {
+                                    item(ui, *p);
+                                }
+                            } else {
+                                if nav_group_header(ui, t, label, self.group_open[gi]).clicked() {
+                                    self.group_open[gi] = !self.group_open[gi];
+                                }
+                                if self.group_open[gi] {
+                                    for p in *pages {
+                                        item(ui, *p);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        if let Some(p) = goto {
+            self.page = p;
+        }
+    }
+
+    fn content(&mut self, ui: &mut Ui, t: &Tokens, now: f64) -> Option<Cmd> {
+        let cfg = &mut self.cfg;
+        match self.page {
+            Page::Home => return home::home(ui, t, cfg, self.diagnostics.connected()),
+            Page::Drag => features::drag(ui, t, cfg),
+            Page::Five => features::five(ui, t, cfg),
+            Page::CustomPress => features::custom_press(ui, t, cfg),
+            Page::LongHold => features::long_hold(ui, t, cfg),
+            Page::FingerHold => features::hold_combos(ui, t, cfg, Page::FingerHold),
+            Page::ThumbHold => features::hold_combos(ui, t, cfg, Page::ThumbHold),
+            Page::Corner => features::corner(ui, t, cfg),
+            Page::Edge => features::edge(ui, t, cfg),
+            Page::Window => features::window(ui, t, cfg),
+            Page::Ring => features::ring(ui, t, cfg),
+            Page::Profiles => features::profiles(ui, t, cfg),
+            Page::Haptic => features::haptic(ui, t, cfg),
+            Page::Monitor => self.diagnostics.monitor(ui, t),
+            Page::Diagnostics => self.diagnostics.info(ui, t, now),
+            Page::General => return general::general(ui, t, cfg, &self.config_path),
+        }
+        None
     }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        if let Some(shot) = self.devshot.as_ref().and_then(|d| d.current()) {
+            // Keep `saved` in step so the capture run never writes the config file.
+            self.page = shot.page;
+            self.cfg.general.theme = shot.theme;
+            self.saved.general.theme = shot.theme;
+        }
+        if self.cfg.general.theme != self.applied_theme {
+            self.applied_theme = self.cfg.general.theme;
+            theme::apply(ui.ctx(), self.applied_theme);
+        }
         let t = Tokens::of(ui.ctx());
         let now = ui.input(|i| i.time);
         self.drain_input(now);
+        let narrow = ui.ctx().content_rect().width() < t.nav_auto_collapse_w;
+        let collapsed = if narrow {
+            !self.nav_expanded_narrow
+        } else {
+            self.nav_collapsed
+        };
 
-        Panel::left("nav")
-            .exact_size(t.sidebar_width)
-            .resizable(false)
-            .frame(
-                Frame::new()
-                    .fill(t.surface)
-                    .stroke(Stroke::new(1.0, t.border))
-                    .inner_margin(Margin::same(t.space_md as i8)),
-            )
-            .show(ui, |ui| self.sidebar(ui, &t));
-
-        egui::CentralPanel::default()
+        Panel::top("topbar")
+            .exact_size(t.topbar_h)
             .frame(
                 Frame::new()
                     .fill(t.bg)
-                    .inner_margin(Margin::same(t.space_lg as i8)),
+                    .inner_margin(Margin::symmetric(t.space_md as i8, t.space_xs as i8)),
+            )
+            .show(ui, |ui| self.top_bar(ui, &t, narrow));
+
+        Panel::left("nav")
+            .exact_size(if collapsed {
+                t.nav_rail_width
+            } else {
+                t.nav_width
+            })
+            .resizable(false)
+            .frame(
+                Frame::new()
+                    .fill(t.nav)
+                    .stroke(Stroke::new(t.stroke_thin, t.separator))
+                    .inner_margin(Margin::same(t.nav_pad as i8)),
+            )
+            .show(ui, |ui| self.nav(ui, &t, collapsed));
+
+        let mut cmd = None;
+        CentralPanel::default()
+            .frame(
+                Frame::new()
+                    .fill(t.bg)
+                    .inner_margin(Margin::symmetric(t.space_lg as i8, 0)),
             )
             .show(ui, |ui| {
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(ui, |ui| match self.page {
-                        Page::Diagnostics => self.diagnostics.ui(ui, &t, now),
-                        Page::Gestures => settings::gestures(ui, &t, &mut self.cfg),
-                        Page::Press => settings::press(ui, &t, &mut self.cfg),
-                        Page::Profiles => settings::profiles(ui, &t, &mut self.cfg),
-                        Page::Ring => settings::ring(ui, &t, &mut self.cfg),
+                    .show(ui, |ui| {
+                        ui.set_max_width(ui.available_width().min(t.content_max_w));
+                        cmd = self.content(ui, &t, now);
+                        ui.add_space(t.space_xl);
                     });
             });
+        if let Some(c) = cmd {
+            self.run(c);
+        }
 
         let ctx = ui.ctx().clone();
+        if let Some(d) = self.devshot.as_mut() {
+            d.tick(&ctx);
+            return;
+        }
         self.save_if_due(&ctx, false);
     }
 
     fn on_exit(&mut self) {
-        if self.cfg != self.saved {
+        if self.devshot.is_none() && self.cfg != self.saved {
             let _ = config::save(&self.config_path, &self.cfg);
         }
     }

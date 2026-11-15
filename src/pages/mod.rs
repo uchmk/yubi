@@ -1,2 +1,13 @@
 pub mod diagnostics;
-pub mod settings;
+pub mod features;
+pub mod general;
+pub mod home;
+
+use crate::nav::Page;
+
+/// Something a page asks the app shell to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cmd {
+    Goto(Page),
+    OpenConfigFolder,
+}

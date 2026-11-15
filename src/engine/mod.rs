@@ -233,6 +233,7 @@ impl Engine {
             last_fg_poll: None,
             prev_contacts: 0,
             last_release_retry: None,
+            haptics: None,
             cfg: Config::default(),
             seen_generation: u64::MAX,
             seen_interrupts: 0,
@@ -304,6 +305,8 @@ struct Worker {
     /// Contacts in the previous frame (a touch begins when this is 0 and the next frame is not).
     prev_contacts: usize,
     last_release_retry: Option<Instant>,
+    /// Started on the first press tick that needs it.
+    haptics: Option<crate::haptic::Haptics>,
     cfg: Config,
     seen_generation: u64,
     seen_interrupts: u64,
@@ -410,6 +413,11 @@ impl Worker {
             self.release_everything();
         }
         self.cfg = self.config.snapshot();
+        // Start the haptics worker (it probes the driver) before the first tick needs it, but only
+        // when press ticks can happen; with the press feature or its ticks off nothing is opened.
+        if self.cfg.press.enabled && self.cfg.press.haptic_ticks && self.haptics.is_none() {
+            self.haptics = Some(crate::haptic::Haptics::new());
+        }
         if self.enabled && !self.cfg.gestures_enabled {
             self.release_everything();
         }
@@ -567,10 +575,17 @@ impl Worker {
                 });
                 (self.wake)();
             }
-            let th = *self.recognizer.thresholds();
-            // Practice mode and the history see the action first, in the mode it will run in.
             let dry_run = self.dry_run.load(Ordering::Relaxed);
             self.dispatch.set_dry_run(dry_run);
+            if let Action::PressTick { deep, provisional } = a {
+                // Like every other output: no tick in a blocked app or in practice mode.
+                if !dry_run && !self.dispatch.is_blocked() {
+                    self.press_tick(deep, provisional);
+                }
+                continue;
+            }
+            let th = *self.recognizer.thresholds();
+            // Practice mode and the history see the action first, in the mode it will run in.
             let mode = practice::Mode {
                 dry_run,
                 blocked: self.dispatch.is_blocked(),
@@ -592,6 +607,30 @@ impl Worker {
             let actions = self.recognizer.cancel_ring();
             self.apply(actions);
         }
+    }
+
+    /// A haptic tick for a press (a provisional light press is weaker). Needs the permission and
+    /// the driver; without them nothing happens.
+    fn press_tick(&mut self, deep: bool, provisional: bool) {
+        use crate::config::HapticStrength as S;
+        use crate::haptic::{HapticStatus, Haptics, Strength};
+        if !self.cfg.press.haptic_ticks {
+            return;
+        }
+        let h = self.haptics.get_or_insert_with(Haptics::new);
+        if h.status() != HapticStatus::Available {
+            return;
+        }
+        let strength = if provisional {
+            Strength::Weak
+        } else {
+            match (self.cfg.press.haptic_strength, deep) {
+                (S::Light, false) => Strength::Weak,
+                (S::Light, true) | (S::Medium, false) => Strength::Medium,
+                (S::Medium, true) | (S::Firm, _) => Strength::Strong,
+            }
+        };
+        h.actuate(strength);
     }
 
     fn flush_recorder(&mut self) {

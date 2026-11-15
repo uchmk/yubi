@@ -315,7 +315,7 @@ impl GeneralState {
         let mut sample = cfg.clone();
         sample.drag.fingers = 4;
         sample.sensitivity.hold_ms = 1500;
-        sample.press.light_threshold += 0.1;
+        sample.press.light_threshold = 0.1;
         sample.five.swipe_up = config::Action::Keys("Win+Tab".into());
         let mut imported = Imported {
             config: sample,
@@ -352,6 +352,8 @@ fn import_job() -> Result<Option<(PathBuf, Imported)>, String> {
 /// The imported file never switches autostart (it is a registry/task change, not a setting to copy).
 fn make_preview(cfg: &Config, path: PathBuf, imported: &mut Imported) -> Preview {
     imported.config.general.start_with_windows = cfg.general.start_with_windows;
+    // The calibration belongs to this trackpad, not to the file.
+    imported.config.calibration = cfg.calibration.clone();
     let changes = diff(cfg, &imported.config);
     Preview {
         base: cfg.clone(),
@@ -397,6 +399,7 @@ fn undo_apply(
         None => u.previous.clone(),
     };
     restored.general.start_with_windows = cfg.general.start_with_windows;
+    restored.calibration = cfg.calibration.clone();
     config::save(config_path, &restored).map_err(|e| format!("設定を保存できません: {e}"))?;
     *cfg = restored;
     Ok(())
@@ -412,6 +415,7 @@ fn section_label(key: &str) -> &str {
         "sensitivity" => "感度",
         "schema_version" => "設定ファイルの版",
         "press" => "押し込みと触覚",
+        "calibration" => "押し込みのキャリブレーション",
         "long_hold" => "ロングホールド",
         "finger_hold" => "フィンガーホールド",
         "thumb_hold" => "サムホールド",
@@ -483,6 +487,8 @@ fn setting_label(path: &str) -> String {
         "press.light_threshold" => "軽い押し込みのしきい値",
         "press.deep_threshold" => "深い押し込みのしきい値",
         "press.haptic_strength" => "触覚の強さ",
+        "press.haptic_ticks" => "押し込みで触覚を返す",
+        "calibration" => "押し込みのキャリブレーション",
         "press.fingers" => "指ごとの押し込み操作",
         "long_hold.action" => "長押しの操作",
         "finger_hold.combos" | "thumb_hold.combos" => "組み合わせ",

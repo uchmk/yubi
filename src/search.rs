@@ -190,8 +190,22 @@ const ROWS: &[Entry] = &[
         "エッジスライダーの1ステップの距離",
     ),
     e(Page::Sensitivity, "既定に戻す", "感度の値を初期値にします"),
-    e(Page::Haptic, "軽い押し込み", "しきい値"),
-    e(Page::Haptic, "深い押し込み", "しきい値"),
+    e(Page::Haptic, "押し込みの強さ", "ライブ表示と測定"),
+    e(
+        Page::Haptic,
+        "キャリブレーション",
+        "押し込みの強さを測る (任意)",
+    ),
+    e(
+        Page::CustomPress,
+        "軽い押し込みのしきい値",
+        "0.01 から 0.20",
+    ),
+    e(
+        Page::CustomPress,
+        "深い押し込みのしきい値",
+        "0.01 から 0.20",
+    ),
     e(Page::Haptic, "触覚の強さ", "触覚フィードバック"),
     e(
         Page::Practice,

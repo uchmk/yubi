@@ -7,7 +7,7 @@ use eframe::egui::{
 };
 
 use crate::engine::MonitorState;
-use crate::engine::dispatch::multi_label;
+use crate::engine::dispatch::{multi_label, press_label};
 use crate::engine::recognizer::GestureEvent;
 use crate::input::{Contact, DeviceInfo, now_us};
 use crate::nav::Page;
@@ -39,6 +39,11 @@ impl Diagnostics {
         if self.fake.is_none() {
             self.state = state;
         }
+    }
+
+    /// The engine's latest state (for the 押し込みと触覚 meter).
+    pub fn state(&self) -> &MonitorState {
+        &self.state
     }
 
     /// True once a trackpad was seen and not removed since.
@@ -281,6 +286,7 @@ fn event_label(e: GestureEvent) -> String {
         GestureEvent::Tap { fingers } => format!("タップ（{fingers} 本）"),
         GestureEvent::LongHold { fingers } => format!("長押し（{fingers} 本）"),
         GestureEvent::Multi { fingers, kind } => multi_label(fingers, kind),
+        GestureEvent::Press { fingers, deep } => press_label(fingers, deep),
     }
 }
 

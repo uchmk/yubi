@@ -79,6 +79,11 @@ pub fn group<R>(ui: &mut Ui, t: &Tokens, add: impl FnOnce(&mut Group<'_>) -> R) 
 }
 
 impl Group<'_> {
+    /// The egui context, for the small bits of per-widget state a row keeps.
+    pub fn ctx(&self) -> egui::Context {
+        self.ui.ctx().clone()
+    }
+
     /// Free-form row: `add` fills a left-to-right line with the standard row padding.
     pub fn raw_row(&mut self, add: impl FnOnce(&mut Ui)) {
         self.row_sized(self.t.row_min_h, self.t.row_pad_y, add);
@@ -383,16 +388,6 @@ impl SliderSpec {
             step: step as f64,
             decimals: 0,
             suffix,
-        }
-    }
-
-    pub const fn fraction() -> Self {
-        Self {
-            min: 0.0,
-            max: 1.0,
-            step: 0.01,
-            decimals: 2,
-            suffix: "",
         }
     }
 }

@@ -11,17 +11,35 @@ use crate::input::Contact;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContactTrack {
     pub landing: Point,
-    #[allow(
-        dead_code,
-        reason = "read by the hold and pressure gestures that come next"
-    )]
+    #[allow(dead_code, reason = "read by the hold gesture that comes next")]
     pub landing_us: u64,
     pub pos: Point,
     /// Furthest this contact has been from where it landed.
     pub max_disp: f32,
-    /// Smoothed pressure, if the device reports any.
-    #[allow(dead_code, reason = "read by the pressure gestures that come next")]
+    /// Raw pressure: the median of the last three readings, if the device reports any.
     pub pressure: Option<f32>,
+    recent: [f32; 3],
+    recent_n: u8,
+}
+
+impl ContactTrack {
+    fn push_pressure(&mut self, p: f32) {
+        if self.recent_n < 3 {
+            self.recent[usize::from(self.recent_n)] = p;
+            self.recent_n += 1;
+        } else {
+            self.recent = [self.recent[1], self.recent[2], p];
+        }
+        let mut v = self.recent;
+        let n = usize::from(self.recent_n);
+        v[..n].sort_by(f32::total_cmp);
+        self.pressure = Some(match n {
+            1 => v[0],
+            // Two readings: the lower one, so a single spike never passes as a press.
+            2 => v[0],
+            _ => v[1],
+        });
+    }
 }
 
 /// Device and settings state captured at the first raw touchdown of a session, before any
@@ -61,9 +79,6 @@ pub struct Tracker {
     await_all_up: bool,
 }
 
-/// Smoothing of the pressure reading (weight of the new sample).
-const PRESSURE_ALPHA: f32 = 0.5;
-
 impl Tracker {
     /// Take in one frame of active contacts.
     pub fn observe(&mut self, t: u64, active: &[&Contact]) -> Observed {
@@ -78,11 +93,13 @@ impl Tracker {
                 pos,
                 max_disp: 0.0,
                 pressure: None,
+                recent: [0.0; 3],
+                recent_n: 0,
             });
             tr.pos = pos;
             tr.max_disp = tr.max_disp.max(super::types::dist(tr.landing, pos));
             if let Some(p) = c.pressure.filter(|p| p.is_finite()) {
-                tr.pressure = Some(tr.pressure.map_or(p, |q| q + (p - q) * PRESSURE_ALPHA));
+                tr.push_pressure(p);
             }
         }
         let raw = active.len();
@@ -115,10 +132,6 @@ impl Tracker {
         self.tracks.values().map(|t| t.max_disp).fold(0.0, f32::max)
     }
 
-    #[allow(
-        dead_code,
-        reason = "read by the hold and pressure gestures that come next"
-    )]
     pub fn tracks(&self) -> &BTreeMap<u32, ContactTrack> {
         &self.tracks
     }
@@ -198,6 +211,24 @@ mod tests {
     fn obs(t: &mut Tracker, at_ms: u64, cs: &[Contact]) -> Observed {
         let refs: Vec<&Contact> = cs.iter().collect();
         t.observe(at_ms * 1000, &refs)
+    }
+
+    #[test]
+    fn pressure_is_a_three_sample_median() {
+        let mut t = Tracker::default();
+        let mut p = |ms: u64, v: f32| {
+            let mut ct = c(1, 0.0, 0.0);
+            ct.pressure = Some(v);
+            let refs = [&ct];
+            t.observe(ms * 1000, &refs);
+            t.tracks()[&1].pressure.unwrap()
+        };
+        assert_eq!(p(0, 0.10), 0.10);
+        assert_eq!(p(10, 0.12), 0.10);
+        // A one-frame spike is ignored.
+        assert_eq!(p(20, 0.40), 0.12);
+        assert_eq!(p(30, 0.12), 0.12);
+        assert_eq!(p(40, 0.13), 0.13);
     }
 
     #[test]

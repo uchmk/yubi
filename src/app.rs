@@ -15,7 +15,8 @@ use crate::engine::Engine;
 use crate::icons;
 use crate::nav::{NAV, Node, Page};
 use crate::pages::{
-    Cmd, apps, diagnostics::Diagnostics, features, general, general_io, home, overview, sensitivity,
+    Cmd, apps, diagnostics::Diagnostics, features, general, general_io, home, overview, press,
+    sensitivity,
 };
 use crate::resident::{self, Resident};
 use crate::search::{self, Entry};
@@ -37,6 +38,10 @@ pub struct App {
     needs_backup: bool,
     engine: Engine,
     diagnostics: Diagnostics,
+    /// 押し込みと触覚 page: calibration wizard and meter state.
+    press_ui: press::PressUi,
+    /// Frame counter of the fake pad used by the `YUBI_SHOT_PRESS` screenshots.
+    demo_frames: u64,
     /// Windows gesture registry values, read when the 全般 page opens and after each change.
     win_values: win_gestures::Values,
     win_read_error: Option<String>,
@@ -97,6 +102,8 @@ impl App {
             needs_backup,
             engine,
             diagnostics: Diagnostics::default(),
+            press_ui: press::PressUi::default(),
+            demo_frames: 0,
             win_values: [None; 4],
             win_read_error: None,
             win_message: None,
@@ -491,7 +498,15 @@ impl App {
             Page::Drag => return features::drag(ui, t, cfg, &self.win_values),
             Page::Four => return features::four(ui, t, cfg, &self.win_values),
             Page::Five => features::five(ui, t, cfg),
-            Page::CustomPress => features::custom_press(ui, t, cfg),
+            Page::CustomPress => {
+                let key = self
+                    .diagnostics
+                    .state()
+                    .device
+                    .as_ref()
+                    .and_then(|d| crate::calibration::device_key(&d.id));
+                return features::custom_press(ui, t, cfg, key.as_deref());
+            }
             Page::LongHold => features::long_hold(ui, t, cfg),
             Page::FingerHold => features::hold_combos(ui, t, cfg, Page::FingerHold),
             Page::ThumbHold => features::hold_combos(ui, t, cfg, Page::ThumbHold),
@@ -504,7 +519,7 @@ impl App {
                 return overview::page(ui, t, cfg, &self.win_values, &mut self.overview);
             }
             Page::Sensitivity => sensitivity::sensitivity(ui, t, cfg),
-            Page::Haptic => features::haptic(ui, t, cfg),
+            Page::Haptic => press::page(ui, t, cfg, self.diagnostics.state(), &mut self.press_ui),
             Page::Monitor => self.diagnostics.monitor(ui, t),
             Page::Practice => self.diagnostics.practice(ui, t, &mut self.practice_on),
             Page::Diagnostics => self.diagnostics.info(ui, t, now),
@@ -568,6 +583,13 @@ impl eframe::App for App {
         let now = ui.input(|i| i.time);
         let ctx_now = ui.ctx().clone();
         self.sync_engine(&ctx_now);
+        if self.devshot.is_some()
+            && let Ok(mode) = std::env::var("YUBI_SHOT_PRESS")
+        {
+            self.demo_frames += 1;
+            let mon = press::demo(&mode, &mut self.cfg, &mut self.press_ui, self.demo_frames);
+            self.diagnostics.update(mon);
+        }
         // Pages that show the Windows-gesture state (or warn about it) re-read it when opened.
         let general_open = matches!(
             self.page,

@@ -14,6 +14,7 @@ use super::arbitration::{Arbiter, Owner, Proposal};
 use super::gestures::drag::{DragPhase, DragState};
 use super::gestures::edge::EdgeState;
 use super::gestures::multi::{MultiHit, MultiState};
+use super::gestures::press::{PressHit, PressState};
 use super::gestures::ring::RingState;
 use super::gestures::window::WindowState;
 use super::tracking::{Environment, Tracker};
@@ -61,6 +62,9 @@ pub struct Recognizer {
     multi: MultiState,
     edge: EdgeState,
     ring: RingState,
+    press: PressState,
+    /// Raw pressure of every active contact in the latest frame (median of the last three).
+    pressures: Vec<f32>,
 }
 
 impl Recognizer {
@@ -158,6 +162,12 @@ impl Recognizer {
         let obs = self.tracker.observe(t, &active);
         self.cur = active.iter().map(|c| (c.x_mm, c.y_mm)).collect();
         self.centroid = centroid(&self.cur);
+        self.pressures = self
+            .tracker
+            .tracks()
+            .values()
+            .filter_map(|t| t.pressure)
+            .collect();
         if self.tracker.awaiting_all_up() {
             if obs.raw == 0 {
                 self.tracker.all_up();
@@ -204,6 +214,9 @@ impl Recognizer {
             self.ring.deadline(&self.g),
             self.session
                 .as_ref()
+                .and_then(|_| self.press.deadline(&self.th)),
+            self.session
+                .as_ref()
                 .and_then(|_| self.tracker.stale_deadline(self.th.stale_us)),
         ]
         .into_iter()
@@ -225,6 +238,7 @@ impl Recognizer {
         if self.drag.phase == DragPhase::Idle {
             self.g = GestureCfg::from_config(cfg, self.env.exe.as_deref());
             self.th = Thresholds::from_sensitivity(&cfg.sensitivity);
+            self.g.set_press(cfg, self.env.exe.as_deref());
         }
         let win_candidate = self.g.window
             && self
@@ -264,6 +278,7 @@ impl Recognizer {
         self.multi.finish();
         self.edge.release(out);
         self.ring.cancel(out);
+        self.press.reset();
         self.arb.clear();
         self.session = None;
         self.latched = None;
@@ -330,6 +345,16 @@ impl Recognizer {
 
     /// All fingers are up: close what was in flight and arm what follows a tap.
     fn finish_gestures(&mut self, s: &Session, is_tap: bool, t: u64, out: &mut Vec<Action>) {
+        // A provisional light press fires when the fingers lift.
+        if let Some(hit) = self
+            .press
+            .finish_hit(&self.g, self.arb.is_free_for(Owner::Pressure), t)
+        {
+            self.press.commit(hit, self.g.ticks, out);
+        }
+        // A touch that pressed is not a tap.
+        let is_tap = is_tap && !self.press.touched();
+        self.press.reset();
         self.window
             .finish(&self.g, &self.th, is_tap, s.peak, t, out);
         if is_tap
@@ -367,9 +392,11 @@ impl Recognizer {
             win_candidate: s.win_candidate,
             dims: self.latched.as_ref().and_then(|e| e.dims_mm),
             max_travel: s.max_travel,
+            pressures: &self.pressures,
         };
         let mut proposals: Vec<Proposal> = Vec::new();
         let mut hit: Option<MultiHit> = None;
+        let mut press_hit: Option<PressHit> = None;
         if ctx.g.drag {
             self.drag.drive(&ctx, out);
             let free = self.arb.is_free_for(Owner::Drag);
@@ -396,7 +423,18 @@ impl Recognizer {
             let free = self.arb.is_free_for(Owner::Ring);
             proposals.extend(self.ring.step(&ctx, free));
         }
-        match self.arb.resolve(&proposals) {
+        if ctx.g.any_press() {
+            let free = self.arb.is_free_for(Owner::Pressure);
+            if let Some(h) = self.press.step(&ctx, free, out) {
+                proposals.push(h.proposal);
+                press_hit = Some(h);
+            }
+        }
+        let winner = self.arb.resolve(&proposals);
+        if winner != Some(Owner::Pressure) && press_hit.take().is_some() {
+            self.press.lost();
+        }
+        match winner {
             Some(Owner::Edge) => self.edge.commit(&ctx, out),
             Some(Owner::Ring) => self.ring.commit(&ctx, out),
             Some(Owner::Drag) => self.drag.commit(&ctx, out),
@@ -404,6 +442,11 @@ impl Recognizer {
             Some(Owner::Multi) => {
                 if let Some(h) = hit {
                     self.multi.commit(h, out);
+                }
+            }
+            Some(Owner::Pressure) => {
+                if let Some(h) = press_hit {
+                    self.press.commit(h, ctx.g.ticks, out);
                 }
             }
             None => {}

@@ -4,7 +4,7 @@
 use eframe::egui::{self, Align, Layout, RichText, Ui};
 
 use crate::config::{
-    Combo, Config, EdgeKind, EdgeTarget, Finger, HapticStrength, HoldCombos, HoldTrigger, RingItem,
+    Combo, Config, EdgeKind, EdgeTarget, Finger, HoldCombos, HoldTrigger, RingItem,
 };
 use crate::icons;
 use crate::nav::Page;
@@ -203,38 +203,63 @@ pub fn five(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
     });
 }
 
-fn threshold_rows(g: &mut widgets::Group<'_>, cfg: &mut Config) {
-    let p = &mut cfg.press;
-    g.slider_row(
-        "軽い押し込みのしきい値",
-        "この深さを超えると軽い押し込みとみなします。",
-        SliderSpec::fraction(),
-        &mut p.light_threshold,
-    );
-    g.slider_row(
-        "深い押し込みのしきい値",
-        "この深さを超えると深い押し込みとみなします。軽い押し込みより大きくなります。",
-        SliderSpec::fraction(),
-        &mut p.deep_threshold,
-    );
-}
-
-pub fn custom_press(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
+pub fn custom_press(
+    ui: &mut Ui,
+    t: &Tokens,
+    cfg: &mut Config,
+    device_key: Option<&str>,
+) -> Option<Cmd> {
     let on = feature_top(ui, t, cfg, Page::CustomPress);
+    let mut cmd = None;
+    let measured = device_key.is_some_and(|k| cfg.calibration.contains_key(k));
     ui.add_enabled_ui(on, |ui| {
-        section_header(ui, t, "しきい値");
-        group(ui, t, |g| threshold_rows(g, cfg));
-        for i in 0..5 {
-            section_header(ui, t, &format!("{}本指", i + 1));
+        group(ui, t, |g| {
+            g.wrapped_row(|ui| {
+                ui.label(
+                    RichText::new(
+                        "押し込んでも、通常のクリックはそのまま行われます。押し込みの強さは 0.01 から 0.20 の値で決めます。複数の指では力が分かれるため、本数が多いほど低めが向いています。",
+                    )
+                    .size(t.fs_small)
+                    .color(t.text_muted),
+                );
+            });
+            g.wrapped_row(|ui| {
+                ui.label(
+                    RichText::new(if measured {
+                        "このトラックパッドは測定済みです (任意)。"
+                    } else {
+                        "測定しなくても使えます。目安を出したいときは測定できます。"
+                    })
+                    .size(t.fs_small)
+                    .color(t.text_muted),
+                );
+                if widgets::button(ui, t, "押し込みと触覚を開く").clicked() {
+                    cmd = Some(Cmd::Goto(Page::Haptic));
+                }
+            });
+        });
+        for n in 1..=5usize {
+            section_header(ui, t, &format!("{n} 本指"));
             group(ui, t, |g| {
-                let f = &mut cfg.press.fingers[i];
-                g.action_row("軽い押し込み", "", ("press-light", i), &mut f.light);
-                g.action_row("深い押し込み", "", ("press-deep", i), &mut f.deep);
+                let f = &mut cfg.press.fingers[n - 1];
+                g.toggle_row(
+                    None,
+                    &format!("{n} 本指の押し込みを使う"),
+                    "オフのあいだ、この本数の押し込みは無視されます。",
+                    &mut f.enabled,
+                );
+                if !f.enabled {
+                    return;
+                }
+                g.action_row("軽い押し込み", "", ("press-light", n - 1), &mut f.light);
+                g.action_row("深い押し込み", "", ("press-deep", n - 1), &mut f.deep);
+                super::press::count_thresholds(g, t, &mut cfg.press, n);
             });
         }
     });
     // Keep deep above light whichever slider was moved.
     cfg.normalize();
+    cmd
 }
 
 pub fn long_hold(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
@@ -514,23 +539,4 @@ pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
             items.push(RingItem::default());
         }
     });
-}
-
-pub fn haptic(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
-    widgets::page_header(ui, t, Page::Haptic.label(), Page::Haptic.subtitle());
-    section_header(ui, t, "しきい値");
-    group(ui, t, |g| threshold_rows(g, cfg));
-    section_header(ui, t, "触覚");
-    group(ui, t, |g| {
-        g.combo_row(
-            "触覚の強さ",
-            "押し込んだときのフィードバックの強さです。",
-            "haptic",
-            &mut cfg.press.haptic_strength,
-            &HapticStrength::ALL,
-            HapticStrength::label,
-        );
-    });
-    // Keep deep above light whichever slider was moved.
-    cfg.normalize();
 }

@@ -12,8 +12,16 @@ use crate::engine::types::GestureId;
 
 /// Version of the config schema this build reads and writes.
 pub const SCHEMA_VERSION: u32 = 2;
-/// Smallest allowed distance between the light and deep press thresholds.
-pub const MIN_THRESHOLD_GAP: f32 = 0.05;
+/// Smallest allowed distance between the light and deep press thresholds (raw pressure).
+pub const MIN_THRESHOLD_GAP: f32 = 0.02;
+/// Allowed range of both press thresholds: raw pressure, which the pad reports as 0.01 to ~0.20.
+pub const THRESHOLD_RANGE: (f32, f32) = (0.01, 0.20);
+/// Default thresholds for one finger.
+pub const DEFAULT_ONE: (f32, f32) = (0.08, 0.14);
+/// Default thresholds for two to five fingers (the force is split between the contacts).
+pub const DEFAULT_MULTI: (f32, f32) = (0.07, 0.12);
+/// Smallest usable span between the relaxed baseline and the firm level (raw pressure scale).
+pub const MIN_CALIBRATION_SPAN: f32 = 0.05;
 /// Number of feature toggles counted by [`Config::enabled_count`].
 pub const FEATURE_COUNT: usize = 11;
 
@@ -31,6 +39,8 @@ pub struct Config {
     pub four: Four,
     pub five: Five,
     pub press: Press,
+    /// Per-device pressure calibration, keyed by `vvvv:pppp` (hex VID:PID). Not exported.
+    pub calibration: BTreeMap<String, Calibration>,
     pub long_hold: LongHold,
     pub finger_hold: HoldCombos,
     pub thumb_hold: HoldCombos,
@@ -52,6 +62,7 @@ impl Default for Config {
             four: Four::default(),
             five: Five::default(),
             press: Press::default(),
+            calibration: BTreeMap::new(),
             long_hold: LongHold::default(),
             finger_hold: HoldCombos::default(),
             thumb_hold: HoldCombos::default(),
@@ -518,21 +529,48 @@ impl HapticStrength {
     }
 }
 
+fn yes() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct PressFinger {
+    /// This finger count's press is switched on. A file from before this field existed (the count
+    /// was active whenever it had a binding) reads as on.
+    #[serde(default = "yes")]
+    pub enabled: bool,
     pub light: Action,
     pub deep: Action,
+    /// Own thresholds for this count; both or neither (`normalize` pairs them). `None` means
+    /// "same as one finger" ([`Press::thresholds`]). Ignored for one finger.
+    pub light_threshold: Option<f32>,
+    pub deep_threshold: Option<f32>,
+}
+
+impl PressFinger {
+    /// A fresh entry for `fingers` fingers: two or more start with their own, lower thresholds.
+    pub fn for_count(fingers: usize) -> Self {
+        let own = fingers >= 2;
+        Self {
+            light_threshold: own.then_some(DEFAULT_MULTI.0),
+            deep_threshold: own.then_some(DEFAULT_MULTI.1),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Press {
-    /// Custom press feature switch (the thresholds below are always in effect).
+    /// Custom press feature switch. Thresholds are raw pressure (0.01 to 0.20); this pair is the
+    /// one-finger one and the fallback of the counts that share it.
     pub enabled: bool,
     pub light_threshold: f32,
     pub deep_threshold: f32,
     pub haptic_strength: HapticStrength,
+    /// A short tick when a light / deep press is recognised.
+    pub haptic_ticks: bool,
     /// Actions for 1..=5 fingers (always 5 entries after `normalize`).
     pub fingers: Vec<PressFinger>,
 }
@@ -541,12 +579,117 @@ impl Default for Press {
     fn default() -> Self {
         Self {
             enabled: false,
-            light_threshold: 0.3,
-            deep_threshold: 0.7,
+            light_threshold: DEFAULT_ONE.0,
+            deep_threshold: DEFAULT_ONE.1,
             haptic_strength: HapticStrength::default(),
-            fingers: vec![PressFinger::default(); 5],
+            haptic_ticks: true,
+            fingers: (1..=5).map(PressFinger::for_count).collect(),
         }
     }
+}
+
+impl Press {
+    /// Light and deep thresholds (raw pressure) that apply to `fingers` fingers.
+    pub fn thresholds(&self, fingers: usize) -> (f32, f32) {
+        let own = (fingers >= 2)
+            .then(|| self.fingers.get(fingers - 1))
+            .flatten()
+            .and_then(|f| Some((f.light_threshold?, f.deep_threshold?)));
+        own.unwrap_or((self.light_threshold, self.deep_threshold))
+    }
+
+    /// Whether the press of `fingers` fingers can fire: the global switch and the count's own
+    /// switch are on. No calibration is needed.
+    pub fn count_active(&self, fingers: usize) -> bool {
+        self.enabled
+            && fingers
+                .checked_sub(1)
+                .and_then(|i| self.fingers.get(i))
+                .is_some_and(|f| f.enabled)
+    }
+}
+
+/// Hundredths of a raw pressure value (`0.07` -> 7), so the thresholds never drift as floats.
+fn centi(v: f32) -> i32 {
+    (f64::from(v) * 100.0).round() as i32
+}
+
+fn from_centi(c: i32) -> f32 {
+    c as f32 / 100.0
+}
+
+/// Pair a light / deep threshold: both inside [`THRESHOLD_RANGE`], at least the gap apart, and in
+/// whole hundredths. Light stops two hundredths below the top so deep still fits.
+pub fn fit_pair(light: f32, deep: f32) -> (f32, f32) {
+    let (lo, hi) = (centi(THRESHOLD_RANGE.0), centi(THRESHOLD_RANGE.1));
+    let gap = centi(MIN_THRESHOLD_GAP);
+    let l = centi(light).clamp(lo, hi - gap);
+    let d = centi(deep).clamp(l + gap, hi);
+    (from_centi(l), from_centi(d))
+}
+
+/// Pair for `normalize`: when either value is outside the range (an old calibrated-scale setting,
+/// a typo, NaN) the whole pair is replaced by its default, so a half-valid pair never survives
+/// next to a default; a pair that is in range is kept.
+fn clamp_pair(light: f32, deep: f32, default: (f32, f32)) -> (f32, f32) {
+    let (lo, hi) = (centi(THRESHOLD_RANGE.0), centi(THRESHOLD_RANGE.1));
+    let ok = |v: f32| v.is_finite() && (lo..=hi).contains(&centi(v));
+    if ok(light) && ok(deep) {
+        fit_pair(light, deep)
+    } else {
+        fit_pair(default.0, default.1)
+    }
+}
+
+/// Per-device pressure measurement on the raw pressure scale: a helper for choosing thresholds and
+/// for the marks on the live meter; it does not gate anything.
+/// `baseline` is the relaxed touch, `f1`..`f5` the firm level with one to five fingers
+/// (the pad splits its force between contacts, so each count has its own).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Calibration {
+    pub baseline: f32,
+    pub f1: f32,
+    pub f2: Option<f32>,
+    pub f3: Option<f32>,
+    pub f4: Option<f32>,
+    pub f5: Option<f32>,
+    /// `YYYY-MM-DD` (UTC) of the last change.
+    pub date: String,
+}
+
+/// Round to 0.01 so the stored value reads as typed (no `0.15000001`).
+pub fn q01(v: f32) -> f32 {
+    from_centi(centi(v))
+}
+
+impl Calibration {
+    /// The firm level for `fingers` (1..=5), if calibrated.
+    pub fn firm(&self, fingers: usize) -> Option<f32> {
+        match fingers {
+            1 => Some(self.f1),
+            2 => self.f2,
+            3 => self.f3,
+            4 => self.f4,
+            5 => self.f5,
+            _ => None,
+        }
+    }
+
+    /// True when `baseline` and the firm level for `fingers` form a usable span.
+    #[cfg(test)]
+    pub fn usable(&self, fingers: usize) -> bool {
+        self.firm(fingers)
+            .is_some_and(|f| span_ok(self.baseline, f))
+    }
+}
+
+fn span_ok(baseline: f32, firm: f32) -> bool {
+    baseline.is_finite()
+        && firm.is_finite()
+        && (0.0..=1.0).contains(&baseline)
+        && firm <= 1.0
+        && firm - baseline >= MIN_CALIBRATION_SPAN - 1e-4
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1384,7 +1527,11 @@ impl Config {
         self.long_hold.fingers = self.long_hold.fingers.clamp(1, 5);
         self.ring.fingers = self.ring.fingers.clamp(3, 5);
         self.sensitivity.clamp();
-        self.press.fingers.resize_with(5, PressFinger::default);
+        let have = self.press.fingers.len();
+        self.press
+            .fingers
+            .extend((have + 1..=5).map(PressFinger::for_count));
+        self.press.fingers.truncate(5);
         self.corner.corners.resize_with(4, CornerCfg::default);
         for e in [
             &mut self.edge.left,
@@ -1397,9 +1544,47 @@ impl Config {
             p.edge_overrides.values_mut().for_each(clamp_edge);
         }
         let p = &mut self.press;
-        p.light_threshold = finite_or(p.light_threshold, 0.3).clamp(0.0, 1.0 - MIN_THRESHOLD_GAP);
-        p.deep_threshold =
-            finite_or(p.deep_threshold, 0.7).clamp(p.light_threshold + MIN_THRESHOLD_GAP, 1.0);
+        (p.light_threshold, p.deep_threshold) =
+            clamp_pair(p.light_threshold, p.deep_threshold, DEFAULT_ONE);
+        let (gl, gd) = (p.light_threshold, p.deep_threshold);
+        for (i, f) in p.fingers.iter_mut().enumerate() {
+            if i == 0 || (f.light_threshold.is_none() && f.deep_threshold.is_none()) {
+                f.light_threshold = None;
+                f.deep_threshold = None;
+                continue;
+            }
+            let (l, d) = clamp_pair(
+                f.light_threshold.unwrap_or(gl),
+                f.deep_threshold.unwrap_or(gd),
+                DEFAULT_MULTI,
+            );
+            f.light_threshold = Some(l);
+            f.deep_threshold = Some(d);
+        }
+        // Drop calibrations that cannot be used (hand-edited or corrupt); keep the rest at 0.01.
+        self.calibration.retain(|_, c| {
+            c.baseline = q01(c.baseline);
+            c.f1 = q01(c.f1);
+            c.f2 = c.f2.map(q01);
+            c.f3 = c.f3.map(q01);
+            c.f4 = c.f4.map(q01);
+            c.f5 = c.f5.map(q01);
+            span_ok(c.baseline, c.f1)
+        });
+        for c in self.calibration.values_mut() {
+            if c.f2.is_some_and(|f| !span_ok(c.baseline, f)) {
+                c.f2 = None;
+            }
+            if c.f3.is_some_and(|f| !span_ok(c.baseline, f)) {
+                c.f3 = None;
+            }
+            if c.f4.is_some_and(|f| !span_ok(c.baseline, f)) {
+                c.f4 = None;
+            }
+            if c.f5.is_some_and(|f| !span_ok(c.baseline, f)) {
+                c.f5 = None;
+            }
+        }
     }
 
     /// The global action bound to `id`. `None` when no config field backs the id (for example
@@ -2234,8 +2419,8 @@ swipe_up = "app_switch"
 
 [press]
 enabled = true
-light_threshold = 0.2
-deep_threshold = 0.6
+light_threshold = 0.1
+deep_threshold = 0.16
 haptic_strength = "firm"
 
 [[press.fingers]]
@@ -2306,7 +2491,10 @@ items = [
         assert_eq!(c.four.pinch_out, Action::Find);
         assert_eq!(c.five.pinch_in, Action::ShowDesktop);
         assert_eq!(c.five.swipe_up, Action::AppSwitch);
-        assert_eq!(c.press.light_threshold, 0.2);
+        assert_eq!(
+            (c.press.light_threshold, c.press.deep_threshold),
+            (0.1, 0.16)
+        );
         assert_eq!(c.press.fingers.len(), 5);
         assert_eq!(c.press.fingers[0].deep, Action::RingMenu);
         assert_eq!(c.long_hold.action, Action::TabSwitch);
@@ -2610,14 +2798,14 @@ items = [
     #[test]
     fn deep_stays_above_light() {
         let mut cfg = Config::default();
-        cfg.press.light_threshold = 0.8;
-        cfg.press.deep_threshold = 0.2;
+        cfg.press.light_threshold = 0.19;
+        cfg.press.deep_threshold = 0.12;
+        cfg.normalize();
+        assert!(cfg.press.deep_threshold - cfg.press.light_threshold >= MIN_THRESHOLD_GAP - 1e-6);
+        assert!(cfg.press.deep_threshold <= THRESHOLD_RANGE.1);
+        cfg.press.light_threshold = 0.2;
         cfg.normalize();
         assert!(cfg.press.deep_threshold > cfg.press.light_threshold);
-        cfg.press.light_threshold = 1.0;
-        cfg.normalize();
-        assert!(cfg.press.deep_threshold > cfg.press.light_threshold);
-        assert!(cfg.press.deep_threshold <= 1.0);
     }
 
     #[test]
@@ -3059,5 +3247,218 @@ command = 5
         assert_eq!(cfg.binding(&id), Some(Action::Keys("Ctrl+Tab".into())));
         assert!(cfg.set_binding(&id, Action::None));
         assert_eq!(cfg.binding(&id), Some(Action::None));
+    }
+
+    fn calib(b: f32, f1: f32, f2: Option<f32>, f3: Option<f32>) -> Calibration {
+        Calibration {
+            baseline: b,
+            f1,
+            f2,
+            f3,
+            f4: None,
+            f5: None,
+            date: "2026-11-15".into(),
+        }
+    }
+
+    #[test]
+    fn defaults_are_the_raw_thresholds() {
+        let cfg = Config::default();
+        assert_eq!(
+            (cfg.press.light_threshold, cfg.press.deep_threshold),
+            (0.08, 0.14)
+        );
+        assert_eq!(cfg.press.thresholds(1), (0.08, 0.14));
+        // Two to five fingers start with their own, lower pair ("same as one finger" is off).
+        for n in 2..=5 {
+            assert_eq!(cfg.press.thresholds(n), (0.07, 0.12), "{n}");
+            assert!(cfg.press.fingers[n - 1].light_threshold.is_some());
+        }
+        let mut c = cfg.clone();
+        c.normalize();
+        assert_eq!(c.press, cfg.press);
+    }
+
+    #[test]
+    fn thresholds_keep_the_range_and_the_gap() {
+        let mut cfg = Config::default();
+        cfg.press.light_threshold = 0.19;
+        cfg.press.deep_threshold = 0.2;
+        cfg.normalize();
+        assert_eq!(
+            (cfg.press.light_threshold, cfg.press.deep_threshold),
+            (0.18, 0.2)
+        );
+        cfg.press.light_threshold = 0.05;
+        cfg.press.deep_threshold = 0.06;
+        cfg.normalize();
+        assert_eq!(
+            (cfg.press.light_threshold, cfg.press.deep_threshold),
+            (0.05, 0.07)
+        );
+        for (l, d) in [(0.01, 0.2), (0.01, 0.03), (0.18, 0.2)] {
+            assert_eq!(fit_pair(l, d), (l, d));
+        }
+    }
+
+    #[test]
+    fn old_calibrated_scale_values_migrate_or_fall_back_with_a_note() {
+        // In range: kept as the one-finger thresholds.
+        let raw = parse_text("[press]\nlight_threshold = 0.09\ndeep_threshold = 0.17\n").unwrap();
+        assert_eq!(
+            (
+                raw.config.press.light_threshold,
+                raw.config.press.deep_threshold
+            ),
+            (0.09, 0.17)
+        );
+        // Out of range (the old 0..1 scale): defaults, and the load says so.
+        let old = parse_text("[press]\nlight_threshold = 0.3\ndeep_threshold = 0.7\n").unwrap();
+        assert_eq!(
+            (
+                old.config.press.light_threshold,
+                old.config.press.deep_threshold
+            ),
+            DEFAULT_ONE
+        );
+        assert!(
+            old.warnings.iter().any(|w| w.contains("しきい値")),
+            "{:?}",
+            old.warnings
+        );
+        // One side out of range: the whole pair falls back, not just that side.
+        let half = parse_text("[press]\nlight_threshold = 0.09\ndeep_threshold = 0.7\n").unwrap();
+        assert_eq!(
+            (
+                half.config.press.light_threshold,
+                half.config.press.deep_threshold
+            ),
+            DEFAULT_ONE
+        );
+        assert!(
+            half.warnings.iter().any(|w| w.contains("しきい値")),
+            "{:?}",
+            half.warnings
+        );
+    }
+
+    #[test]
+    fn a_press_count_without_enabled_reads_as_on() {
+        // A file from before `enabled` existed: the entries only have their bindings.
+        let old = parse_text(
+            "[press]
+enabled = true
+[[press.fingers]]
+light = \"Find\"
+[[press.fingers]]
+",
+        )
+        .unwrap();
+        assert!(old.config.press.fingers[0].enabled);
+        assert!(old.config.press.fingers[1].enabled);
+        // A deliberately off count survives a save and a load.
+        let mut cfg = Config::default();
+        cfg.press.fingers[0].enabled = true;
+        cfg.press.fingers[2].enabled = false;
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert!(back.press.fingers[0].enabled);
+        assert!(!back.press.fingers[2].enabled);
+        // A new default config keeps its defaults (everything off).
+        assert!(Config::default().press.fingers.iter().all(|f| !f.enabled));
+    }
+
+    #[test]
+    fn quantisation_writes_clean_two_decimal_values() {
+        assert_eq!(q01(0.15 + 1e-7), 0.15);
+        assert_eq!(q01(0.1 + 0.05), 0.15);
+        let mut cfg = Config::default();
+        cfg.press.light_threshold = 0.07 + 1e-7;
+        cfg.press.deep_threshold = 0.14 - 1e-7;
+        cfg.press.fingers[2].light_threshold = Some(0.06 + 2e-7);
+        cfg.press.fingers[2].deep_threshold = Some(0.11 - 2e-7);
+        cfg.calibration.insert(
+            "05ac:0324".into(),
+            calib(0.01 + 1e-7, 0.2 - 1e-7, Some(0.16), None),
+        );
+        cfg.normalize();
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        for want in [
+            "light_threshold = 0.07\n",
+            "deep_threshold = 0.14\n",
+            "light_threshold = 0.06\n",
+            "deep_threshold = 0.11\n",
+            "baseline = 0.01\n",
+            "f1 = 0.2\n",
+            "f2 = 0.16\n",
+        ] {
+            assert!(text.contains(want), "{want:?} missing in {text}");
+        }
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.calibration, cfg.calibration);
+        assert_eq!(back.press, cfg.press);
+    }
+
+    #[test]
+    fn per_count_normalize_drops_bad_calibration_entries() {
+        let mut cfg = Config::default();
+        cfg.calibration.insert(
+            "05ac:0324".into(),
+            calib(0.01, 0.20, Some(0.16), Some(0.02)),
+        );
+        cfg.calibration
+            .insert("1111:2222".into(), calib(0.01, 0.03, None, None));
+        cfg.normalize();
+        assert!(!cfg.calibration.contains_key("1111:2222"));
+        let c = &cfg.calibration["05ac:0324"];
+        assert!(c.usable(1) && c.usable(2));
+        // The 3-finger level is too close to the baseline: dropped.
+        assert!(!c.usable(3) && c.f3.is_none());
+        assert!(!c.usable(4) && !c.usable(5));
+    }
+
+    #[test]
+    fn per_count_thresholds_fall_back_and_keep_the_gap() {
+        let mut cfg = Config::default();
+        cfg.press.light_threshold = 0.09;
+        cfg.press.deep_threshold = 0.15;
+        // Counts 3 and 4 share the one-finger pair.
+        for n in [3, 4] {
+            cfg.press.fingers[n - 1].light_threshold = None;
+            cfg.press.fingers[n - 1].deep_threshold = None;
+        }
+        cfg.press.fingers[1].light_threshold = Some(0.10);
+        cfg.press.fingers[1].deep_threshold = Some(0.11);
+        cfg.press.fingers[4].light_threshold = Some(0.05);
+        cfg.press.fingers[4].deep_threshold = None;
+        cfg.normalize();
+        assert_eq!(cfg.press.thresholds(1), (0.09, 0.15));
+        assert_eq!(cfg.press.thresholds(3), (0.09, 0.15));
+        assert_eq!(cfg.press.thresholds(4), (0.09, 0.15));
+        // A too-close pair is pushed apart per count.
+        assert_eq!(cfg.press.thresholds(2), (0.10, 0.12));
+        // One value given: the other follows the one-finger setting.
+        assert_eq!(cfg.press.thresholds(5), (0.05, 0.15));
+        // One finger never reads its own override.
+        cfg.press.fingers[0].light_threshold = Some(0.5);
+        cfg.normalize();
+        assert_eq!(cfg.press.thresholds(1), (0.09, 0.15));
+        assert_eq!(cfg.press.fingers[0].light_threshold, None);
+    }
+
+    #[test]
+    fn a_count_needs_no_calibration_to_be_active() {
+        let mut cfg = Config::default();
+        assert!(!cfg.press.count_active(1));
+        cfg.press.enabled = true;
+        assert!(!cfg.press.count_active(1));
+        for f in &mut cfg.press.fingers {
+            f.enabled = true;
+        }
+        assert!((1..=5).all(|n| cfg.press.count_active(n)));
+        assert!(cfg.calibration.is_empty());
+        cfg.press.fingers[1].enabled = false;
+        assert!(!cfg.press.count_active(2));
+        cfg.press.enabled = false;
+        assert!(!cfg.press.count_active(1));
     }
 }

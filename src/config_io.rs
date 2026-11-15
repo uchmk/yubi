@@ -96,14 +96,14 @@ pub struct Imported {
     pub warnings: Vec<String>,
 }
 
-fn unix_secs() -> u64 {
+pub(crate) fn unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
 }
 
 /// `YYYY-MM-DD` (UTC) for a unix timestamp (Howard Hinnant's civil-from-days).
-fn date_utc(secs: u64) -> String {
+pub(crate) fn date_utc(secs: u64) -> String {
     let z = (secs / 86_400) as i64 + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -147,8 +147,12 @@ fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
 }
 
 /// Write `cfg` as TOML (same serializer as `config::save`) with a version/date header comment.
+/// The pressure calibration belongs to one trackpad, so it is not exported.
 pub fn export_to(path: &Path, cfg: &Config) -> Result<()> {
-    let body = toml::to_string_pretty(cfg).map_err(|e| ConfigIoError::Serialize(e.to_string()))?;
+    let mut shared = cfg.clone();
+    shared.calibration.clear();
+    let body =
+        toml::to_string_pretty(&shared).map_err(|e| ConfigIoError::Serialize(e.to_string()))?;
     write_atomic(path, &format!("{}{body}", header(unix_secs())))?;
     Ok(())
 }
@@ -278,6 +282,26 @@ mod tests {
         assert_eq!(got.config, cfg);
         assert!(got.warnings.is_empty());
         assert!(!dir.join("export.toml.tmp").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_leaves_out_the_device_calibration() {
+        let dir = temp_dir("cal");
+        let path = dir.join("export.toml");
+        let mut cfg = Config::default();
+        cfg.calibration.insert(
+            "05ac:0324".into(),
+            crate::config::Calibration {
+                baseline: 0.02,
+                f1: 0.4,
+                ..Default::default()
+            },
+        );
+        export_to(&path, &cfg).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("05ac"), "calibration leaked: {text}");
+        assert!(import_from(&path).unwrap().config.calibration.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 

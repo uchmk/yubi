@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use super::gestures::press::PressCfg;
 use super::resolve::{resolve, resolve_edge};
 use crate::config::{self, Config, Sensitivity};
 
@@ -223,6 +224,11 @@ pub enum GestureEvent {
         fingers: usize,
         kind: MultiKind,
     },
+    /// A light or deep press was recognised (sent right before its `Trigger`).
+    Press {
+        fingers: usize,
+        deep: bool,
+    },
 }
 
 /// Where a flick throws a window.
@@ -297,7 +303,7 @@ pub enum Action {
     WindowMoveEnd {
         snap: Option<SnapDir>,
     },
-    /// One-shot (multi-finger tap / pinch / swipe); never `config::Action::None`.
+    /// One-shot (multi-finger tap / pinch / swipe / press); never `config::Action::None`.
     Trigger(config::Action),
     /// Freeze the cursor (and hold clicks) from now on; `Off` always runs, even in a blocked app.
     Suppress(Suppress),
@@ -315,6 +321,12 @@ pub enum Action {
     /// Hide the ring; `committed` flashes that slot first. The slot's action follows as `Trigger`.
     RingClose {
         committed: Option<usize>,
+    },
+    /// A haptic tick for a recognised press. `provisional`: a light press that still waits for a
+    /// possible deep press, so its action has not run yet (the weaker tick).
+    PressTick {
+        deep: bool,
+        provisional: bool,
     },
 }
 
@@ -376,6 +388,12 @@ pub struct Thresholds {
     pub edge_strip_mm: f32,
     /// Edge slider: travel per step (mm); a custom slider has its own.
     pub edge_detent_mm: f32,
+    /// Press: the calibrated pressure must stay past a threshold this long.
+    pub press_persist_us: u64,
+    /// Press: after it fires, pressure must stay below light-off this long before it can fire again.
+    pub press_rearm_us: u64,
+    /// Press: centroid movement beyond this before it fires cancels it (mm).
+    pub press_move_mm: f32,
 }
 
 impl Default for Thresholds {
@@ -404,6 +422,9 @@ impl Default for Thresholds {
             multi_swipe_band: (0.85, 1.15),
             edge_strip_mm: 6.0,
             edge_detent_mm: 2.0,
+            press_persist_us: 22_000,
+            press_rearm_us: 50_000,
+            press_move_mm: 3.0,
         }
     }
 }
@@ -529,6 +550,11 @@ pub struct GestureCfg {
     pub edge: Option<EdgeCfg>,
     /// `None` when the ring is off or no slot has an action.
     pub ring: Option<RingCfg>,
+    /// Press bindings and thresholds, indexed by `count - 1`; `None` = that count does nothing
+    /// (switched off or both actions unset).
+    pub press: [Option<PressCfg>; 5],
+    /// Give a haptic tick when a press is recognised.
+    pub ticks: bool,
 }
 
 impl GestureCfg {
@@ -585,7 +611,41 @@ impl GestureCfg {
                     .cloned()
                     .collect(),
             }),
+            ..Self::default()
         }
+    }
+
+    /// Fill in the press settings (raw pressure thresholds) for a touch session.
+    pub fn set_press(&mut self, cfg: &Config, exe: Option<&str>) {
+        self.ticks = cfg.press.haptic_ticks;
+        for n in 1..=5 {
+            self.press[n - 1] = cfg.press.count_active(n).then(|| {
+                let (light_on, deep_on) = cfg.press.thresholds(n);
+                PressCfg::new(
+                    resolve(cfg, exe, &GestureId::press(n, false)),
+                    resolve(cfg, exe, &GestureId::press(n, true)),
+                    light_on,
+                    deep_on,
+                )
+            });
+            if self.press[n - 1]
+                .as_ref()
+                .is_some_and(|p| p.light == config::Action::None && p.deep == config::Action::None)
+            {
+                self.press[n - 1] = None;
+            }
+        }
+    }
+
+    pub fn press_for(&self, fingers: usize) -> Option<&PressCfg> {
+        fingers
+            .checked_sub(1)
+            .and_then(|i| self.press.get(i))
+            .and_then(Option::as_ref)
+    }
+
+    pub fn any_press(&self) -> bool {
+        self.press.iter().any(Option::is_some)
     }
 
     pub fn multi_for(&self, fingers: usize) -> Option<&MultiCfg> {
@@ -621,6 +681,8 @@ pub struct Ctx<'a> {
     pub dims: Option<(f32, f32)>,
     /// Furthest any contact of this session has been from where it landed.
     pub max_travel: f32,
+    /// Raw (median-filtered) pressure of every contact that reports one.
+    pub pressures: &'a [f32],
 }
 
 pub fn dist(a: Point, b: Point) -> f32 {

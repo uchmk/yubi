@@ -84,6 +84,14 @@ pub fn multi_label(fingers: usize, kind: MultiKind) -> String {
     kind.label(fingers)
 }
 
+/// Name of a press for the note shown after it fires.
+pub fn press_label(fingers: usize, deep: bool) -> String {
+    format!(
+        "{fingers}本指で{}押し込み",
+        if deep { "深く" } else { "軽く" }
+    )
+}
+
 pub fn plan_for(action: &config::Action) -> Plan {
     use config::Action as A;
     match action {
@@ -143,6 +151,8 @@ pub struct Dispatcher {
     /// A window move was accepted and not yet ended.
     win_active: bool,
     last_multi: Option<(usize, MultiKind)>,
+    /// The press (finger count, deep) whose action is about to trigger.
+    last_press: Option<(usize, bool)>,
     /// Volume and brightness, opened on first use (engine thread only).
     sys: SystemOps,
     /// What the mouse hook swallows right now (edge slider, ring).
@@ -365,6 +375,7 @@ impl Dispatcher {
             win_join: None,
             win_active: false,
             last_multi: None,
+            last_press: None,
             sys: SystemOps::default(),
             suppression: Suppression::default(),
             ring: RingUi::default(),
@@ -461,7 +472,11 @@ impl Dispatcher {
                 self.last_multi = Some((*fingers, *kind));
                 None
             }
-            Action::Debug(_) => None,
+            Action::Debug(GestureEvent::Press { fingers, deep }) => {
+                self.last_press = Some((*fingers, *deep));
+                None
+            }
+            Action::Debug(_) | Action::PressTick { .. } => None,
             // Ends always run, so a drag or window move that began is always closed.
             Action::DragEnd => {
                 self.drag_px.clear();
@@ -572,10 +587,15 @@ impl Dispatcher {
         action: &config::Action,
         ex: &mut Executor<S>,
     ) -> Option<String> {
-        let source = match (self.source_override.take(), self.last_multi.take()) {
-            (Some(s), _) => s,
-            (None, Some((n, kind))) => multi_label(n, kind),
-            (None, None) => "ジェスチャー".to_owned(),
+        let source = match (
+            self.source_override.take(),
+            self.last_press.take(),
+            self.last_multi.take(),
+        ) {
+            (Some(s), _, _) => s,
+            (None, Some((n, deep)), _) => press_label(n, deep),
+            (None, None, Some((n, kind))) => multi_label(n, kind),
+            (None, None, None) => "ジェスチャー".to_owned(),
         };
         self.run_plan(action, ex, &source)
     }

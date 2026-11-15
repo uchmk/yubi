@@ -6,6 +6,7 @@ pub mod general_io;
 pub mod home;
 pub mod overview;
 pub mod practice;
+pub mod press;
 pub mod sensitivity;
 
 use crate::nav::Page;

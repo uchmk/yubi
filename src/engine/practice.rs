@@ -6,6 +6,7 @@
 
 use std::time::{Duration, Instant};
 
+use super::dispatch::press_label;
 use super::recognizer::{Action, GestureEvent};
 use super::types::GestureId;
 
@@ -122,6 +123,13 @@ impl Recorder {
                 ));
                 None
             }
+            Action::Debug(GestureEvent::Press { fingers, deep }) => {
+                self.pending = Some((
+                    press_label(*fingers, *deep),
+                    GestureId::press(*fingers, *deep).as_str().to_owned(),
+                ));
+                None
+            }
             Action::Trigger(act) => {
                 let (gesture, token) = self
                     .pending
@@ -201,6 +209,22 @@ mod tests {
 
     fn multi(fingers: usize, kind: MultiKind) -> Action {
         Action::Debug(GestureEvent::Multi { fingers, kind })
+    }
+
+    #[test]
+    fn a_press_is_named_and_carries_its_action() {
+        let mut r = Recorder::default();
+        let mode = Mode::default();
+        let press = Action::Debug(GestureEvent::Press {
+            fingers: 2,
+            deep: true,
+        });
+        assert_eq!(r.observe(&press, mode, at()), None);
+        let j = r
+            .observe(&Action::Trigger(config::Action::TaskView), mode, at())
+            .expect("the trigger completes the judgement");
+        assert_eq!(j.token, "press.2.deep");
+        assert_eq!(j.gesture, press_label(2, true));
     }
 
     #[test]

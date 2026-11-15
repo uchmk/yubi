@@ -682,3 +682,425 @@ fn replay_five_finger_pinch_in() {
     let out = replay::run(&frames, &five_cfg());
     assert_eq!(triggers(&out), vec![config::Action::TaskView]);
 }
+
+// ---- light and deep press (raw pressure thresholds) ----
+
+fn pframe(t_us: u64, pts: &[(f32, f32)], pressures: &[f32]) -> Frame {
+    let mut f = frame(t_us, pts);
+    for (c, &p) in f.contacts.iter_mut().zip(pressures) {
+        c.pressure = Some(p);
+    }
+    f
+}
+
+impl Seq {
+    /// One frame with per-contact pressures.
+    fn push_p(&mut self, pts: &[(f32, f32)], pressures: &[f32]) {
+        self.frames.push(pframe(self.t, pts, pressures));
+        self.t += STEP;
+    }
+
+    /// `frames` frames at the same spot, every contact at pressure `p`.
+    fn hold_p(&mut self, pts: &[(f32, f32)], p: f32, frames: usize) {
+        for _ in 0..frames {
+            self.push_p(pts, &vec![p; pts.len()]);
+        }
+    }
+
+    /// `frames` frames alternating between pressures `a` and `b`.
+    fn jitter_p(&mut self, pts: &[(f32, f32)], a: f32, b: f32, frames: usize) {
+        for i in 0..frames {
+            let p = if i % 2 == 0 { a } else { b };
+            self.push_p(pts, &vec![p; pts.len()]);
+        }
+    }
+}
+
+/// Press on for `fingers` with the given bindings and the default thresholds.
+fn press_cfg(fingers: usize, light: config::Action, deep: config::Action) -> Config {
+    let mut cfg = Config::default();
+    cfg.press.enabled = true;
+    let f = &mut cfg.press.fingers[fingers - 1];
+    f.enabled = true;
+    f.light = light;
+    f.deep = deep;
+    cfg
+}
+
+const REST: f32 = 0.02;
+
+#[test]
+fn light_only_fires_once_at_the_raw_light_threshold() {
+    use config::Action::Find;
+    // 1 finger: light on at 0.08.
+    let cfg = press_cfg(1, Find, config::Action::None);
+    let p = row(1, 80.0, 57.0);
+    let mut s = Seq::default();
+    s.hold_p(&p, REST, 10);
+    s.hold_p(&p, 0.07, 10); // below on: nothing
+    assert!(triggers(&s.run(&cfg)).is_empty());
+    s.hold_p(&p, 0.08, 10); // exactly on: fires
+    s.hold_p(&p, 0.19, 20); // staying pressed does not repeat
+    s.lift(0);
+    let out = s.run(&cfg);
+    assert_eq!(triggers(&out), vec![Find]);
+    // Fired after the 22 ms persistence, not at the first sample.
+    let fired = time_of(&out, |a| matches!(a, Action::Trigger(_))).unwrap();
+    assert!(fired >= 20 * STEP + 22_000, "fired at {fired}");
+}
+
+#[test]
+fn a_short_spike_is_filtered_out() {
+    use config::Action::Find;
+    let cfg = press_cfg(1, Find, config::Action::None);
+    let p = row(1, 80.0, 57.0);
+    let mut s = Seq::default();
+    s.hold_p(&p, REST, 10);
+    s.hold_p(&p, 0.18, 1); // a single noisy sample: the median drops it
+    s.hold_p(&p, REST, 10);
+    s.lift(0);
+    assert!(triggers(&s.run(&cfg)).is_empty());
+}
+
+#[test]
+fn the_range_ends_work() {
+    use config::Action::{Find, TaskView};
+    let mut cfg = press_cfg(1, Find, TaskView);
+    cfg.press.light_threshold = 0.01;
+    cfg.press.deep_threshold = 0.20;
+    let p = row(1, 80.0, 57.0);
+    let mut s = Seq::default();
+    s.hold_p(&p, 0.0, 6);
+    s.hold_p(&p, 0.01, 10);
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![Find]);
+    let mut s = Seq::default();
+    s.hold_p(&p, 0.0, 6);
+    s.hold_p(&p, 0.19, 10);
+    s.hold_p(&p, 0.20, 10);
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![TaskView]);
+}
+
+#[test]
+fn provisional_light_fires_on_release_and_deep_discards_it() {
+    use config::Action::{Find, TaskView};
+    let cfg = press_cfg(1, Find, TaskView);
+    let p = row(1, 80.0, 57.0);
+    // Light only, then released while still touching: the light action fires on release.
+    let mut s = Seq::default();
+    s.hold_p(&p, REST, 8);
+    s.hold_p(&p, 0.10, 10);
+    s.hold_p(&p, REST, 10);
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![Find]);
+    // Light, then lifted straight off the pad: fires on the lift.
+    let mut s = Seq::default();
+    s.hold_p(&p, REST, 8);
+    s.hold_p(&p, 0.10, 10);
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![Find]);
+    // Light then deep: only the deep action, the light one is dropped.
+    let mut s = Seq::default();
+    s.hold_p(&p, REST, 8);
+    s.hold_p(&p, 0.10, 8);
+    s.hold_p(&p, 0.16, 10);
+    s.hold_p(&p, REST, 10);
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![TaskView]);
+}
+
+#[test]
+fn deep_only_binding_ignores_a_light_press() {
+    use config::Action::{None as Off, TaskView};
+    let cfg = press_cfg(1, Off, TaskView);
+    let p = row(1, 80.0, 57.0);
+    let mut s = Seq::default();
+    s.hold_p(&p, REST, 8);
+    s.hold_p(&p, 0.10, 12);
+    s.hold_p(&p, REST, 10);
+    s.lift(0);
+    assert!(triggers(&s.run(&cfg)).is_empty());
+    let mut s = Seq::default();
+    s.hold_p(&p, REST, 8);
+    s.hold_p(&p, 0.16, 12);
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![TaskView]);
+}
+
+#[test]
+fn no_repeat_until_the_pressure_stays_below_light_off() {
+    use config::Action::Find;
+    let cfg = press_cfg(1, Find, config::Action::None);
+    let p = row(1, 80.0, 57.0);
+    let mut s = Seq::default();
+    s.hold_p(&p, REST, 8);
+    s.hold_p(&p, 0.10, 10); // fires
+    s.hold_p(&p, 0.075, 12); // eased off but above light-off (0.07)
+    s.hold_p(&p, 0.10, 10); // pressed again: still the same press
+    s.hold_p(&p, 0.03, 2); // a dip shorter than 50 ms
+    s.hold_p(&p, 0.10, 10); // not re-armed yet
+    assert_eq!(triggers(&s.run(&cfg)), vec![Find]);
+    s.hold_p(&p, 0.03, 8); // 88 ms below light-off: re-armed
+    s.hold_p(&p, 0.10, 10);
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![Find, Find]);
+}
+
+#[test]
+fn centroid_movement_before_the_commit_cancels() {
+    use config::Action::Find;
+    let cfg = press_cfg(1, Find, config::Action::None);
+    let p = row(1, 80.0, 57.0);
+    let mut s = Seq::default();
+    s.hold_p(&p, REST, 8);
+    s.hold_p(&p, 0.10, 2); // armed, not yet held 22 ms
+    let moved = shifted(&p, 12.0, 0.0);
+    s.hold_p(&moved, 0.10, 12);
+    s.lift(0);
+    assert!(triggers(&s.run(&cfg)).is_empty());
+}
+
+#[test]
+fn a_count_change_cancels_a_latched_light_press() {
+    use config::Action::{Find, TaskView};
+    let cfg = press_cfg(1, Find, TaskView);
+    let one = row(1, 80.0, 57.0);
+    let two = row(2, 80.0, 57.0);
+    let mut s = Seq::default();
+    s.hold_p(&one, REST, 8);
+    s.hold_p(&one, 0.10, 8); // provisional light latched
+    s.hold_p(&two, 0.10, 8); // a second finger lands
+    s.hold_p(&two, REST, 8);
+    s.lift(0);
+    assert!(triggers(&s.run(&cfg)).is_empty());
+}
+
+#[test]
+fn the_signal_is_the_maximum_over_the_contacts() {
+    use config::Action::Find;
+    let cfg = press_cfg(2, Find, config::Action::None);
+    let two = row(2, 80.0, 57.0);
+    let mut s = Seq::default();
+    for _ in 0..8 {
+        s.push_p(&two, &[0.01, 0.01]);
+    }
+    for _ in 0..10 {
+        s.push_p(&two, &[0.01, 0.09]); // one finger presses hard, the other rests
+    }
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![Find]);
+}
+
+#[test]
+fn two_and_three_finger_jitter_does_not_flicker() {
+    use config::Action::{Find, TaskView};
+    for n in [2usize, 3] {
+        // Own pair 0.07 / 0.12: light-off 0.06, deep-off 0.10.
+        let pts = row(n, 80.0, 57.0);
+        // Light only, hovering on the threshold with plus or minus 0.01.
+        let cfg = press_cfg(n, Find, config::Action::None);
+        let mut s = Seq::default();
+        s.hold_p(&pts, REST, 10);
+        s.jitter_p(&pts, 0.07, 0.06, 40);
+        s.hold_p(&pts, 0.065, 20);
+        s.lift(0);
+        assert_eq!(triggers(&s.run(&cfg)), vec![Find], "{n} fingers light");
+        // Light and deep: jitter around the deep threshold is one deep press.
+        let cfg = press_cfg(n, Find, TaskView);
+        let mut s = Seq::default();
+        s.hold_p(&pts, REST, 10);
+        s.hold_p(&pts, 0.09, 8);
+        s.jitter_p(&pts, 0.12, 0.11, 40);
+        s.jitter_p(&pts, 0.12, 0.10, 20);
+        s.hold_p(&pts, REST, 10);
+        s.lift(0);
+        assert_eq!(triggers(&s.run(&cfg)), vec![TaskView], "{n} fingers deep");
+    }
+}
+
+#[test]
+fn counts_use_their_own_pair_or_share_the_one_finger_pair() {
+    use config::Action::Find;
+    let two = row(2, 80.0, 57.0);
+    let run = |cfg: &Config| {
+        let mut s = Seq::default();
+        s.hold_p(&two, REST, 8);
+        s.hold_p(&two, 0.075, 12); // between the shared 0.08 and own 0.07
+        s.lift(0);
+        triggers(&s.run(cfg))
+    };
+    let mut cfg = press_cfg(2, Find, config::Action::None);
+    assert_eq!(run(&cfg), vec![Find]); // own pair 0.07
+    cfg.press.fingers[1].light_threshold = None;
+    cfg.press.fingers[1].deep_threshold = None;
+    assert!(run(&cfg).is_empty()); // shared one-finger pair 0.08
+}
+
+#[test]
+fn a_disabled_count_or_switch_fires_nothing() {
+    use config::Action::Find;
+    let p = row(1, 80.0, 57.0);
+    let mut s = Seq::default();
+    s.hold_p(&p, REST, 8);
+    s.hold_p(&p, 0.12, 12);
+    s.lift(0);
+    let mut cfg = press_cfg(1, Find, config::Action::None);
+    assert_eq!(triggers(&s.run(&cfg)), vec![Find]);
+    cfg.press.fingers[0].enabled = false;
+    assert!(triggers(&s.run(&cfg)).is_empty());
+    cfg.press.fingers[0].enabled = true;
+    cfg.press.enabled = false;
+    assert!(triggers(&s.run(&cfg)).is_empty());
+}
+
+#[test]
+fn a_per_app_override_replaces_the_press_binding() {
+    use super::types::GestureCfg;
+    use config::Action::{Find, TaskView};
+    let mut cfg = press_cfg(1, Find, config::Action::None);
+    cfg.profiles.push(Profile {
+        exe_name: "app.exe".into(),
+        enabled: true,
+        overrides: [("press.1.light".to_owned(), TaskView)].into(),
+        ..Profile::default()
+    });
+    let mut g = GestureCfg::default();
+    g.set_press(&cfg, Some("APP.exe"));
+    assert_eq!(g.press_for(1).unwrap().light, TaskView);
+    g.set_press(&cfg, Some("other.exe"));
+    assert_eq!(g.press_for(1).unwrap().light, Find);
+}
+
+#[test]
+fn a_four_finger_swipe_is_not_hijacked_by_a_press() {
+    use config::Action::Find;
+    let mut cfg = press_cfg(4, Find, config::Action::None);
+    cfg.four.enabled = true;
+    let p = ring_n(4, 1.0);
+    let mut s = Seq::default();
+    s.still(&p, 100);
+    // Pressing harder part-way through the swipe.
+    let n = 250 / 11;
+    for i in 1..=n {
+        let f = i as f32 / n as f32;
+        let pts = shifted(&p, -25.0 * f, 0.0);
+        let pr = if i > n / 3 { 0.12 } else { REST };
+        s.push_p(&pts, &[pr; 4]);
+    }
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![config::Action::DesktopNext]);
+}
+
+#[test]
+fn a_four_finger_pinch_is_not_hijacked_by_a_press() {
+    use config::Action::Find;
+    let mut cfg = press_cfg(4, Find, config::Action::None);
+    cfg.four.enabled = true;
+    cfg.four.pinch_in = config::Action::AppSwitch;
+    let mut s = Seq::default();
+    s.still(&ring_n(4, 1.0), 100);
+    for i in 1..=18u64 {
+        let k = 1.0 - 0.4 * i as f32 / 18.0;
+        let pr = if i > 6 { 0.12 } else { REST };
+        s.push_p(&ring_n(4, k), &[pr; 4]);
+    }
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![config::Action::AppSwitch]);
+}
+
+#[test]
+fn a_light_four_finger_tap_is_still_a_tap() {
+    use config::Action::Find;
+    let mut cfg = press_cfg(4, config::Action::AppSwitch, Find);
+    cfg.four.enabled = true;
+    cfg.four.tap = config::Action::TaskView;
+    let mut s = Seq::default();
+    s.hold_p(&ring_n(4, 1.0), 0.04, 6); // resting touch: well below light-on 0.07
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![config::Action::TaskView]);
+    // A firm press is not a tap.
+    let mut s = Seq::default();
+    s.hold_p(&ring_n(4, 1.0), 0.04, 4);
+    s.hold_p(&ring_n(4, 1.0), 0.15, 8);
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![Find]);
+}
+
+#[test]
+fn a_light_only_press_owns_the_touch_so_a_later_swipe_does_nothing() {
+    use config::Action::Find;
+    let mut cfg = press_cfg(4, Find, config::Action::None);
+    cfg.four.enabled = true;
+    let p = ring_n(4, 1.0);
+    let mut s = Seq::default();
+    s.hold_p(&p, REST, 6);
+    s.hold_p(&p, 0.12, 6); // fires after 22 ms
+    for i in 1..=25 {
+        let pts = shifted(&p, -25.0 * i as f32 / 25.0, 0.0);
+        s.push_p(&pts, &[0.12; 4]);
+    }
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![Find]);
+}
+
+#[test]
+fn with_a_deep_binding_the_latched_press_gives_way_to_a_swipe() {
+    use config::Action::{Find, TaskView};
+    let mut cfg = press_cfg(4, Find, TaskView);
+    cfg.four.enabled = true;
+    let p = ring_n(4, 1.0);
+    let mut s = Seq::default();
+    s.hold_p(&p, REST, 6);
+    s.hold_p(&p, 0.09, 6); // light latched, provisional
+    for i in 1..=25 {
+        let pts = shifted(&p, -25.0 * i as f32 / 25.0, 0.0);
+        s.push_p(&pts, &[0.09; 4]);
+    }
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![config::Action::DesktopNext]);
+}
+
+#[test]
+fn a_cancelled_latch_does_not_swallow_the_tap() {
+    use config::Action::TaskView;
+    // Deep only: a short light touch latches, the pressure eases off (cancel), then the lift is a tap.
+    let mut cfg = press_cfg(4, config::Action::None, config::Action::Find);
+    cfg.four.enabled = true;
+    cfg.four.tap = TaskView;
+    let p = ring_n(4, 1.0);
+    let mut s = Seq::default();
+    s.hold_p(&p, 0.04, 2);
+    s.hold_p(&p, 0.10, 5);
+    s.hold_p(&p, 0.03, 3);
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![TaskView]);
+}
+
+#[test]
+fn a_finger_leaving_while_others_stay_cancels_a_latched_press() {
+    use config::Action::{Find, TaskView};
+    let cfg = press_cfg(2, Find, TaskView);
+    let two = row(2, 80.0, 57.0);
+    let one = &two[..1];
+    let mut s = Seq::default();
+    s.hold_p(&two, REST, 8);
+    s.hold_p(&two, 0.10, 8); // provisional light latched
+    s.hold_p(one, 0.10, 10); // one finger lifts, the other stays down
+    s.lift(0);
+    assert!(triggers(&s.run(&cfg)).is_empty());
+}
+
+#[test]
+fn fingers_lifting_one_after_the_other_still_release_the_press() {
+    use config::Action::{Find, TaskView};
+    let cfg = press_cfg(2, Find, TaskView);
+    let two = row(2, 80.0, 57.0);
+    let one = &two[..1];
+    let mut s = Seq::default();
+    s.hold_p(&two, REST, 8);
+    s.hold_p(&two, 0.10, 8);
+    s.hold_p(one, 0.10, 2); // 22 ms with one finger: within the debounce
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![Find]);
+}

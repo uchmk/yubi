@@ -11,6 +11,7 @@ pub enum Owner {
     Multi,
     Edge,
     Ring,
+    Pressure,
 }
 
 /// Same-frame tie-break, strongest first. The variants without a gesture yet are reserved so the
@@ -18,7 +19,7 @@ pub enum Owner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[allow(
     dead_code,
-    reason = "owner, hold combo, corner, edge and pressure gestures come later"
+    reason = "owner, hold combo, corner and edge gestures come later"
 )]
 pub enum Priority {
     /// The gesture that already owns the session.
@@ -35,6 +36,7 @@ pub enum Priority {
 impl Owner {
     pub fn priority(self) -> Priority {
         match self {
+            Self::Pressure => Priority::Pressure,
             Self::Multi => Priority::Multi,
             Self::Window => Priority::Window,
             Self::Drag => Priority::Drag,

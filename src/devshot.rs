@@ -226,6 +226,35 @@ impl DevShot {
                 });
             }
         }
+        if let Ok(mode) = std::env::var("YUBI_SHOT_PRESS") {
+            // Only the press pages, on a fake pad (see `pages::press::demo`).
+            let mut list = Vec::new();
+            for (n, page, theme, size) in [
+                ("haptic", Page::Haptic, ThemeChoice::Black, WIDE),
+                ("haptic-light", Page::Haptic, ThemeChoice::Light, WIDE),
+                ("haptic-narrow", Page::Haptic, ThemeChoice::Black, NARROW),
+                ("custom", Page::CustomPress, ThemeChoice::Black, WIDE),
+                ("custom-light", Page::CustomPress, ThemeChoice::Light, WIDE),
+                (
+                    "custom-narrow",
+                    Page::CustomPress,
+                    ThemeChoice::Black,
+                    NARROW,
+                ),
+            ] {
+                list.push(Shot {
+                    name: format!("{mode}-{n}"),
+                    page,
+                    theme,
+                    size,
+                    fixture: Fixture::Keep,
+                    profile: None,
+                    fake: false,
+                    practice: false,
+                });
+            }
+            shots = list;
+        }
         let _ = fs::create_dir_all(&dir);
         let (tx, rx) = channel();
         Some(Self {

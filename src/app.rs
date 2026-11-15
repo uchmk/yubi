@@ -68,6 +68,7 @@ pub struct App {
     search_index: Vec<Entry>,
     devshot: Option<crate::devshot::DevShot>,
     resident: Option<Resident>,
+    pause_notice: crate::pause_notice::PauseNotice,
     quitting: bool,
     /// Frames left in which to keep the window hidden (`--background`; eframe shows it after the first frame).
     hide_frames: u8,
@@ -127,6 +128,7 @@ impl App {
             search_index: search::index(),
             devshot: crate::devshot::DevShot::from_env(),
             resident: None,
+            pause_notice: Default::default(),
             quitting: false,
             hide_frames: 0,
             icon_deadline: None,
@@ -162,11 +164,10 @@ impl App {
         let generation = self.engine.pause.generation();
         if generation != self.seen_pause_gen {
             if self.seen_pause_gen != u64::MAX {
-                r.toast(if pause.paused {
-                    "yubi を一時停止しました"
-                } else {
-                    "yubi を再開しました"
-                });
+                // The overlay card is visible about 3 s; the balloon only when it cannot be shown.
+                if !self.pause_notice.show(pause.paused) {
+                    r.toast(crate::pause_notice::text(pause.paused));
+                }
             }
             self.seen_pause_gen = generation;
         }

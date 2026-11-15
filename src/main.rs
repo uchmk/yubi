@@ -15,6 +15,7 @@ mod nav;
 mod os;
 mod overlay;
 mod pages;
+mod pause_notice;
 mod resident;
 mod search;
 mod theme;

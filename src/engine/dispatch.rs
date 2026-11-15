@@ -9,9 +9,11 @@ use std::thread::JoinHandle;
 
 use super::executor::{Executor, InputSink, Key, MouseButton};
 use super::recognizer::{Action, GestureEvent, SnapDir, Thresholds};
+use super::tick::{LevelStep, level_changed};
 use super::types::{EdgeSide, MultiKind, Suppress};
 use crate::config;
 use crate::os::keys::KeyCombo;
+use crate::overlay::{LevelInfo, LevelKind};
 
 pub const ELEVATED_NOTE: &str = "管理者のウィンドウは動かせません";
 const SEND_FAILED_NOTE: &str = "入力を送れませんでした（管理者のウィンドウが前面かもしれません）";
@@ -21,6 +23,8 @@ pub const WORKER_NOTE: &str = "ウィンドウ操作を開始できませんで�
 pub const RING_FAILED_NOTE: &str = "リングを表示できません";
 #[cfg(all(windows, not(test)))]
 const CURSOR_FAILED_NOTE: &str = "カーソルを固定できませんでした";
+#[cfg(all(windows, not(test)))]
+const LEVEL_FAILED_NOTE: &str = "レベル表示を出せません";
 pub const NO_CURSOR_NOTE: &str = "カーソル位置を取得できませんでした";
 const LEFT: Key = Key::Mouse(MouseButton::Left);
 
@@ -158,6 +162,12 @@ pub struct Dispatcher {
     /// What the mouse hook swallows right now (edge slider, ring).
     suppression: Suppression,
     ring: RingUi,
+    /// Show the level HUD for volume and brightness steps (the edge page setting).
+    level_hud: bool,
+    /// An edge slider detent is running its outputs.
+    in_edge: bool,
+    /// The volume / brightness step of the action just handled (the engine ticks for it).
+    level_step: Option<LevelStep>,
     /// Name shown instead of "ジェスチャー" for the next trigger (the ring's slot).
     source_override: Option<String>,
 }
@@ -258,19 +268,82 @@ fn hook_mode(s: Suppress) -> crate::hook::Mode {
 struct RingUi {
     #[cfg(all(windows, not(test)))]
     overlay: Option<crate::overlay::Overlay>,
+    /// The overlay is being created on its own thread (the engine loop never waits for it).
+    #[cfg(all(windows, not(test)))]
+    pending: Option<std::sync::mpsc::Receiver<Result<crate::overlay::Overlay, String>>>,
+    /// The overlay window could not be created: the ring cannot be shown.
     #[cfg(all(windows, not(test)))]
     failed: bool,
     /// The overlay could not be shown; the engine cancels the ring.
     failed_now: bool,
     generation: u64,
     open: bool,
+    /// The window is gone for good: the HUD stops (the failure also cancels the ring, since both
+    /// share the window). A single refused send does not set this.
+    #[cfg(all(windows, not(test)))]
+    level_failed: bool,
+    /// A refused HUD send was already reported once.
+    #[cfg(all(windows, not(test)))]
+    level_noted: bool,
 }
 
 impl RingUi {
+    /// Start creating the overlay window on its own thread (once). Never blocks.
+    #[cfg(all(windows, not(test)))]
+    fn warm(&mut self) {
+        if self.overlay.is_some() || self.pending.is_some() || self.failed {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("yubi-overlay-start".into())
+            .spawn(move || {
+                let _ = tx.send(crate::overlay::Overlay::start());
+            });
+        match spawned {
+            Ok(_) => self.pending = Some(rx),
+            Err(_) => self.failed = true,
+        }
+    }
+
+    #[cfg(not(all(windows, not(test))))]
+    fn warm(&mut self) {}
+
+    /// Pick up the overlay once its thread has made it. Returns whether it is ready.
+    #[cfg(all(windows, not(test)))]
+    fn ready(&mut self) -> bool {
+        use std::sync::mpsc::TryRecvError;
+        if self.overlay.is_none()
+            && let Some(rx) = &self.pending
+        {
+            match rx.try_recv() {
+                Ok(Ok(o)) => {
+                    self.overlay = Some(o);
+                    self.pending = None;
+                }
+                Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
+                    self.failed = true;
+                    self.pending = None;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        // A window that failed after creation (its thread discards commands) is as good as none.
+        if self
+            .overlay
+            .as_ref()
+            .is_some_and(|o| matches!(o.state(), crate::overlay::OverlayState::Failed(_)))
+        {
+            self.failed = true;
+        }
+        self.overlay.is_some() && !self.failed
+    }
+
     #[cfg(all(windows, not(test)))]
     fn send(&mut self, cmd: crate::overlay::OverlayCmd) {
         if let Some(o) = &self.overlay
-            && o.send(cmd).is_err()
+            && (matches!(o.state(), crate::overlay::OverlayState::Failed(_))
+                || o.send(cmd).is_err())
         {
             self.failed_now = true;
         }
@@ -278,14 +351,9 @@ impl RingUi {
 
     #[cfg(all(windows, not(test)))]
     fn show(&mut self, anchor: (i32, i32), labels: &[String]) {
-        use crate::overlay::{Overlay, OverlayCmd, RingSlot};
-        if self.overlay.is_none() && !self.failed {
-            match Overlay::start() {
-                Ok(o) => self.overlay = Some(o),
-                Err(_) => self.failed = true,
-            }
-        }
-        if self.overlay.is_none() {
+        use crate::overlay::{OverlayCmd, RingSlot};
+        self.warm();
+        if !self.ready() {
             self.failed_now = true;
             return;
         }
@@ -305,6 +373,54 @@ impl RingUi {
             generation,
         });
     }
+
+    /// Show or update the level HUD. A note (once) when it cannot be shown. Not while a ring is
+    /// open: the ring owns the window.
+    #[cfg(all(windows, not(test)))]
+    fn level(&mut self, info: LevelInfo) -> Option<String> {
+        use crate::overlay::OverlayCmd;
+        if self.open || self.level_failed {
+            return None;
+        }
+        self.warm();
+        if !self.ready() {
+            // Still being created: skip this one. A creation failure ends in `failed`.
+            if !self.failed {
+                return None;
+            }
+            // The window is gone for good: stop trying.
+            self.level_failed = true;
+            return Some(LEVEL_FAILED_NOTE.to_owned());
+        }
+        let ok = self
+            .overlay
+            .as_ref()
+            .is_some_and(|o| o.send(OverlayCmd::Level(info)).is_ok());
+        if ok {
+            return None;
+        }
+        // A refused send (a full queue) may pass: keep trying, but say so only once.
+        if self.level_noted {
+            return None;
+        }
+        self.level_noted = true;
+        Some(LEVEL_FAILED_NOTE.to_owned())
+    }
+
+    #[cfg(not(all(windows, not(test))))]
+    fn level(&mut self, _info: LevelInfo) -> Option<String> {
+        None
+    }
+
+    #[cfg(all(windows, not(test)))]
+    fn level_hide(&mut self) {
+        if let Some(o) = &self.overlay {
+            let _ = o.send(crate::overlay::OverlayCmd::LevelHide);
+        }
+    }
+
+    #[cfg(not(all(windows, not(test))))]
+    fn level_hide(&mut self) {}
 
     #[cfg(not(all(windows, not(test))))]
     fn show(&mut self, _anchor: (i32, i32), _labels: &[String]) {
@@ -366,6 +482,8 @@ impl Dispatcher {
             Ok(join) => {
                 let mut d = Self::new(Some(tx));
                 d.win_join = Some(join);
+                // Make the overlay window now, off the hot path.
+                d.ring.warm();
                 d
             }
             // No worker: window moves report that they cannot start.
@@ -397,6 +515,9 @@ impl Dispatcher {
             sys: SystemOps::default(),
             suppression: Suppression::default(),
             ring: RingUi::default(),
+            level_hud: true,
+            in_edge: false,
+            level_step: None,
             source_override: None,
         }
     }
@@ -417,7 +538,41 @@ impl Dispatcher {
         std::mem::take(&mut self.ring.failed_now)
     }
 
-    /// Record the foreground app's filter result. It takes effect at the next touch start, so
+    /// The edge page setting 「レベルを画面に表示する」. Turning it off hides a HUD that is up.
+    pub fn set_level_hud(&mut self, on: bool) {
+        self.level_hud = on;
+        if !on {
+            self.ring.level_hide();
+        }
+    }
+
+    /// Hide the level HUD now (pause).
+    pub fn hide_level(&mut self) {
+        self.ring.level_hide();
+    }
+
+    /// The volume / brightness step the last action ran, once.
+    pub fn take_level_step(&mut self) -> Option<LevelStep> {
+        self.level_step.take()
+    }
+
+    /// Record a level step and show the HUD. Returns the note, with a HUD failure appended.
+    fn level_done(&mut self, info: LevelInfo, changed: bool, note: String) -> String {
+        let step = LevelStep {
+            from_edge: self.in_edge,
+            changed,
+        };
+        self.level_step = Some(match self.level_step {
+            Some(p) => p.merge(step),
+            None => step,
+        });
+        match self.level_hud.then(|| self.ring.level(info)).flatten() {
+            Some(extra) => format!("{note}（{extra}）"),
+            None => note,
+        }
+    }
+
+    /// Record the foreground app filter result. It takes effect at the next touch start, so
     /// the app is decided once per touch session.
     pub fn set_blocked(&mut self, blocked: bool) {
         self.live_blocked = blocked;
@@ -637,6 +792,7 @@ impl Dispatcher {
     ) -> Option<String> {
         const CTRL: Key = Key::Vk(0x11);
         let mut note = None;
+        self.in_edge = true;
         for out in outs {
             match out {
                 config::EdgeOut::Act(a) => note = self.run_plan(a, ex, side.label()),
@@ -654,6 +810,7 @@ impl Dispatcher {
                 }
             }
         }
+        self.in_edge = false;
         note
     }
 
@@ -676,23 +833,51 @@ impl Dispatcher {
                 SEND_FAILED_NOTE.to_owned()
             }),
             Plan::Volume(n) => Some(match self.sys.volume_step(n) {
-                Ok(v) => format!("{source} → {label}（{}%）", percent(v)),
+                Ok(st) => {
+                    let note = format!("{source} → {label}（{}%）", percent(st.after));
+                    let info = LevelInfo {
+                        kind: LevelKind::Volume,
+                        percent: Some(percent(st.after) as u8),
+                        muted: st.muted,
+                    };
+                    let changed = level_changed(Some(st.before), Some(st.after));
+                    self.level_done(info, changed, note)
+                }
                 Err(e) => e,
             }),
             Plan::ToggleMute => Some(match self.sys.toggle_mute() {
-                Ok(muted) => format!(
-                    "{source} → {}",
-                    if muted {
-                        "ミュート"
-                    } else {
-                        "ミュート解除"
-                    }
-                ),
+                Ok((muted, value)) => {
+                    let note = format!(
+                        "{source} → {}",
+                        if muted {
+                            "ミュート"
+                        } else {
+                            "ミュート解除"
+                        }
+                    );
+                    let info = LevelInfo {
+                        kind: LevelKind::Volume,
+                        percent: value.map(|v| percent(v) as u8),
+                        muted,
+                    };
+                    // A mute toggle is not a slider step: no tick.
+                    self.level_done(info, false, note)
+                }
                 Err(e) => e,
             }),
             Plan::Brightness(n) => Some(match self.sys.brightness_step(n) {
-                Ok(Some(v)) => format!("{source} → {label}（{}%）", percent(v)),
-                Ok(None) => format!("{source} → {label}"),
+                Ok((v, changed)) => {
+                    let note = match v {
+                        Some(v) => format!("{source} → {label}（{}%）", percent(v)),
+                        None => format!("{source} → {label}"),
+                    };
+                    let info = LevelInfo {
+                        kind: LevelKind::Brightness,
+                        percent: v.map(|v| percent(v) as u8),
+                        muted: false,
+                    };
+                    self.level_done(info, changed, note)
+                }
                 Err(e) => e,
             }),
             Plan::Nothing => Some(format!("{source} → {label}（まだ動作しません）")),
@@ -777,18 +962,32 @@ fn brightness_base(
 }
 
 impl SystemOps {
-    fn volume_step(&mut self, n: i8) -> Result<f32, String> {
-        with_volume(|v| v.step(step_fraction(n)))
+    fn volume_step(&mut self, n: i8) -> Result<VolumeStep, String> {
+        with_volume(|v| {
+            let before = v.get()?;
+            let after = crate::os::volume::step_value(before, step_fraction(n));
+            v.set(after)?;
+            // A failed mute read only costs the HUD its muted look.
+            let muted = v.is_muted().unwrap_or(false);
+            Ok(VolumeStep {
+                before,
+                after,
+                muted,
+            })
+        })
     }
 
-    fn toggle_mute(&mut self) -> Result<bool, String> {
-        with_volume(|v| v.toggle_mute())
+    /// Toggle mute; returns the new mute state and the volume. The volume is `None` when it could
+    /// not be read back: the toggle itself still worked.
+    fn toggle_mute(&mut self) -> Result<(bool, Option<f32>), String> {
+        with_volume(|v| Ok((v.toggle_mute()?, v.get().ok())))
     }
 
     /// Never blocks: the worker thread talks to the display. It reads the brightness fresh and adds
     /// the step, so a change made with the monitor's own buttons is respected. The returned value
-    /// is only the expected result (`None` when the cached value is too old to say).
-    fn brightness_step(&mut self, n: i8) -> Result<Option<f32>, String> {
+    /// is only the expected result (`None` when the cached value is too old to say); the flag says
+    /// whether the step moved the level (false at the 0 % / 100 % end).
+    fn brightness_step(&mut self, n: i8) -> Result<(Option<f32>, bool), String> {
         let worker = self
             .brightness
             .get_or_insert_with(crate::os::brightness::BrightnessWorker::spawn);
@@ -805,9 +1004,17 @@ impl SystemOps {
         self.brightness_target = expected.map(|v| (v, seq));
         match (&status.error, status.value) {
             (Some(_), None) => Err(BRIGHTNESS_FAILED_NOTE.to_owned()),
-            _ => Ok(expected),
+            // Unknown base: nothing to compare, so no claim that the level moved (no tick).
+            _ => Ok((expected, base.is_some() && level_changed(base, expected))),
         }
     }
+}
+
+/// One volume step: the value before and after, and whether the endpoint is muted.
+struct VolumeStep {
+    before: f32,
+    after: f32,
+    muted: bool,
 }
 
 impl Drop for Dispatcher {

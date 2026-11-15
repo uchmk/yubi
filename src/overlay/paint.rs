@@ -4,6 +4,7 @@
 use std::f32::consts::{PI, TAU};
 
 use super::geometry::{Layout, angle_of};
+use super::level::{LevelInfo, LevelLayout};
 
 /// Straight (non-premultiplied) RGBA, 0..=255 floats.
 #[derive(Clone, Copy, Debug)]
@@ -41,6 +42,10 @@ pub struct Palette {
     pub flash_fill: Rgba,
     pub text: Rgba,
     pub text_sel: Rgba,
+    pub text_dim: Rgba,
+    pub track: Rgba,
+    pub bar: Rgba,
+    pub bar_muted: Rgba,
 }
 
 pub const PALETTE: Palette = Palette {
@@ -54,6 +59,11 @@ pub const PALETTE: Palette = Palette {
     text: Rgba::hex(0xFFFFFF, 1.0),
     // on_accent 0x000000.
     text_sel: Rgba::hex(0x000000, 1.0),
+    text_dim: Rgba::hex(0xC8C8C8, 1.0),
+    track: Rgba::hex(0x484848, 0.95),
+    // accent 0x60CDFF; a muted volume is grey.
+    bar: Rgba::hex(0x60CDFF, 1.0),
+    bar_muted: Rgba::hex(0x8A8A8A, 1.0),
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,6 +139,71 @@ pub fn render_ring(px: &mut [u32], l: &Layout, hl: Highlight) {
     }
 }
 
+/// Signed distance (positive inside) to a rounded rectangle `(x0, y0, x1, y1)` with corner
+/// radius `r`, at the point `(px, py)`.
+fn rrect_dist(px: f32, py: f32, rect: (f32, f32, f32, f32), r: f32) -> f32 {
+    let (x0, y0, x1, y1) = rect;
+    let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let (hx, hy) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
+    let r = r.min(hx).min(hy).max(0.0);
+    let qx = (px - cx).abs() - (hx - r);
+    let qy = (py - cy).abs() - (hy - r);
+    let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+    -(outside + qx.max(qy).min(0.0) - r)
+}
+
+/// Draw the level HUD card and bar into `px` (`stride` pixels per row, cleared first). The
+/// text (icon, label, number) is drawn on top by `window.rs`.
+pub fn render_level(px: &mut [u32], stride: usize, l: &LevelLayout, info: &LevelInfo) {
+    render_card(px, stride, l, Some(info));
+}
+
+/// Draw the notice card (the HUD card without a bar); the text is drawn on top by `window.rs`.
+pub fn render_notice(px: &mut [u32], stride: usize, l: &LevelLayout) {
+    render_card(px, stride, l, None);
+}
+
+fn render_card(px: &mut [u32], stride: usize, l: &LevelLayout, info: Option<&LevelInfo>) {
+    let (w, h) = (l.width as usize, l.height as usize);
+    assert!(stride >= w && px.len() >= stride * h);
+    for y in 0..h {
+        px[y * stride..y * stride + stride].fill(0);
+    }
+    let card = (0.0, 0.0, l.width as f32, l.height as f32);
+    let (bx0, by0, bx1, by1) = l.bar();
+    let track = (bx0, by0, bx1, by1);
+    let bar_r = (by1 - by0) / 2.0;
+    let fill_w = info.map_or(0.0, |i| (bx1 - bx0) * i.fraction());
+    let fill = (bx0, by0, bx0 + fill_w, by1);
+    let fill_color = if info.is_some_and(|i| i.muted) {
+        PALETTE.bar_muted
+    } else {
+        PALETTE.bar
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            let d = rrect_dist(fx, fy, card, l.radius);
+            if d <= -1.0 {
+                continue;
+            }
+            // Card with its 1 px border, then the track and the fill by coverage.
+            let t = (d - 0.5).clamp(0.0, 1.0);
+            let mut c = PALETTE.border.lerp(PALETTE.fill, t);
+            let cov_track = (rrect_dist(fx, fy, track, bar_r) + 0.5).clamp(0.0, 1.0);
+            if info.is_some() {
+                c = c.lerp(PALETTE.track, cov_track);
+            }
+            if fill_w >= 1.0 {
+                let cov_fill = (rrect_dist(fx, fy, fill, bar_r) + 0.5).clamp(0.0, 1.0);
+                c = c.lerp(fill_color, cov_fill);
+            }
+            c.3 *= (d + 0.5).clamp(0.0, 1.0);
+            px[y * stride + x] = premul(c);
+        }
+    }
+}
+
 /// Edge-aware color: `d` is the signed distance inside the shape in pixels. Within ~1 px of the
 /// edge the border color shows; the outermost half pixel fades out for anti-aliasing.
 fn shade(fill: Rgba, border: Rgba, d: f32) -> u32 {
@@ -199,6 +274,42 @@ mod tests {
         let mid = (l.outer + l.inner) / 2.0;
         let red = |v: u32| (v >> 16) & 0xFF;
         assert!(red(pixel(&b, &l, 0.0, -mid)) > red(pixel(&a, &l, 0.0, -mid)));
+    }
+
+    #[test]
+    fn level_bar_follows_the_value() {
+        use super::super::level::{LevelInfo, LevelKind};
+        let l = LevelLayout::new(96);
+        let stride = l.width as usize;
+        let mut px = vec![0u32; stride * l.height as usize];
+        let info = |p| LevelInfo {
+            kind: LevelKind::Volume,
+            percent: Some(p),
+            muted: false,
+        };
+        render_level(&mut px, stride, &l, &info(50));
+        let (bx0, by0, bx1, by1) = l.bar();
+        let at = |px: &[u32], fx: f32| px[((by0 + by1) / 2.0) as usize * stride + fx as usize];
+        let quarter = bx0 + (bx1 - bx0) * 0.25;
+        let three_quarters = bx0 + (bx1 - bx0) * 0.75;
+        // Filled part is accent blue-heavy, the rest is the grey track.
+        let f = at(&px, quarter);
+        assert!((f & 0xFF) > 0xE0 && ((f >> 16) & 0xFF) < 0xA0, "{f:08x}");
+        let t = at(&px, three_quarters);
+        assert!((t & 0xFF) < 0x60, "{t:08x}");
+        // The window corner is transparent, the card inside is drawn.
+        assert_eq!(px[0], 0);
+        assert!(px[stride * 20 + 100] >> 24 > 200);
+        // Muted: the fill turns grey.
+        let mut m = info(50);
+        m.muted = true;
+        render_level(&mut px, stride, &l, &m);
+        let g = at(&px, quarter);
+        assert!((g & 0xFF).abs_diff((g >> 16) & 0xFF) < 8, "{g:08x}");
+        // 0 %: no fill at all.
+        render_level(&mut px, stride, &l, &info(0));
+        let z = at(&px, quarter);
+        assert!((z & 0xFF) < 0x60, "{z:08x}");
     }
 
     #[test]

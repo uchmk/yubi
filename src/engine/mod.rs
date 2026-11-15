@@ -15,6 +15,7 @@ pub mod recognizer;
 pub mod replay;
 pub mod resolve;
 pub mod session;
+pub mod tick;
 pub mod tracking;
 pub mod types;
 
@@ -251,6 +252,7 @@ impl Engine {
             last_frame_at: None,
             last_release_retry: None,
             haptics: None,
+            step_ticks: tick::TickLimiter::default(),
             cfg: Config::default(),
             seen_generation: u64::MAX,
             seen_interrupts: 0,
@@ -332,6 +334,8 @@ struct Worker {
     last_release_retry: Option<Instant>,
     /// Started on the first press tick that needs it.
     haptics: Option<crate::haptic::Haptics>,
+    /// Spaces the edge slider ticks.
+    step_ticks: tick::TickLimiter,
     cfg: Config,
     seen_generation: u64,
     seen_interrupts: u64,
@@ -460,9 +464,12 @@ impl Worker {
         self.cfg = self.config.snapshot();
         // Start the haptics worker (it probes the driver) before the first tick needs it, but only
         // when press ticks can happen; with the press feature or its ticks off nothing is opened.
-        if self.cfg.press.enabled && self.cfg.press.haptic_ticks && self.haptics.is_none() {
+        let ticks_possible = (self.cfg.press.enabled && self.cfg.press.haptic_ticks)
+            || (self.cfg.edge.enabled && self.cfg.edge.haptic_ticks);
+        if ticks_possible && self.haptics.is_none() {
             self.haptics = Some(crate::haptic::Haptics::new());
         }
+        self.dispatch.set_level_hud(self.cfg.edge.show_level);
         if self.enabled && !self.cfg.gestures_enabled {
             self.release_everything();
         }
@@ -490,6 +497,7 @@ impl Worker {
         self.paused = paused;
         if paused {
             self.release_everything();
+            self.dispatch.hide_level();
         }
         // Paused: Windows' own speed is back; on resume the effective one is applied again.
         self.sync_cursor();
@@ -669,6 +677,13 @@ impl Worker {
                 self.with_state(|s| s.last_action = Some(note));
                 (self.wake)();
             }
+            if let Some(step) = self.dispatch.take_level_step()
+                && step.wants_tick()
+                && !dry_run
+                && !self.dispatch.is_blocked()
+            {
+                self.step_tick();
+            }
         }
         // The ring overlay could not be shown: close the ring rather than freeze blind.
         if self.dispatch.take_overlay_failed() {
@@ -699,6 +714,19 @@ impl Worker {
             }
         };
         h.actuate(strength);
+    }
+
+    /// A light tick for an edge slider step that changed the level. At most one every 40 ms.
+    fn step_tick(&mut self) {
+        use crate::haptic::{HapticStatus, Haptics};
+        if !self.cfg.edge.haptic_ticks || !self.step_ticks.allow(Instant::now()) {
+            return;
+        }
+        let h = self.haptics.get_or_insert_with(Haptics::new);
+        if h.status() != HapticStatus::Available {
+            return;
+        }
+        h.actuate(tick::step_strength(self.cfg.press.haptic_strength));
     }
 
     fn flush_recorder(&mut self) {

@@ -393,6 +393,21 @@ pub fn edge(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
                 edge_target_rows(g, t, name, id, value);
             }
         });
+        section_header(ui, t, "フィードバック");
+        group(ui, t, |g| {
+            g.toggle_row(
+                None,
+                "レベルを画面に表示する",
+                "音量や明るさを変えている間、画面の下にバーと数値を出します。ジェスチャーに割り当てた音量・明るさの操作でも出ます。",
+                &mut cfg.edge.show_level,
+            );
+            g.toggle_row(
+                None,
+                "段階ごとに触覚で知らせる",
+                "なぞって音量や明るさが 1 段階変わるたびに、短い触覚を返します。端まで届いて変わらないときは返しません。使えない環境では何も起きません。",
+                &mut cfg.edge.haptic_ticks,
+            );
+        });
     });
 }
 

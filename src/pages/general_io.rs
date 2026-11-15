@@ -496,6 +496,8 @@ fn setting_label(path: &str) -> String {
         "edge.left" => "左端",
         "edge.right" => "右端",
         "edge.top" => "上端",
+        "edge.show_level" => "レベルを画面に表示する",
+        "edge.haptic_ticks" => "段階ごとに触覚で知らせる",
         "window.move_with_three_finger" => "3本指でウィンドウを移動",
         "window.flick_snap" => "フリックでスナップ",
         "window.corner_resize" => "コーナースワイプでサイズ変更",

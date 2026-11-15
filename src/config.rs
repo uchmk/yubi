@@ -1123,13 +1123,30 @@ impl<'de> Deserialize<'de> for EdgeTarget {
 }
 
 /// Edge sliders. Off for new configs (the recognizer is not in yet).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Edges {
     pub enabled: bool,
     pub left: EdgeTarget,
     pub right: EdgeTarget,
     pub top: EdgeTarget,
+    /// Show a level bar on screen while volume or brightness changes.
+    pub show_level: bool,
+    /// A light haptic tick for each step that changed the level.
+    pub haptic_ticks: bool,
+}
+
+impl Default for Edges {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            left: EdgeTarget::default(),
+            right: EdgeTarget::default(),
+            top: EdgeTarget::default(),
+            show_level: true,
+            haptic_ticks: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2868,6 +2885,27 @@ items = [
             assert_eq!(e.kind(), kind);
             assert!(!kind.label().is_empty());
         }
+    }
+
+    #[test]
+    fn edge_level_and_tick_settings_default_on_and_round_trip() {
+        // An older file without the new keys keeps both on.
+        let p = parse_text(
+            "schema_version = 2
+[edge]
+enabled = true
+",
+        )
+        .unwrap();
+        assert!(p.config.edge.show_level && p.config.edge.haptic_ticks);
+        assert!(Edges::default().show_level && Edges::default().haptic_ticks);
+        let mut cfg = Config::default();
+        cfg.edge.show_level = false;
+        cfg.edge.haptic_ticks = false;
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back = parse_text(&text).unwrap().config;
+        assert!(!back.edge.show_level && !back.edge.haptic_ticks);
+        assert_eq!(back.edge, cfg.edge);
     }
 
     #[test]

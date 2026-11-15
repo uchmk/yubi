@@ -1,4 +1,4 @@
-//! Ring-menu overlay window.
+//! Ring-menu overlay window (it also shows the small volume / brightness level HUD).
 //!
 //! The engine drives it with messages only (`OverlayCmd`); the overlay has no gesture logic. It
 //! owns one thread with its own message loop and one click-through, never-activating, topmost
@@ -13,11 +13,14 @@
 #![allow(dead_code)]
 
 mod geometry;
+mod level;
 mod model;
 mod paint;
 #[cfg(windows)]
 mod window;
 
+#[allow(unused_imports)]
+pub use level::{LevelInfo, LevelKind};
 #[allow(unused_imports)]
 pub use model::{OverlayCmd, RingSlot};
 

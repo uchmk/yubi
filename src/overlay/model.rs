@@ -1,6 +1,8 @@
 //! Pure overlay state: which ring is open, what is selected, which generation owns it.
 //! Stale generations are ignored here, so the window code stays free of that logic.
 
+use super::level::LevelInfo;
+
 /// One ring slot: a Japanese label and an optional Segoe Fluent Icons glyph.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RingSlot {
@@ -28,6 +30,14 @@ pub enum OverlayCmd {
         committed: Option<usize>,
         generation: u64,
     },
+    /// Show or update the level HUD (volume / brightness) at the bottom centre of the monitor
+    /// under the cursor. It hides itself shortly after the last update. Ignored while a ring is open.
+    Level(LevelInfo),
+    /// Hide the level HUD now.
+    LevelHide,
+    /// Show a one-line notice card (pause / resume) for about 3 s, then fade it. Ignored while a
+    /// ring is open.
+    Notice(String),
 }
 
 /// What the window has to do after a command was applied.
@@ -105,6 +115,8 @@ impl Model {
                     None => Effect::Hide,
                 }
             }
+            // The level HUD has its own state in the window code.
+            OverlayCmd::Level(_) | OverlayCmd::LevelHide | OverlayCmd::Notice(_) => Effect::None,
         }
     }
 }

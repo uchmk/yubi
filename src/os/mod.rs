@@ -1,6 +1,8 @@
 //! OS-side building blocks: window manipulation, process lookup, key
 //! injection and master volume. Independent of the input/engine layers.
 
+pub mod brightness;
+pub mod file_dialog;
 pub mod keys;
 pub mod process;
 pub mod volume;

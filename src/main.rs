@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod config_io;
 mod devshot;
 mod engine;
 mod fonts;

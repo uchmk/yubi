@@ -252,6 +252,21 @@ impl DevShot {
                 });
             }
         }
+        // The same page tall enough to show 判定 and 最近の判定 (the edge slider entry) unscrolled.
+        for (n, theme) in [("black", ThemeChoice::Black), ("light", ThemeChoice::Light)] {
+            shots.push(Shot {
+                name: format!("practice-fake-tall-{n}"),
+                page: Page::Practice,
+                theme,
+                size: Vec2::new(1100.0, 1500.0),
+                fixture: Fixture::Keep,
+                profile: None,
+                fake: true,
+                practice: true,
+                anim_t: None,
+                reduced: false,
+            });
+        }
         // Per-app pages with fixed data: list, empty list, two editors, the overview.
         for (size_name, size) in [("wide", WIDE), ("narrow", NARROW)] {
             for (n, page, fixture, profile) in [

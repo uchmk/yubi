@@ -213,6 +213,13 @@ pub fn fake_state() -> MonitorState {
             Outcome::DryRun,
             4,
         ),
+        (
+            "右端スライダー（音量）",
+            "edge.right",
+            Some("上へ +3"),
+            Outcome::DryRun,
+            1,
+        ),
     ] {
         history.push(Judgement {
             gesture: gesture.to_owned(),
@@ -220,6 +227,7 @@ pub fn fake_state() -> MonitorState {
             action: action.map(str::to_owned),
             outcome,
             at: ago(secs),
+            update: false,
         });
     }
     MonitorState {

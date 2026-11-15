@@ -154,6 +154,8 @@ impl Drop for Dib {
 
 struct Fonts {
     label: HFONT,
+    /// The second line of a message card.
+    small: HFONT,
     icon: HFONT,
     dpi_scale: f32,
 }
@@ -183,6 +185,7 @@ impl Fonts {
         };
         Fonts {
             label: make(13.0, 600, w!("Segoe UI")),
+            small: make(12.0, 400, w!("Segoe UI")),
             icon: make(20.0, 400, w!("Segoe Fluent Icons")),
             dpi_scale: scale,
         }
@@ -194,6 +197,7 @@ impl Drop for Fonts {
         // SAFETY: fonts were created in `new`.
         unsafe {
             let _ = DeleteObject(self.label.into());
+            let _ = DeleteObject(self.small.into());
             let _ = DeleteObject(self.icon.into());
         }
     }
@@ -432,7 +436,11 @@ impl App {
         let have_cursor = unsafe { GetCursorPos(&mut cur).is_ok() };
         let at = if have_cursor { (cur.x, cur.y) } else { (0, 0) };
         let (dpi, work) = monitor_at(at);
-        let layout = LevelLayout::new(dpi);
+        // A message card (two lines) is wider than the level HUD.
+        let layout = match (self.mode, self.level.info()) {
+            (Mode::Level, Some(info)) => LevelLayout::for_info(dpi, &info),
+            _ => LevelLayout::new(dpi),
+        };
         self.origin = layout.origin(work);
         self.level_layout = layout;
         self.win_size = (layout.width, layout.height);
@@ -802,6 +810,17 @@ fn draw_level_text(s: &mut Surface, l: &LevelLayout, info: &LevelInfo) {
         DT_LEFT,
         color,
     );
+    if let Some(h) = info.hint() {
+        let small = s.fonts.small;
+        draw_text(
+            s,
+            rect(l.hint_rect()),
+            small,
+            h.encode_utf16().collect(),
+            DT_LEFT,
+            PALETTE.text_dim,
+        );
+    }
     if let Some(n) = info.number() {
         draw_text(
             s,

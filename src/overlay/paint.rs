@@ -191,7 +191,7 @@ fn render_card(px: &mut [u32], stride: usize, l: &LevelLayout, info: Option<&Lev
             let t = (d - 0.5).clamp(0.0, 1.0);
             let mut c = PALETTE.border.lerp(PALETTE.fill, t);
             let cov_track = (rrect_dist(fx, fy, track, bar_r) + 0.5).clamp(0.0, 1.0);
-            if info.is_some() {
+            if info.is_some_and(|i| !i.unavailable()) {
                 c = c.lerp(PALETTE.track, cov_track);
             }
             if fill_w >= 1.0 {

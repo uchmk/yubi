@@ -203,6 +203,8 @@ pub struct Dispatcher {
     level_hud: bool,
     /// An edge slider detent is running its outputs.
     in_edge: bool,
+    /// The "brightness cannot be changed" card was shown in this slide (once per slide).
+    unavailable_shown: bool,
     /// The volume / brightness step of the action just handled (the engine ticks for it).
     level_step: Option<LevelStep>,
     /// Name shown instead of "ジェスチャー" for the next trigger (the ring's slot).
@@ -557,6 +559,7 @@ impl Dispatcher {
             ring: RingUi::default(),
             level_hud: true,
             in_edge: false,
+            unavailable_shown: false,
             level_step: None,
             source_override: None,
         }
@@ -596,6 +599,42 @@ impl Dispatcher {
         self.level_step.take()
     }
 
+    /// Look at what the brightness worker has finished since the last step: the answer for a
+    /// monitor that cannot be controlled (the card, once per slide) or the real level after a
+    /// step whose level was not known yet. Cheap; the engine calls it every loop.
+    pub fn poll_level(&mut self) -> Option<String> {
+        let report = self.sys.poll_brightness();
+        self.report_level(report)
+    }
+
+    fn report_level(&mut self, report: BrightnessReport) -> Option<String> {
+        match report {
+            BrightnessReport::Unavailable if !self.unavailable_shown => {
+                self.unavailable_shown = true;
+                let extra = self
+                    .level_hud
+                    .then(|| self.ring.level(LevelInfo::brightness_unavailable()))
+                    .flatten();
+                Some(match extra {
+                    Some(extra) => format!("{BRIGHTNESS_UNAVAILABLE_NOTE}（{extra}）"),
+                    None => BRIGHTNESS_UNAVAILABLE_NOTE.to_owned(),
+                })
+            }
+            BrightnessReport::Level(v) if !self.unavailable_shown => {
+                let info = LevelInfo {
+                    kind: LevelKind::Brightness,
+                    percent: Some(percent(v) as u8),
+                    muted: false,
+                };
+                if self.level_hud {
+                    let _ = self.ring.level(info);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// Record a level step and show the HUD. Returns the note, with a HUD failure appended.
     fn level_done(&mut self, info: LevelInfo, changed: bool, note: String) -> String {
         let step = LevelStep {
@@ -606,7 +645,11 @@ impl Dispatcher {
             Some(p) => p.merge(step),
             None => step,
         });
-        match self.level_hud.then(|| self.ring.level(info)).flatten() {
+        // A brightness step with no known level shows nothing yet: an empty bar would read as 0 %.
+        // `poll_level` shows the level, or the "cannot be changed" card, once the worker answers.
+        let unknown_brightness = info.kind == LevelKind::Brightness && info.percent.is_none();
+        let show = self.level_hud && !unknown_brightness;
+        match show.then(|| self.ring.level(info)).flatten() {
             Some(extra) => format!("{note}（{extra}）"),
             None => note,
         }
@@ -732,7 +775,11 @@ impl Dispatcher {
                 (!self.win(WinCmd::EndResize)).then(|| WORKER_NOTE.to_owned())
             }
             // Letting go of the cursor and closing the ring always run.
-            Action::Suppress(Suppress::Off) => self.suppression.set(Suppress::Off),
+            Action::Suppress(Suppress::Off) => {
+                // A new slide may tell again that the monitor cannot be controlled.
+                self.unavailable_shown = false;
+                self.suppression.set(Suppress::Off)
+            }
             Action::RingSelect(i) => {
                 self.ring.select(*i);
                 None
@@ -746,7 +793,7 @@ impl Dispatcher {
             }
             _ if self.blocked || self.dry_run => None,
             Action::Suppress(s) => self.suppression.set(*s),
-            Action::EdgeStep { side, outs } => self.edge_step(*side, outs, ex),
+            Action::EdgeStep { side, outs, .. } => self.edge_step(*side, outs, ex),
             Action::RingOpen { labels } => {
                 let Some(anchor) = cursor() else {
                     // No position: do not open the ring at the corner. Let go of the freeze and
@@ -847,6 +894,9 @@ impl Dispatcher {
         action: &config::Action,
         ex: &mut Executor<S>,
     ) -> Option<String> {
+        // A gesture or ring action is its own session: it may tell again that a monitor cannot
+        // be controlled (no `Suppress::Off` comes for it).
+        self.unavailable_shown = false;
         let source = match (
             self.source_override.take(),
             self.last_corner.take(),
@@ -977,6 +1027,8 @@ pub fn step_fraction(n: i8) -> f32 {
 
 const VOLUME_FAILED_NOTE: &str = "音量を変えられませんでした";
 const BRIGHTNESS_FAILED_NOTE: &str = "明るさを変えられませんでした";
+const BRIGHTNESS_UNAVAILABLE_NOTE: &str =
+    "このモニターは明るさを変えられません（DDC/CI に対応していないか、オフです）";
 
 thread_local! {
     /// The audio endpoint is a COM object that must stay on the thread that opened it (the engine
@@ -1012,6 +1064,39 @@ struct SystemOps {
     /// adds the step to a fresh read) and its sequence number. It lives across gestures so two
     /// quick gestures both count, until the worker reports back (see [`pending_brightness`]).
     brightness_target: Option<(f32, u64)>,
+    /// The newest step the worker has not been heard back about: its sequence number and whether
+    /// the HUD had to show it without a level.
+    brightness_awaiting: Option<(u64, bool)>,
+    /// The monitor under the cursor at the last brightness step.
+    brightness_monitor: Option<isize>,
+}
+
+/// What the worker found out about the newest brightness step.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BrightnessReport {
+    /// Nothing (yet, or nothing to say).
+    Nothing,
+    /// The monitor under the cursor cannot be controlled.
+    Unavailable,
+    /// The step went through and the level it left is now known.
+    Level(f32),
+}
+
+/// Decide what to tell about the step `seq` (shown with an unknown level when `unknown`), given
+/// the worker's status. `None` while the worker has not finished with it (ask again later).
+fn brightness_report(
+    seq: u64,
+    unknown: bool,
+    status: &crate::os::brightness::WorkerStatus,
+) -> Option<BrightnessReport> {
+    if status.applied_seq < seq {
+        return None;
+    }
+    Some(match (&status.error, status.value) {
+        (Some(_), _) => BrightnessReport::Unavailable,
+        (None, Some(v)) if unknown => BrightnessReport::Level(v),
+        _ => BrightnessReport::Nothing,
+    })
 }
 
 /// A cached brightness older than this is not shown as a percentage (the monitor's own buttons
@@ -1041,7 +1126,28 @@ fn brightness_base(
 }
 
 impl SystemOps {
+    /// The worker's answer for the newest brightness step, once, when it has one.
+    fn poll_brightness(&mut self) -> BrightnessReport {
+        let (Some((seq, unknown)), Some(worker)) = (self.brightness_awaiting, &self.brightness)
+        else {
+            return BrightnessReport::Nothing;
+        };
+        if !worker.is_running() {
+            self.brightness_awaiting = None;
+            return BrightnessReport::Nothing;
+        }
+        match brightness_report(seq, unknown, &worker.status()) {
+            Some(r) => {
+                self.brightness_awaiting = None;
+                r
+            }
+            None => BrightnessReport::Nothing,
+        }
+    }
+
     fn volume_step(&mut self, n: i8) -> Result<VolumeStep, String> {
+        // A brightness answer must not replace the volume HUD shown now.
+        self.brightness_awaiting = None;
         with_volume(|v| {
             let before = v.get()?;
             let after = crate::os::volume::step_value(before, step_fraction(n));
@@ -1059,6 +1165,7 @@ impl SystemOps {
     /// Toggle mute; returns the new mute state and the volume. The volume is `None` when it could
     /// not be read back: the toggle itself still worked.
     fn toggle_mute(&mut self) -> Result<(bool, Option<f32>), String> {
+        self.brightness_awaiting = None;
         with_volume(|v| Ok((v.toggle_mute()?, v.get().ok())))
     }
 
@@ -1070,7 +1177,21 @@ impl SystemOps {
         let worker = self
             .brightness
             .get_or_insert_with(crate::os::brightness::BrightnessWorker::spawn);
-        let status = worker.status();
+        if !worker.is_running() {
+            // Nobody would answer: do not wait for it.
+            self.brightness_awaiting = None;
+            return Err(BRIGHTNESS_FAILED_NOTE.to_owned());
+        }
+        let mut status = worker.status();
+        // A value or a pending target that belongs to another monitor is not a base.
+        let here = crate::os::brightness::cursor_monitor();
+        if here != self.brightness_monitor {
+            self.brightness_target = None;
+            self.brightness_monitor = here;
+        }
+        if status.monitor != here {
+            status.value = None;
+        }
         self.brightness_target = pending_brightness(self.brightness_target, &status);
         let delta = step_fraction(n);
         let base = brightness_base(
@@ -1079,6 +1200,7 @@ impl SystemOps {
             status.updated.map(|t| t.elapsed()),
         );
         let seq = worker.step(delta);
+        self.brightness_awaiting = Some((seq, base.is_none()));
         let expected = base.map(|b| crate::os::volume::step_value(b, delta));
         self.brightness_target = expected.map(|v| (v, seq));
         match (&status.error, status.value) {
@@ -1202,8 +1324,39 @@ fn run_worker(rx: Receiver<WinCmd>, notify: impl Fn(String)) {
 
 #[cfg(test)]
 mod tests {
-    use super::pending_brightness;
-    use crate::os::brightness::WorkerStatus;
+    use super::{BrightnessReport, brightness_report, pending_brightness};
+    use crate::os::brightness::{BrightnessError, WorkerStatus};
+
+    #[test]
+    fn brightness_report_follows_the_worker() {
+        let st = |applied_seq, value, failed: bool| WorkerStatus {
+            applied_seq,
+            value,
+            error: failed.then_some(BrightnessError::Unsupported),
+            ..WorkerStatus::default()
+        };
+        // Not answered yet: ask again later.
+        assert_eq!(brightness_report(3, true, &st(2, None, false)), None);
+        assert_eq!(brightness_report(3, true, &st(2, None, true)), None);
+        // A monitor that cannot be controlled, or a failed step: the card.
+        assert_eq!(
+            brightness_report(3, true, &st(3, None, true)),
+            Some(BrightnessReport::Unavailable)
+        );
+        assert_eq!(
+            brightness_report(3, false, &st(4, None, true)),
+            Some(BrightnessReport::Unavailable)
+        );
+        // The level of a step shown without one is filled in; a known one needs nothing more.
+        assert_eq!(
+            brightness_report(3, true, &st(3, Some(1.0), false)),
+            Some(BrightnessReport::Level(1.0))
+        );
+        assert_eq!(
+            brightness_report(3, false, &st(3, Some(1.0), false)),
+            Some(BrightnessReport::Nothing)
+        );
+    }
 
     #[test]
     fn brightness_target_survives_until_the_worker_reports() {
@@ -1588,6 +1741,41 @@ mod tests {
         d.handle(&Action::Scroll { h: 0, v: -120 }, &mut ex, &th, CURSOR);
         drop(ex);
         assert_eq!(f.log, vec![SynthEvent::Wheel(0, -120)]);
+    }
+
+    #[test]
+    fn the_unavailable_card_is_told_once_per_slide() {
+        let (mut d, _rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        assert!(d.report_level(BrightnessReport::Nothing).is_none());
+        let note = d.report_level(BrightnessReport::Unavailable).unwrap();
+        assert!(note.contains("明るさを変えられません"));
+        // The later steps of the same slide say nothing more, even a late level report.
+        assert!(d.report_level(BrightnessReport::Unavailable).is_none());
+        assert!(d.report_level(BrightnessReport::Level(0.5)).is_none());
+        // The slide ends (the freeze lets go): the next slide may tell again.
+        d.handle(&Action::Suppress(Suppress::Off), &mut ex, &th, CURSOR);
+        assert!(d.report_level(BrightnessReport::Unavailable).is_some());
+    }
+
+    #[test]
+    fn a_practice_edge_step_touches_no_monitor() {
+        let (mut d, _rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        d.set_dry_run(true);
+        let step = Action::EdgeStep {
+            side: EdgeSide::Right,
+            kind: config::EdgeKind::Brightness,
+            forward: true,
+            outs: vec![config::EdgeOut::Act(config::Action::BrightnessStep(5))],
+        };
+        assert!(d.handle(&step, &mut ex, &th, CURSOR).is_none());
+        assert!(d.take_level_step().is_none());
+        assert!(d.sys.brightness.is_none());
     }
 
     #[test]

@@ -324,6 +324,10 @@ pub enum Action {
     /// One detent of an edge slider: the outputs of one step in the direction of travel.
     EdgeStep {
         side: EdgeSide,
+        /// What the slider is set to (the practice view names it).
+        kind: config::EdgeKind,
+        /// The direction of travel: up along a side edge or right along the top edge.
+        forward: bool,
         outs: Vec<config::EdgeOut>,
     },
     /// A corner swipe resizes the foreground window from the corner opposite to pad corner

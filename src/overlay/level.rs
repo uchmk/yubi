@@ -10,11 +10,15 @@ use super::model::Effect;
 pub const HOLD_MS: u64 = 1200;
 /// How long a notice card (pause / resume) stays before it fades.
 pub const NOTICE_HOLD_MS: u64 = 3000;
+/// How long the "cannot change the brightness" card stays (two lines to read).
+pub const UNAVAILABLE_HOLD_MS: u64 = 4000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LevelKind {
     Volume,
     Brightness,
+    /// The monitor under the cursor cannot be controlled (no DDC/CI): a message card, no bar.
+    BrightnessUnavailable,
 }
 
 /// What one HUD shows.
@@ -27,11 +31,40 @@ pub struct LevelInfo {
 }
 
 impl LevelInfo {
+    /// The card for a monitor whose brightness cannot be changed.
+    pub fn brightness_unavailable() -> Self {
+        Self {
+            kind: LevelKind::BrightnessUnavailable,
+            percent: None,
+            muted: false,
+        }
+    }
+
+    pub fn unavailable(&self) -> bool {
+        self.kind == LevelKind::BrightnessUnavailable
+    }
+
     pub fn label(&self) -> &'static str {
         match (self.kind, self.muted) {
             (LevelKind::Volume, true) => "ミュート",
             (LevelKind::Volume, false) => "音量",
             (LevelKind::Brightness, _) => "明るさ",
+            (LevelKind::BrightnessUnavailable, _) => "このモニターは明るさを変えられません",
+        }
+    }
+
+    /// The second line under the label, for a message card (it has no bar).
+    pub fn hint(&self) -> Option<&'static str> {
+        self.unavailable()
+            .then_some("モニターのメニューで DDC/CI をオンにすると使える場合があります")
+    }
+
+    /// How long the card stays after its last update.
+    pub fn hold_ms(&self) -> u64 {
+        if self.unavailable() {
+            UNAVAILABLE_HOLD_MS
+        } else {
+            HOLD_MS
         }
     }
 
@@ -40,7 +73,7 @@ impl LevelInfo {
         match (self.kind, self.muted) {
             (LevelKind::Volume, true) => '\u{E74F}',
             (LevelKind::Volume, false) => '\u{E767}',
-            (LevelKind::Brightness, _) => '\u{E706}',
+            (LevelKind::Brightness | LevelKind::BrightnessUnavailable, _) => '\u{E706}',
         }
     }
 
@@ -83,9 +116,10 @@ impl LevelModel {
         self.info.is_some()
     }
 
-    /// True when it is showing and `HOLD_MS` passed since the last update.
+    /// True when it is showing and its hold time passed since the last update.
     pub fn expired(&self, now_ms: u64) -> bool {
-        self.info.is_some() && now_ms.saturating_sub(self.updated_ms) >= HOLD_MS
+        self.info
+            .is_some_and(|i| now_ms.saturating_sub(self.updated_ms) >= i.hold_ms())
     }
 }
 
@@ -128,10 +162,14 @@ pub struct LevelLayout {
     pub height: i32,
     /// Corner radius of the card.
     pub radius: f32,
+    /// The wider, taller card of a message (label plus hint, no bar).
+    pub wide: bool,
 }
 
 const WIDTH_96: f32 = 280.0;
 const HEIGHT_96: f32 = 64.0;
+const WIDE_WIDTH_96: f32 = 400.0;
+const WIDE_HEIGHT_96: f32 = 76.0;
 const RADIUS_96: f32 = 8.0;
 const PAD_96: f32 = 16.0;
 /// Gap between the HUD and the bottom of the work area.
@@ -139,12 +177,27 @@ const BOTTOM_96: f32 = 40.0;
 
 impl LevelLayout {
     pub fn new(dpi: u32) -> Self {
+        Self::sized(dpi, false)
+    }
+
+    /// The card that fits `info`: the wide one for a message, the normal one for a level.
+    pub fn for_info(dpi: u32, info: &LevelInfo) -> Self {
+        Self::sized(dpi, info.hint().is_some())
+    }
+
+    fn sized(dpi: u32, wide: bool) -> Self {
         let scale = dpi.max(48) as f32 / 96.0;
+        let (w, h) = if wide {
+            (WIDE_WIDTH_96, WIDE_HEIGHT_96)
+        } else {
+            (WIDTH_96, HEIGHT_96)
+        };
         Self {
             scale,
-            width: (WIDTH_96 * scale).ceil() as i32,
-            height: (HEIGHT_96 * scale).ceil() as i32,
+            width: (w * scale).ceil() as i32,
+            height: (h * scale).ceil() as i32,
             radius: RADIUS_96 * scale,
+            wide,
         }
     }
 
@@ -168,7 +221,25 @@ impl LevelLayout {
     }
 
     pub fn label_rect(&self) -> Rect4 {
+        if self.wide {
+            return (
+                self.px(44.0),
+                self.px(10.0),
+                self.width - self.px(PAD_96),
+                self.px(34.0),
+            );
+        }
         (self.px(44.0), self.px(10.0), self.px(180.0), self.px(34.0))
+    }
+
+    /// The second line of a message card, under the label.
+    pub fn hint_rect(&self) -> Rect4 {
+        (
+            self.px(PAD_96),
+            self.px(42.0),
+            self.width - self.px(PAD_96),
+            self.height - self.px(8.0),
+        )
     }
 
     /// The text area of a notice card (the whole card inside its padding).
@@ -261,6 +332,37 @@ mod tests {
         assert_eq!(b.fraction(), 0.0);
         assert_eq!(vol(200).number().as_deref(), Some("100"));
         assert_eq!(vol(200).fraction(), 1.0);
+    }
+
+    #[test]
+    fn unavailable_card_has_a_message_and_no_bar() {
+        let u = LevelInfo::brightness_unavailable();
+        assert!(u.unavailable());
+        assert_eq!(u.label(), "このモニターは明るさを変えられません");
+        assert!(u.hint().is_some_and(|h| h.contains("DDC/CI")));
+        assert_eq!((u.number(), u.fraction()), (None, 0.0));
+        assert_eq!(u.icon(), '\u{E706}');
+        // A level has no hint; the message card is the wide one.
+        assert_eq!(vol(30).hint(), None);
+        let n = LevelLayout::for_info(96, &vol(30));
+        let w = LevelLayout::for_info(96, &u);
+        assert!(!n.wide && w.wide);
+        assert!(w.width > n.width && w.height > n.height);
+        // Both lines fit inside the wide card, one above the other.
+        assert!(w.label_rect().3 <= w.hint_rect().1 + 2);
+        assert!(w.hint_rect().3 <= w.height);
+    }
+
+    #[test]
+    fn unavailable_card_stays_longer_than_a_level() {
+        let mut m = LevelModel::default();
+        m.show(LevelInfo::brightness_unavailable(), 0);
+        assert!(!m.expired(HOLD_MS));
+        assert!(!m.expired(UNAVAILABLE_HOLD_MS - 1));
+        assert!(m.expired(UNAVAILABLE_HOLD_MS));
+        // A level replacing it goes back to the short hold.
+        m.show(vol(10), 5000);
+        assert!(m.expired(5000 + HOLD_MS));
     }
 
     #[test]

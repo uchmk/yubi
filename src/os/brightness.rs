@@ -278,6 +278,21 @@ fn with_cursor_monitor<T>(f: impl FnOnce(&PHYSICAL_MONITOR) -> Result<T>) -> Res
     }
 }
 
+/// The monitor under the cursor as an integer (its `HMONITOR`), to tell monitors apart.
+fn cursor_monitor_id() -> Option<isize> {
+    // SAFETY: plain Win32 calls with valid out pointers.
+    unsafe {
+        let mut pt = POINT::default();
+        GetCursorPos(&mut pt).ok()?;
+        Some(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST).0 as isize)
+    }
+}
+
+/// The monitor under the cursor (see [`WorkerStatus::monitor`]).
+pub fn cursor_monitor() -> Option<isize> {
+    cursor_monitor_id()
+}
+
 fn ddc_range(m: &PHYSICAL_MONITOR) -> Result<(u32, u32, u32)> {
     let (mut min, mut cur, mut max) = (0u32, 0u32, 0u32);
     // SAFETY: valid handle and out pointers.
@@ -398,11 +413,40 @@ impl Mailbox {
     }
 }
 
+/// How long a monitor that failed stays marked, so a slide does not probe it on every step.
+const UNSUPPORTED_TTL: Duration = Duration::from_secs(30);
+
+/// The monitor that last failed (no DDC/CI), remembered briefly. A slow, failing DDC/CI probe is
+/// then answered at once for the steps of the same slide; the entry ends on its own so a monitor
+/// whose DDC/CI was just switched on is tried again.
+#[derive(Debug, Default)]
+struct UnsupportedCache {
+    entry: Option<(isize, Instant)>,
+}
+
+impl UnsupportedCache {
+    fn blocked(&self, monitor: isize, now: Instant) -> bool {
+        self.entry.is_some_and(|(m, at)| {
+            m == monitor && now.saturating_duration_since(at) < UNSUPPORTED_TTL
+        })
+    }
+
+    fn mark(&mut self, monitor: isize, now: Instant) {
+        self.entry = Some((monitor, now));
+    }
+
+    fn clear(&mut self) {
+        self.entry = None;
+    }
+}
+
 /// What the worker last learned.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WorkerStatus {
     /// Last known brightness 0.0..=1.0 (after a successful step).
     pub value: Option<f32>,
+    /// The monitor (`HMONITOR` as an integer) `value` was read from.
+    pub monitor: Option<isize>,
     /// When `value` was learned.
     pub updated: Option<Instant>,
     /// Last error, cleared by the next success.
@@ -462,6 +506,11 @@ impl BrightnessWorker {
         seq
     }
 
+    /// False when the thread could not be started: no step will ever be answered.
+    pub fn is_running(&self) -> bool {
+        self.thread.is_some()
+    }
+
     pub fn status(&self) -> WorkerStatus {
         self.status
             .lock()
@@ -493,6 +542,7 @@ impl Drop for BrightnessWorker {
 fn worker_main(shared: Shared, status: Arc<Mutex<WorkerStatus>>) {
     let (m, cv) = &*shared;
     let mut dev: Option<Brightness> = None;
+    let mut bad = UnsupportedCache::default();
     loop {
         let (step, quit) = {
             let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
@@ -504,7 +554,13 @@ fn worker_main(shared: Shared, status: Arc<Mutex<WorkerStatus>>) {
         if quit {
             return;
         }
+        let monitor = cursor_monitor_id();
+        // A cache hit answers at once; only a real probe failure (re)marks the monitor.
+        let cached = step.is_some() && monitor.is_some_and(|m| bad.blocked(m, Instant::now()));
         let result = (|| {
+            if cached {
+                return Err(BrightnessError::Unsupported);
+            }
             if dev.is_none() {
                 dev = Some(Brightness::open()?);
             }
@@ -524,13 +580,23 @@ fn worker_main(shared: Shared, status: Arc<Mutex<WorkerStatus>>) {
         match result {
             Ok(Some(v)) => {
                 st.value = Some(v);
+                st.monitor = monitor;
                 st.updated = Some(Instant::now());
                 st.error = None;
+                bad.clear();
             }
             Ok(None) => {}
             Err(e) => {
                 // Reopen next time (the monitor under the cursor may have changed).
-                dev = None;
+                if !cached {
+                    dev = None;
+                    if let Some(m) = monitor {
+                        bad.mark(m, Instant::now());
+                    }
+                }
+                // The value belongs to a monitor that worked, not to this one.
+                st.value = None;
+                st.monitor = None;
                 st.error = Some(e);
             }
         }
@@ -564,6 +630,20 @@ mod tests {
         assert_eq!(unit_to_ddc(10, 110, 0.5), 60);
         assert_eq!(unit_to_ddc(10, 110, 9.0), 110);
         assert_eq!(unit_to_ddc(10, 110, f32::NAN), 10);
+    }
+
+    #[test]
+    fn a_failed_monitor_is_remembered_briefly() {
+        let mut c = UnsupportedCache::default();
+        let t0 = Instant::now();
+        assert!(!c.blocked(1, t0));
+        c.mark(1, t0);
+        assert!(c.blocked(1, t0 + Duration::from_secs(5)));
+        // Another monitor is probed as usual; the entry ends after the time to live.
+        assert!(!c.blocked(2, t0));
+        assert!(!c.blocked(1, t0 + UNSUPPORTED_TTL));
+        c.clear();
+        assert!(!c.blocked(1, t0));
     }
 
     #[test]

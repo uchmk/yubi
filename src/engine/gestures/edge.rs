@@ -127,6 +127,8 @@ impl EdgeState {
         for _ in 0..n.abs().min(MAX_STEPS_PER_FRAME) {
             out.push(Action::EdgeStep {
                 side,
+                kind: target.kind(),
+                forward: n > 0,
                 outs: outs.clone(),
             });
         }
@@ -307,7 +309,7 @@ mod tests {
     fn steps(out: &[Action]) -> Vec<(EdgeSide, Vec<EdgeOut>)> {
         out.iter()
             .filter_map(|a| match a {
-                Action::EdgeStep { side, outs } => Some((*side, outs.clone())),
+                Action::EdgeStep { side, outs, .. } => Some((*side, outs.clone())),
                 _ => None,
             })
             .collect()

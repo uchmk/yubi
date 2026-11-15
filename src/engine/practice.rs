@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 
 use super::dispatch::{corner_swipe_label, press_label};
 use super::recognizer::{Action, GestureEvent};
-use super::types::GestureId;
+use super::types::{EdgeSide, GestureId, Suppress};
 use crate::config;
+use crate::config::EdgeKind;
 
 /// Entries the history keeps (newest first).
 pub const HISTORY_MAX: usize = 10;
@@ -49,6 +50,9 @@ pub struct Judgement {
     pub action: Option<String>,
     pub outcome: Outcome,
     pub at: Instant,
+    /// Continues the entry before it (same `token`): an edge slider reports one entry that
+    /// follows the slide, not one per step.
+    pub update: bool,
 }
 
 /// The newest judgements, newest first.
@@ -59,12 +63,12 @@ pub struct History {
 
 impl History {
     pub fn push(&mut self, j: Judgement) {
-        // A tap that a bound multi-finger tap also reports (same id) is one gesture: keep the
-        // richer entry.
+        // A slider's running total replaces its earlier entry. A tap that a bound multi-finger
+        // tap also reports (same id) is one gesture: keep the richer entry.
         if self
             .items
             .first()
-            .is_some_and(|last| last.token == j.token && last.action.is_none())
+            .is_some_and(|last| last.token == j.token && (j.update || last.action.is_none()))
         {
             self.items.remove(0);
         }
@@ -105,6 +109,59 @@ impl Mode {
 #[derive(Debug, Default)]
 pub struct Recorder {
     pending: Option<(String, String)>,
+    /// The edge slide in progress.
+    edge: Option<EdgeRun>,
+    /// A slider took the touch: the hold of the same touch is not a gesture of its own.
+    edge_touch: bool,
+}
+
+/// The steps of one edge slide so far.
+#[derive(Debug, Clone, Copy)]
+struct EdgeRun {
+    side: EdgeSide,
+    kind: EdgeKind,
+    /// Forward steps minus back steps.
+    net: i32,
+}
+
+/// Short name of what an edge slider is set to.
+fn edge_kind_name(kind: EdgeKind) -> &'static str {
+    match kind {
+        EdgeKind::None => "なし",
+        EdgeKind::Volume => "音量",
+        EdgeKind::Brightness => "明るさ",
+        EdgeKind::Scroll => "スクロール",
+        EdgeKind::Zoom => "ズーム",
+        EdgeKind::SeekYoutube | EdgeKind::SeekGeneral => "早送り・巻き戻し",
+        EdgeKind::UndoRedo => "元に戻す／やり直し",
+        EdgeKind::Tab => "タブの切り替え",
+        EdgeKind::Custom => "カスタム",
+    }
+}
+
+impl EdgeRun {
+    /// 「右端スライダー（音量）」.
+    fn name(&self) -> String {
+        format!(
+            "{}スライダー（{}）",
+            self.side.label(),
+            edge_kind_name(self.kind)
+        )
+    }
+
+    /// The direction and the net step count, e.g. 「上へ +3」, 「下へ −2」.
+    fn travel(&self) -> String {
+        let (fwd, back) = if self.side.horizontal() {
+            ("右", "左")
+        } else {
+            ("上", "下")
+        };
+        match self.net {
+            0 => "±0".to_owned(),
+            n if n > 0 => format!("{fwd}へ +{n}"),
+            n => format!("{back}へ −{}", -n),
+        }
+    }
 }
 
 impl Recorder {
@@ -115,8 +172,39 @@ impl Recorder {
             action,
             outcome,
             at,
+            update: false,
         };
         match a {
+            Action::EdgeStep {
+                side,
+                kind,
+                forward,
+                ..
+            } => {
+                self.edge_touch = true;
+                // Only a step of the slide already running continues its entry.
+                let continuing = self.edge.is_some();
+                let run = self.edge.get_or_insert(EdgeRun {
+                    side: *side,
+                    kind: *kind,
+                    net: 0,
+                });
+                run.net += if *forward { 1 } else { -1 };
+                let (gesture, travel) = (run.name(), run.travel());
+                Some(Judgement {
+                    update: continuing,
+                    ..made(gesture, side.key().to_owned(), Some(travel), mode.outcome())
+                })
+            }
+            Action::Suppress(Suppress::Off) => {
+                self.edge = None;
+                None
+            }
+            Action::Debug(GestureEvent::FingerCount(0) | GestureEvent::TouchEnd { .. }) => {
+                self.edge = None;
+                self.edge_touch = false;
+                None
+            }
             Action::Debug(GestureEvent::Multi { fingers, kind }) => {
                 self.pending = Some((
                     kind.label(*fingers),
@@ -163,6 +251,8 @@ impl Recorder {
                 None,
                 Outcome::NoBinding,
             )),
+            // The hold that has no action must not push the slider's entry off the top.
+            Action::Debug(GestureEvent::LongHold { .. }) if self.edge_touch => None,
             Action::Debug(GestureEvent::LongHold { fingers }) => Some(made(
                 format!("{fingers}本指で長押し"),
                 GestureId::long_hold(*fingers).as_str().to_owned(),
@@ -333,6 +423,105 @@ mod tests {
             .unwrap();
         assert_eq!((j.token.as_str(), j.outcome), ("tap.2", Outcome::NoBinding));
         assert!(j.action.is_none());
+    }
+
+    fn edge_step(side: EdgeSide, kind: EdgeKind, forward: bool) -> Action {
+        Action::EdgeStep {
+            side,
+            kind,
+            forward,
+            outs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_edge_slide_is_one_entry_with_the_net_step_count() {
+        let mut r = Recorder::default();
+        let mut h = History::default();
+        let dry = Mode {
+            dry_run: true,
+            blocked: false,
+        };
+        let mut feed = |a: Action, h: &mut History| {
+            if let Some(j) = r.observe(&a, dry, at()) {
+                h.push(j);
+            }
+        };
+        for _ in 0..3 {
+            feed(edge_step(EdgeSide::Right, EdgeKind::Volume, true), &mut h);
+        }
+        assert_eq!(h.items().len(), 1);
+        let j = h.latest().unwrap();
+        assert_eq!(j.gesture, "右端スライダー（音量）");
+        assert_eq!(j.token, "edge.right");
+        assert_eq!(j.action.as_deref(), Some("上へ +3"));
+        assert_eq!(j.outcome, Outcome::DryRun);
+        // Back steps count against it, and the entry keeps following the slide.
+        for _ in 0..5 {
+            feed(edge_step(EdgeSide::Right, EdgeKind::Volume, false), &mut h);
+        }
+        assert_eq!(h.items().len(), 1);
+        assert_eq!(h.latest().unwrap().action.as_deref(), Some("下へ −2"));
+        feed(edge_step(EdgeSide::Right, EdgeKind::Volume, true), &mut h);
+        feed(edge_step(EdgeSide::Right, EdgeKind::Volume, true), &mut h);
+        assert_eq!(h.latest().unwrap().action.as_deref(), Some("±0"));
+        // The next slide is a new entry, and the top edge speaks of left and right.
+        feed(Action::Suppress(Suppress::Off), &mut h);
+        feed(edge_step(EdgeSide::Right, EdgeKind::Volume, true), &mut h);
+        assert_eq!(
+            h.items().len(),
+            2,
+            "a new slide on the same edge is its own entry"
+        );
+        feed(
+            Action::Debug(GestureEvent::TouchEnd {
+                fingers: 1,
+                duration_us: 1,
+            }),
+            &mut h,
+        );
+        feed(
+            edge_step(EdgeSide::Top, EdgeKind::Brightness, false),
+            &mut h,
+        );
+        assert_eq!(h.items().len(), 3);
+        let j = h.latest().unwrap();
+        assert_eq!(j.gesture, "上端スライダー（明るさ）");
+        assert_eq!(j.action.as_deref(), Some("左へ −1"));
+    }
+
+    #[test]
+    fn a_slider_run_keeps_its_outcome_and_names_every_kind() {
+        let mut r = Recorder::default();
+        let blocked = Mode {
+            dry_run: true,
+            blocked: true,
+        };
+        let a = edge_step(EdgeSide::Left, EdgeKind::SeekYoutube, true);
+        let j = r.observe(&a, blocked, at()).unwrap();
+        assert_eq!(j.outcome, Outcome::Blocked);
+        assert_eq!(j.gesture, "左端スライダー（早送り・巻き戻し）");
+        for k in EdgeKind::ALL {
+            assert!(!edge_kind_name(k).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_hold_without_an_action_does_not_replace_the_slider_entry() {
+        let mut r = Recorder::default();
+        let mode = Mode::default();
+        let hold = Action::Debug(GestureEvent::LongHold { fingers: 1 });
+        // Before any slider the hold is reported as usual.
+        assert!(r.observe(&hold, mode, at()).is_some());
+        let step = edge_step(EdgeSide::Right, EdgeKind::Volume, true);
+        assert!(r.observe(&step, mode, at()).is_some());
+        // While the slider owns the touch (also after its freeze ended) the hold stays quiet.
+        assert!(r.observe(&hold, mode, at()).is_none());
+        r.observe(&Action::Suppress(Suppress::Off), mode, at());
+        assert!(r.observe(&hold, mode, at()).is_none());
+        // A new touch reports holds again.
+        r.observe(&Action::Debug(GestureEvent::FingerCount(0)), mode, at());
+        assert!(r.observe(&hold, mode, at()).is_some());
     }
 
     #[test]

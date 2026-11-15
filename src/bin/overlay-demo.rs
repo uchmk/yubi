@@ -7,7 +7,7 @@ mod overlay;
 
 use std::time::Duration;
 
-use overlay::{Overlay, OverlayCmd, RingSlot};
+use overlay::{LevelInfo, LevelKind, Overlay, OverlayCmd, RingSlot};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -35,6 +35,27 @@ fn main() {
         };
     }
     let hold = args.iter().any(|a| a == "--hold");
+    // `--level unavailable|bright|volume`: show one level HUD card for 6 s (for a screenshot).
+    if let Some(p) = args.iter().position(|a| a == "--level") {
+        let info = match args.get(p + 1).map(String::as_str) {
+            Some("bright") => LevelInfo {
+                kind: LevelKind::Brightness,
+                percent: Some(100),
+                muted: false,
+            },
+            Some("volume") => LevelInfo {
+                kind: LevelKind::Volume,
+                percent: Some(40),
+                muted: false,
+            },
+            _ => LevelInfo::brightness_unavailable(),
+        };
+        let mut ov = Overlay::start().expect("overlay");
+        ov.send(OverlayCmd::Level(info)).unwrap();
+        std::thread::sleep(Duration::from_millis(6000));
+        ov.stop();
+        return;
+    }
 
     let names = [
         ("前のタブ", '\u{E72B}'),

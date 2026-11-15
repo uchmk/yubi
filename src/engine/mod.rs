@@ -407,6 +407,11 @@ impl Worker {
             }
             self.poll_foreground(false);
             self.retry_release();
+            // The brightness worker's answer to a step (a monitor that cannot be controlled).
+            if let Some(note) = self.dispatch.poll_level() {
+                self.with_state(|s| s.last_action = Some(note));
+                (self.wake)();
+            }
         }
         self.release_everything();
         self.cursor.restore();

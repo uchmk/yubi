@@ -789,6 +789,15 @@ fn preview_open(ctx: &egui::Context, button_id: egui::Id, popup_id: egui::Id, st
     }
 }
 
+/// What Enter picks: the highlighted row, but only when one is drawn highlighted (a filter is typed
+/// or the arrow keys were used); on a fresh popup Enter does nothing.
+fn enter_pick(flat: &[Pick], highlight: usize, filter: &str, moved: bool) -> Option<Pick> {
+    if filter.trim().is_empty() && !moved {
+        return None;
+    }
+    flat.get(highlight).copied()
+}
+
 /// The contents of the picker popup. Returns the pick, if one was made.
 fn picker_menu(
     ui: &mut Ui,
@@ -842,7 +851,7 @@ fn picker_body(
             st.moved = true;
         }
         if enter {
-            picked = flat.get(st.highlight).copied();
+            picked = enter_pick(&flat, st.highlight, &st.filter, st.moved);
         }
         let r = ui.add(
             egui::TextEdit::singleline(&mut st.filter)
@@ -1392,6 +1401,66 @@ pub fn device_status(ui: &mut Ui, t: &Tokens, collapsed: bool, connected: bool) 
 #[cfg(test)]
 mod picker_tests {
     use super::*;
+
+    #[test]
+    fn escape_closes_the_popup_even_with_the_filter_focused() {
+        let ctx = egui::Context::default();
+        let t = Tokens::dark();
+        let mut button = None;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            button = Some(ui.make_persistent_id(egui::IdSalt::new("k")));
+        });
+        out.textures_delta.clear();
+        let button = button.unwrap();
+        egui::Popup::open_id(&ctx, button.with("popup"));
+        let screen = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            Vec2::new(700.0, 520.0),
+        ));
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: screen,
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                kind_combo(
+                    ui,
+                    &t,
+                    "k",
+                    ActionKind::TaskView,
+                    &ActionKind::ALL,
+                    ActionKind::label,
+                );
+            });
+            out.textures_delta.clear();
+        };
+        for _ in 0..4 {
+            frame(vec![]);
+        }
+        assert!(egui::ComboBox::is_open(&ctx, button));
+        frame(vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        frame(vec![]);
+        assert!(
+            !egui::ComboBox::is_open(&ctx, button),
+            "Esc left the popup open"
+        );
+    }
+
+    #[test]
+    fn enter_does_nothing_until_a_row_is_highlighted() {
+        let flat = [Pick::Inherit, Pick::Kind(ActionKind::TaskView)];
+        assert_eq!(enter_pick(&flat, 0, "", false), None);
+        assert_eq!(enter_pick(&flat, 0, "  ", false), None);
+        assert_eq!(enter_pick(&flat, 0, "タス", false), Some(Pick::Inherit));
+        assert_eq!(enter_pick(&flat, 1, "", true), Some(flat[1]));
+    }
 
     /// Run the picker popup headless and return its height after `frames` frames.
     fn popup_height(ctx: &egui::Context, t: &Tokens, popup_id: egui::Id, frames: usize) -> f32 {

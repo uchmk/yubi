@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use super::resolve::resolve;
+use super::resolve::{resolve, resolve_edge};
 use crate::config::{self, Config, Sensitivity};
 
 pub type Point = (f32, f32);
@@ -234,6 +234,50 @@ pub enum SnapDir {
     Down,
 }
 
+/// A pad edge an edge slider can sit on (the bottom edge stays free for the click zone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeSide {
+    Left,
+    Right,
+    Top,
+}
+
+impl EdgeSide {
+    /// Key in `Profile::edge_overrides`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Left => "edge.left",
+            Self::Right => "edge.right",
+            Self::Top => "edge.top",
+        }
+    }
+
+    /// Note text.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Left => "左端",
+            Self::Right => "右端",
+            Self::Top => "上端",
+        }
+    }
+
+    /// The top edge slides sideways; the side edges slide up and down.
+    pub fn horizontal(self) -> bool {
+        self == Self::Top
+    }
+}
+
+/// What the mouse hook should swallow while a gesture owns the pad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Suppress {
+    #[default]
+    Off,
+    /// The cursor stays where it is.
+    Cursor,
+    /// The cursor stays and clicks are held back.
+    CursorAndClicks,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     /// Reported for the diagnostics page and tests; never acted on.
@@ -255,6 +299,23 @@ pub enum Action {
     },
     /// One-shot (multi-finger tap / pinch / swipe); never `config::Action::None`.
     Trigger(config::Action),
+    /// Freeze the cursor (and hold clicks) from now on; `Off` always runs, even in a blocked app.
+    Suppress(Suppress),
+    /// One detent of an edge slider: the outputs of one step in the direction of travel.
+    EdgeStep {
+        side: EdgeSide,
+        outs: Vec<config::EdgeOut>,
+    },
+    /// Show the ring menu at the cursor.
+    RingOpen {
+        labels: Vec<String>,
+    },
+    /// Highlight a slot (`None` = the centre).
+    RingSelect(Option<usize>),
+    /// Hide the ring; `committed` flashes that slot first. The slot's action follows as `Trigger`.
+    RingClose {
+        committed: Option<usize>,
+    },
 }
 
 /// What the UI shows about the recognizer.
@@ -311,6 +372,10 @@ pub struct Thresholds {
     pub multi_axis_ratio: f32,
     /// Multi-finger: a swipe keeps the spread inside this band (fractions of the start).
     pub multi_swipe_band: (f32, f32),
+    /// Edge slider: width of the band along the pad edge in which a slide may start (mm).
+    pub edge_strip_mm: f32,
+    /// Edge slider: travel per step (mm); a custom slider has its own.
+    pub edge_detent_mm: f32,
 }
 
 impl Default for Thresholds {
@@ -337,6 +402,8 @@ impl Default for Thresholds {
             multi_swipe_mm: 15.0,
             multi_axis_ratio: 1.5,
             multi_swipe_band: (0.85, 1.15),
+            edge_strip_mm: 6.0,
+            edge_detent_mm: 2.0,
         }
     }
 }
@@ -359,6 +426,8 @@ impl Thresholds {
             multi_pinch_in: s.pinch_in,
             multi_pinch_out: s.pinch_out,
             multi_swipe_mm: s.swipe_mm,
+            edge_strip_mm: s.edge_strip_mm,
+            edge_detent_mm: s.edge_detent_mm,
             ..Self::default()
         }
     }
@@ -409,6 +478,42 @@ impl MultiCfg {
 #[allow(dead_code, reason = "the settings pages iterate the counts next")]
 pub const MULTI_COUNTS: [usize; 3] = [3, 4, 5];
 
+/// The targets of the three edge sliders, already resolved for the foreground app.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeCfg {
+    pub left: config::EdgeTarget,
+    pub right: config::EdgeTarget,
+    pub top: config::EdgeTarget,
+}
+
+impl EdgeCfg {
+    pub fn target(&self, side: EdgeSide) -> &config::EdgeTarget {
+        match side {
+            EdgeSide::Left => &self.left,
+            EdgeSide::Right => &self.right,
+            EdgeSide::Top => &self.top,
+        }
+    }
+
+    fn any(&self) -> bool {
+        [&self.left, &self.right, &self.top]
+            .iter()
+            .any(|t| **t != config::EdgeTarget::None)
+    }
+}
+
+/// The ring menu as latched at touchdown.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RingCfg {
+    pub fingers: usize,
+    /// How long the fingers must rest before the ring opens.
+    pub hold_us: u64,
+    pub items: Vec<config::RingItem>,
+}
+
+/// Most slots the ring shows (more would not fit around the circle).
+pub const RING_MAX_ITEMS: usize = 12;
+
 /// Gesture settings, read when a touch session starts (and kept while a drag outlives it).
 #[derive(Debug, Clone, Default)]
 pub struct GestureCfg {
@@ -420,6 +525,10 @@ pub struct GestureCfg {
     pub flick: bool,
     /// Indexed by `count - 3`. Three fingers have no multi bindings yet.
     pub multi: [Option<MultiCfg>; 3],
+    /// `None` when edge sliders are off or none has a target.
+    pub edge: Option<EdgeCfg>,
+    /// `None` when the ring is off or no slot has an action.
+    pub ring: Option<RingCfg>,
 }
 
 impl GestureCfg {
@@ -450,6 +559,32 @@ impl GestureCfg {
                 cfg.four.enabled.then(|| multi(4)),
                 cfg.five.enabled.then(|| multi(5)),
             ],
+            edge: cfg
+                .edge
+                .enabled
+                .then(|| EdgeCfg {
+                    left: resolve_edge(cfg, exe, EdgeSide::Left.key()),
+                    right: resolve_edge(cfg, exe, EdgeSide::Right.key()),
+                    top: resolve_edge(cfg, exe, EdgeSide::Top.key()),
+                })
+                .filter(EdgeCfg::any),
+            ring: (cfg.ring.enabled
+                && cfg
+                    .ring
+                    .items
+                    .iter()
+                    .any(|i| i.action != config::Action::None))
+            .then(|| RingCfg {
+                fingers: usize::from(cfg.ring.fingers.clamp(3, 5)),
+                hold_us: u64::from(cfg.sensitivity.hold_ms) * 1000,
+                items: cfg
+                    .ring
+                    .items
+                    .iter()
+                    .take(RING_MAX_ITEMS)
+                    .cloned()
+                    .collect(),
+            }),
         }
     }
 
@@ -482,6 +617,10 @@ pub struct Ctx<'a> {
     pub session_start_us: u64,
     /// This touch began soon after a 3-finger tap, so it may become a window move.
     pub win_candidate: bool,
+    /// Pad width and height in mm (`None` until the device is known).
+    pub dims: Option<(f32, f32)>,
+    /// Furthest any contact of this session has been from where it landed.
+    pub max_travel: f32,
 }
 
 pub fn dist(a: Point, b: Point) -> f32 {
@@ -510,6 +649,24 @@ pub fn spread_of(points: &[Point], c: Point) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ring_fingers_are_clamped_to_three_to_five() {
+        let mut cfg = Config::default();
+        cfg.ring.enabled = true;
+        cfg.ring.items = vec![config::RingItem {
+            label: "a".into(),
+            action: config::Action::Keys("F1".into()),
+        }];
+        for (raw, want) in [(1u8, 3usize), (2, 3), (4, 4), (9, 5)] {
+            cfg.ring.fingers = raw;
+            let g = GestureCfg::from_config(&cfg, None);
+            assert_eq!(g.ring.map(|r| r.fingers), Some(want), "raw {raw}");
+        }
+        cfg.ring.fingers = 1;
+        cfg.normalize();
+        assert_eq!(cfg.ring.fingers, 3);
+    }
 
     #[test]
     fn gesture_id_tokens_are_stable() {

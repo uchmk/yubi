@@ -43,7 +43,6 @@ pub fn resolve(cfg: &Config, exe: Option<&str>, id: &GestureId) -> Action {
 }
 
 /// The target of an edge slider (`key` is `edge.left`, `edge.right` or `edge.top`) for `exe`.
-#[allow(dead_code)] // used by the edge recognizer that comes later, and by tests
 pub fn resolve_edge(cfg: &Config, exe: Option<&str>, key: &str) -> EdgeTarget {
     if let Some(p) = matching_profile(&cfg.profiles, exe)
         && p.enabled

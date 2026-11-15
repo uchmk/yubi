@@ -54,6 +54,8 @@ impl executor::InputSink for Sink {
 
 /// Longest the engine sleeps, so stop requests and session events are noticed promptly.
 const MAX_WAIT: Duration = Duration::from_millis(100);
+/// While the ring is open the loop wakes this often to look at the Esc key.
+const RING_POLL: Duration = Duration::from_millis(30);
 
 /// How often the foreground app is looked up while yubi runs.
 const FOREGROUND_POLL: Duration = Duration::from_millis(500);
@@ -327,8 +329,13 @@ impl Worker {
             self.sync_config();
             self.sync_interrupts();
             self.sync_pause();
-            let wait = self.recognizer.next_deadline().map_or(MAX_WAIT, |d| {
-                Duration::from_micros(d.saturating_sub(input::now_us())).min(MAX_WAIT)
+            let max_wait = if self.recognizer.ring_open() {
+                RING_POLL
+            } else {
+                MAX_WAIT
+            };
+            let wait = self.recognizer.next_deadline().map_or(max_wait, |d| {
+                Duration::from_micros(d.saturating_sub(input::now_us())).min(max_wait)
             });
             match self.rx.recv_timeout(wait) {
                 Ok(ev) => self.handle(ev),
@@ -338,7 +345,15 @@ impl Worker {
             if self.running() {
                 let actions = self.recognizer.tick(input::now_us());
                 self.apply(actions);
+                // Esc closes the ring without running anything. The keystroke still reaches the
+                // foreground app (the ring never takes the keyboard).
+                if self.recognizer.ring_open() && dispatch::escape_down() {
+                    let actions = self.recognizer.cancel_ring();
+                    self.apply(actions);
+                }
             }
+            // The mouse hook's lease is short: keep a cursor freeze alive while it is wanted.
+            self.dispatch.renew_suppression();
             self.poll_foreground(false);
             self.retry_release();
         }
@@ -479,6 +494,7 @@ impl Worker {
             if touch_began(self.prev_contacts, active_contacts(&frame)) {
                 self.poll_foreground(true);
             }
+            self.recognizer.set_pad_dims(Some(f.device.size_mm));
             self.recognizer.step(&frame, &self.cfg)
         } else {
             Vec::new()
@@ -570,6 +586,11 @@ impl Worker {
                 self.with_state(|s| s.last_action = Some(note));
                 (self.wake)();
             }
+        }
+        // The ring overlay could not be shown: close the ring rather than freeze blind.
+        if self.dispatch.take_overlay_failed() {
+            let actions = self.recognizer.cancel_ring();
+            self.apply(actions);
         }
     }
 

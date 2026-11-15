@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 
 use super::executor::{Executor, InputSink, Key, MouseButton};
 use super::recognizer::{Action, GestureEvent, SnapDir, Thresholds};
-use super::types::MultiKind;
+use super::types::{EdgeSide, MultiKind, Suppress};
 use crate::config;
 use crate::os::keys::KeyCombo;
 
@@ -18,6 +18,9 @@ const SEND_FAILED_NOTE: &str = "入力を送れませんでした（管理者の
 pub const RELEASE_FAILED_NOTE: &str = "ボタンを離せませんでした（再試行します）";
 const RELEASED_LATER_NOTE: &str = "ボタンを離しました";
 pub const WORKER_NOTE: &str = "ウィンドウ操作を開始できませんでした";
+pub const RING_FAILED_NOTE: &str = "リングを表示できません";
+#[cfg(all(windows, not(test)))]
+const CURSOR_FAILED_NOTE: &str = "カーソルを固定できませんでした";
 pub const NO_CURSOR_NOTE: &str = "カーソル位置を取得できませんでした";
 const LEFT: Key = Key::Mouse(MouseButton::Left);
 
@@ -142,6 +145,186 @@ pub struct Dispatcher {
     last_multi: Option<(usize, MultiKind)>,
     /// Volume and brightness, opened on first use (engine thread only).
     sys: SystemOps,
+    /// What the mouse hook swallows right now (edge slider, ring).
+    suppression: Suppression,
+    ring: RingUi,
+    /// Name shown instead of "ジェスチャー" for the next trigger (the ring's slot).
+    source_override: Option<String>,
+}
+
+/// Cursor freeze for the edge slider and the ring, through the mouse hook (opened on first use;
+/// never in tests).
+#[derive(Default)]
+struct Suppression {
+    mode: Suppress,
+    #[cfg(all(windows, not(test)))]
+    hook: Option<crate::hook::Hook>,
+    /// The hook could not be installed: do not retry on every touch.
+    #[cfg(all(windows, not(test)))]
+    failed: bool,
+}
+
+impl Suppression {
+    /// Switch the mode. Returns a note when the freeze is not available.
+    fn set(&mut self, mode: Suppress) -> Option<String> {
+        self.mode = mode;
+        self.apply()
+    }
+
+    #[cfg(all(windows, not(test)))]
+    fn apply(&mut self) -> Option<String> {
+        use crate::hook::Hook;
+        let mut note = None;
+        if self.mode != Suppress::Off && self.hook.is_none() && !self.failed {
+            match Hook::start() {
+                Ok(h) => self.hook = Some(h),
+                Err(_) => {
+                    self.failed = true;
+                    note = Some(CURSOR_FAILED_NOTE.to_owned());
+                }
+            }
+        }
+        if let Some(h) = &self.hook {
+            h.set_mode(hook_mode(self.mode));
+        }
+        note
+    }
+
+    #[cfg(not(all(windows, not(test))))]
+    fn apply(&mut self) -> Option<String> {
+        None
+    }
+
+    /// Keep the hook's lease alive; called every engine loop while a freeze is wanted.
+    fn renew(&self) {
+        #[cfg(all(windows, not(test)))]
+        if self.mode != Suppress::Off
+            && let Some(h) = &self.hook
+        {
+            // The lease may have run out while this thread was stalled (the first overlay or
+            // hook start blocks): the hook then dropped to Off on its own. Assert the mode
+            // again (this renews too). A watchdog downgrade stays downgraded inside `set_mode`.
+            // Note: the 10 s freeze watchdog is a safety net; a committed edge slide longer than
+            // that unfreezes, and the engine is not told (the state is not observed here).
+            let want = hook_mode(self.mode);
+            if h.mode() != want {
+                h.set_mode(want);
+            }
+            h.renew();
+        }
+    }
+}
+
+#[cfg(all(windows, not(test)))]
+fn hook_mode(s: Suppress) -> crate::hook::Mode {
+    use crate::hook::Mode;
+    match s {
+        Suppress::Off => Mode::Off,
+        Suppress::Cursor => Mode::FreezeCursor,
+        Suppress::CursorAndClicks => Mode::FreezeAndHold,
+    }
+}
+
+/// The ring overlay window (opened on first use; never in tests).
+#[derive(Default)]
+struct RingUi {
+    #[cfg(all(windows, not(test)))]
+    overlay: Option<crate::overlay::Overlay>,
+    #[cfg(all(windows, not(test)))]
+    failed: bool,
+    /// The overlay could not be shown; the engine cancels the ring.
+    failed_now: bool,
+    generation: u64,
+    open: bool,
+}
+
+impl RingUi {
+    #[cfg(all(windows, not(test)))]
+    fn send(&mut self, cmd: crate::overlay::OverlayCmd) {
+        if let Some(o) = &self.overlay
+            && o.send(cmd).is_err()
+        {
+            self.failed_now = true;
+        }
+    }
+
+    #[cfg(all(windows, not(test)))]
+    fn show(&mut self, anchor: (i32, i32), labels: &[String]) {
+        use crate::overlay::{Overlay, OverlayCmd, RingSlot};
+        if self.overlay.is_none() && !self.failed {
+            match Overlay::start() {
+                Ok(o) => self.overlay = Some(o),
+                Err(_) => self.failed = true,
+            }
+        }
+        if self.overlay.is_none() {
+            self.failed_now = true;
+            return;
+        }
+        self.generation += 1;
+        self.open = true;
+        let items = labels
+            .iter()
+            .map(|l| RingSlot {
+                label: l.clone(),
+                icon: None,
+            })
+            .collect();
+        let generation = self.generation;
+        self.send(OverlayCmd::Open {
+            anchor_px: anchor,
+            items,
+            generation,
+        });
+    }
+
+    #[cfg(not(all(windows, not(test))))]
+    fn show(&mut self, _anchor: (i32, i32), _labels: &[String]) {
+        self.generation += 1;
+        self.open = true;
+    }
+
+    #[cfg(all(windows, not(test)))]
+    fn select(&mut self, index: Option<usize>) {
+        let generation = self.generation;
+        if self.open {
+            self.send(crate::overlay::OverlayCmd::Select { index, generation });
+        }
+    }
+
+    #[cfg(not(all(windows, not(test))))]
+    fn select(&mut self, _index: Option<usize>) {}
+
+    #[cfg(all(windows, not(test)))]
+    fn close(&mut self, committed: Option<usize>) {
+        let generation = self.generation;
+        if self.open {
+            self.send(crate::overlay::OverlayCmd::Close {
+                committed,
+                generation,
+            });
+        }
+        self.open = false;
+    }
+
+    #[cfg(not(all(windows, not(test))))]
+    fn close(&mut self, _committed: Option<usize>) {
+        self.open = false;
+    }
+}
+
+/// True while the Esc key is held or was pressed since the last call (any window; the ring
+/// cannot take keyboard focus). The "pressed since" bit catches a tap shorter than the poll.
+#[cfg(windows)]
+pub fn escape_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
+    // SAFETY: plain query of the key state, no pointers.
+    unsafe { (GetAsyncKeyState(i32::from(VK_ESCAPE.0)) as u16 & 0x8001) != 0 }
+}
+
+#[cfg(not(windows))]
+pub fn escape_down() -> bool {
+    false
 }
 
 impl Dispatcher {
@@ -183,7 +366,20 @@ impl Dispatcher {
             win_active: false,
             last_multi: None,
             sys: SystemOps::default(),
+            suppression: Suppression::default(),
+            ring: RingUi::default(),
+            source_override: None,
         }
+    }
+
+    /// Keep the cursor freeze alive (the hook's lease is short). Call it every engine loop.
+    pub fn renew_suppression(&self) {
+        self.suppression.renew();
+    }
+
+    /// True once if the ring overlay could not be shown (the engine then cancels the ring).
+    pub fn take_overlay_failed(&mut self) -> bool {
+        std::mem::take(&mut self.ring.failed_now)
     }
 
     /// Record the foreground app's filter result. It takes effect at the next touch start, so
@@ -241,6 +437,9 @@ impl Dispatcher {
         self.drag_open = false;
         self.drag_px.clear();
         self.win_px.clear();
+        self.suppression.set(Suppress::Off);
+        self.ring.close(None);
+        self.source_override = None;
     }
 
     /// Carry out one action. Returns a note for the diagnostics page when something notable happened.
@@ -284,7 +483,36 @@ impl Dispatcher {
                 // The worker reports what really happened (moved, snapped, no window, ...).
                 (!self.win(WinCmd::End { snap: *snap })).then(|| WORKER_NOTE.to_owned())
             }
+            // Letting go of the cursor and closing the ring always run.
+            Action::Suppress(Suppress::Off) => self.suppression.set(Suppress::Off),
+            Action::RingSelect(i) => {
+                self.ring.select(*i);
+                None
+            }
+            Action::RingClose { committed } => {
+                self.ring.close(*committed);
+                if committed.is_some() {
+                    self.source_override = Some("リング".to_owned());
+                }
+                None
+            }
             _ if self.blocked || self.dry_run => None,
+            Action::Suppress(s) => self.suppression.set(*s),
+            Action::EdgeStep { side, outs } => self.edge_step(*side, outs, ex),
+            Action::RingOpen { labels } => {
+                let Some(anchor) = cursor() else {
+                    // No position: do not open the ring at the corner. Let go of the freeze and
+                    // let the engine cancel the ring through the "overlay failed" path.
+                    self.suppression.set(Suppress::Off);
+                    self.ring.failed_now = true;
+                    return Some(NO_CURSOR_NOTE.to_owned());
+                };
+                // Consume a stale "pressed since last call" Esc bit: an Esc from before the ring
+                // must not cancel it.
+                let _ = escape_down();
+                self.ring.show(anchor, labels);
+                self.ring.failed_now.then(|| RING_FAILED_NOTE.to_owned())
+            }
             Action::DragBegin => {
                 self.drag_open = true;
                 self.press_tried = true;
@@ -344,10 +572,49 @@ impl Dispatcher {
         action: &config::Action,
         ex: &mut Executor<S>,
     ) -> Option<String> {
-        let source = match self.last_multi.take() {
-            Some((n, kind)) => multi_label(n, kind),
-            None => "ジェスチャー".to_owned(),
+        let source = match (self.source_override.take(), self.last_multi.take()) {
+            (Some(s), _) => s,
+            (None, Some((n, kind))) => multi_label(n, kind),
+            (None, None) => "ジェスチャー".to_owned(),
         };
+        self.run_plan(action, ex, &source)
+    }
+
+    /// One detent of an edge slider.
+    fn edge_step<S: InputSink>(
+        &mut self,
+        side: EdgeSide,
+        outs: &[config::EdgeOut],
+        ex: &mut Executor<S>,
+    ) -> Option<String> {
+        const CTRL: Key = Key::Vk(0x11);
+        let mut note = None;
+        for out in outs {
+            match out {
+                config::EdgeOut::Act(a) => note = self.run_plan(a, ex, side.label()),
+                config::EdgeOut::Wheel(n) => {
+                    if !ex.wheel(*n, side.horizontal()) {
+                        note = Some(SEND_FAILED_NOTE.to_owned());
+                    }
+                }
+                config::EdgeOut::CtrlWheel(n) => {
+                    let ok = ex.press(CTRL) && ex.wheel(*n, side.horizontal());
+                    ex.release(CTRL);
+                    if !ok {
+                        note = Some(SEND_FAILED_NOTE.to_owned());
+                    }
+                }
+            }
+        }
+        note
+    }
+
+    fn run_plan<S: InputSink>(
+        &mut self,
+        action: &config::Action,
+        ex: &mut Executor<S>,
+        source: &str,
+    ) -> Option<String> {
         let label = action.label();
         match plan_for(action) {
             Plan::Keys(keys) => Some(if ex.tap(&keys) {
@@ -633,7 +900,7 @@ mod tests {
             let refused = match ev {
                 SynthEvent::Up(_) => self.refuse_up.get(),
                 SynthEvent::Down(_) => self.refuse_down.get(),
-                SynthEvent::Move(..) => false,
+                SynthEvent::Move(..) | SynthEvent::Wheel { .. } => false,
             };
             if !refused {
                 self.log.push(ev);
@@ -1093,6 +1360,25 @@ mod tests {
         assert_eq!(note.as_deref(), Some(SEND_FAILED_NOTE));
         // Only one attempt per session.
         assert!(d.handle(&mv, &mut ex, &th, CURSOR).is_none());
+    }
+
+    #[test]
+    fn ring_without_cursor_is_cancelled_not_opened_at_the_corner() {
+        let (mut d, _rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        let open = Action::RingOpen {
+            labels: vec!["a".into()],
+        };
+        let note = d.handle(&open, &mut ex, &th, || None);
+        assert_eq!(note.as_deref(), Some(NO_CURSOR_NOTE));
+        assert!(!d.ring.open);
+        assert!(d.take_overlay_failed());
+        // With a position it opens normally.
+        d.handle(&open, &mut ex, &th, || Some((5, 6)));
+        assert!(d.ring.open);
+        assert!(!d.take_overlay_failed());
     }
 
     #[test]

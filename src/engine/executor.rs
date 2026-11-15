@@ -28,6 +28,11 @@ pub enum SynthEvent {
     Up(Key),
     /// Relative pointer movement in pixels.
     Move(i32, i32),
+    /// Mouse wheel notches (positive = up or right).
+    Wheel {
+        notches: i32,
+        horizontal: bool,
+    },
 }
 
 pub trait InputSink {
@@ -80,6 +85,15 @@ impl<S: InputSink> Executor<S> {
     /// Move the pointer by (dx, dy) pixels. Returns false if the system refused.
     pub fn move_mouse(&mut self, dx: i32, dy: i32) -> bool {
         dx == 0 && dy == 0 || self.sink.send(SynthEvent::Move(dx, dy))
+    }
+
+    /// Turn the mouse wheel by `notches` (positive = up or right). Returns false if refused.
+    pub fn wheel(&mut self, notches: i32, horizontal: bool) -> bool {
+        notches == 0
+            || self.sink.send(SynthEvent::Wheel {
+                notches,
+                horizontal,
+            })
     }
 
     /// Press all `keys` in order, then release them in reverse (a shortcut or a click).
@@ -161,6 +175,29 @@ mod win {
         let (key, up) = match ev {
             SynthEvent::Down(k) => (k, false),
             SynthEvent::Up(k) => (k, true),
+            SynthEvent::Wheel {
+                notches,
+                horizontal,
+            } => {
+                return INPUT {
+                    r#type: INPUT_MOUSE,
+                    Anonymous: INPUT_0 {
+                        mi: MOUSEINPUT {
+                            dx: 0,
+                            dy: 0,
+                            // One notch is WHEEL_DELTA (120); the field carries a signed value.
+                            mouseData: notches.saturating_mul(120) as u32,
+                            dwFlags: if horizontal {
+                                MOUSEEVENTF_HWHEEL
+                            } else {
+                                MOUSEEVENTF_WHEEL
+                            },
+                            time: 0,
+                            dwExtraInfo: YUBI_INJECT_MARK,
+                        },
+                    },
+                };
+            }
             SynthEvent::Move(dx, dy) => {
                 return INPUT {
                     r#type: INPUT_MOUSE,

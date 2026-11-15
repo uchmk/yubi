@@ -12,7 +12,9 @@
 use super::Frame;
 use super::arbitration::{Arbiter, Owner, Proposal};
 use super::gestures::drag::{DragPhase, DragState};
+use super::gestures::edge::EdgeState;
 use super::gestures::multi::{MultiHit, MultiState};
+use super::gestures::ring::RingState;
 use super::gestures::window::WindowState;
 use super::tracking::{Environment, Tracker};
 use super::types::{Ctx, GestureCfg, Point, SessionId, centroid};
@@ -57,6 +59,8 @@ pub struct Recognizer {
     drag: DragState,
     window: WindowState,
     multi: MultiState,
+    edge: EdgeState,
+    ring: RingState,
 }
 
 impl Recognizer {
@@ -90,10 +94,6 @@ impl Recognizer {
     }
 
     /// The pad size in mm, once known; latched with the next touch.
-    #[allow(
-        dead_code,
-        reason = "the corner and edge gestures read it from the latch"
-    )]
     pub fn set_pad_dims(&mut self, dims_mm: Option<(f32, f32)>) {
         self.env.dims_mm = dims_mm;
     }
@@ -111,6 +111,19 @@ impl Recognizer {
     /// The engine bumps this whenever the config changes; latched with the next touch.
     pub fn set_config_generation(&mut self, generation: u64) {
         self.env.config_gen = generation;
+    }
+
+    /// True while the ring menu is on screen.
+    pub fn ring_open(&self) -> bool {
+        self.ring.is_open()
+    }
+
+    /// Close the ring without running anything (Esc, or the overlay failed). The fingers may
+    /// still be down; they do nothing more until all are lifted.
+    pub fn cancel_ring(&mut self) -> Vec<Action> {
+        let mut out = Vec::new();
+        self.ring.cancel(&mut out);
+        out
     }
 
     /// What the current touch session latched at its first raw touchdown.
@@ -188,6 +201,7 @@ impl Recognizer {
             self.tracker.debounce_deadline(self.th.debounce_us),
             self.hold_deadline(),
             self.drag.lift_deadline(&self.g),
+            self.ring.deadline(&self.g),
             self.session
                 .as_ref()
                 .and_then(|_| self.tracker.stale_deadline(self.th.stale_us)),
@@ -218,6 +232,13 @@ impl Recognizer {
                 .tap_at
                 .is_some_and(|at| t.saturating_sub(at) <= self.th.window_tap_gap_us);
         self.window.tap_at = None;
+        // A blocked app switches the edge sliders and the ring off like every other gesture.
+        if self.env.app_blocked {
+            self.g.edge = None;
+            self.g.ring = None;
+        }
+        self.edge = EdgeState::default();
+        self.ring.reset();
         self.next_session += 1;
         self.latched = Some(self.env.clone());
         self.arb.clear();
@@ -241,6 +262,8 @@ impl Recognizer {
         self.window.cancel(out);
         self.drag.cancel(out);
         self.multi.finish();
+        self.edge.release(out);
+        self.ring.cancel(out);
         self.arb.clear();
         self.session = None;
         self.latched = None;
@@ -318,6 +341,8 @@ impl Recognizer {
             self.multi.commit(hit, out);
         }
         self.drag.finish(&self.g, is_tap, s.drag_was_held, t, out);
+        self.edge.release(out);
+        self.ring.finish(&self.g, t, out);
         self.multi.finish();
         self.arb.clear();
     }
@@ -340,6 +365,8 @@ impl Recognizer {
             rebase: self.rebase,
             session_start_us: s.start_us,
             win_candidate: s.win_candidate,
+            dims: self.latched.as_ref().and_then(|e| e.dims_mm),
+            max_travel: s.max_travel,
         };
         let mut proposals: Vec<Proposal> = Vec::new();
         let mut hit: Option<MultiHit> = None;
@@ -359,7 +386,19 @@ impl Recognizer {
                 hit = Some(h);
             }
         }
+        if ctx.g.edge.is_some() {
+            self.edge.drive(&ctx, out);
+            let free = self.arb.is_free_for(Owner::Edge);
+            proposals.extend(self.edge.step(&ctx, free));
+        }
+        if ctx.g.ring.is_some() {
+            self.ring.drive(&ctx, out);
+            let free = self.arb.is_free_for(Owner::Ring);
+            proposals.extend(self.ring.step(&ctx, free));
+        }
         match self.arb.resolve(&proposals) {
+            Some(Owner::Edge) => self.edge.commit(&ctx, out),
+            Some(Owner::Ring) => self.ring.commit(&ctx, out),
             Some(Owner::Drag) => self.drag.commit(&ctx, out),
             Some(Owner::Window) => self.window.commit(&ctx, out),
             Some(Owner::Multi) => {

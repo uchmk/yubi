@@ -769,9 +769,7 @@ impl EdgeKind {
     }
 }
 
-/// One output of an edge step. The recognizer for edge sliders comes later; this is the mapping
-/// it will use.
-#[allow(dead_code)] // used by the edge recognizer that comes later, and by tests
+/// One output of an edge step (see `EdgeTarget::step`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum EdgeOut {
     /// Run a normal action (key combination, volume step, ...).
@@ -821,10 +819,9 @@ impl EdgeTarget {
         self.kind().label()
     }
 
-    /// What one detent step does. `forward` is the direction of travel (down or right along the
-    /// edge counts as forward, up or left as back). Empty for `None` and for a custom slider
+    /// What one detent step does. `forward` is the direction of travel (up along a side edge or right
+    /// along the top edge counts as forward, down or left as back). Empty for `None` and for a custom slider
     /// whose key for that direction is empty or invalid.
-    #[allow(dead_code)] // used by the edge recognizer that comes later, and by tests
     pub fn step(&self, forward: bool) -> Vec<EdgeOut> {
         let keys = |k: &str| vec![EdgeOut::Act(Action::Keys(k.to_owned()))];
         let sign = if forward { 1 } else { -1 };
@@ -858,7 +855,6 @@ impl EdgeTarget {
     }
 
     /// Travel per step in mm, given the global detent distance.
-    #[allow(dead_code)] // used by the edge recognizer that comes later, and by tests
     pub fn step_mm(&self, detent_mm: f32) -> f32 {
         match self {
             Self::Custom(c) => c.step_mm,
@@ -1386,7 +1382,7 @@ impl Config {
         self.drag.fingers = self.drag.fingers.clamp(3, 5);
         self.drag.lift_timeout_ms = self.drag.lift_timeout_ms.min(1000);
         self.long_hold.fingers = self.long_hold.fingers.clamp(1, 5);
-        self.ring.fingers = self.ring.fingers.clamp(1, 5);
+        self.ring.fingers = self.ring.fingers.clamp(3, 5);
         self.sensitivity.clamp();
         self.press.fingers.resize_with(5, PressFinger::default);
         self.corner.corners.resize_with(4, CornerCfg::default);

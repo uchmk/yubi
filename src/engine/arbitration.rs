@@ -9,6 +9,8 @@ pub enum Owner {
     Drag,
     Window,
     Multi,
+    Edge,
+    Ring,
 }
 
 /// Same-frame tie-break, strongest first. The variants without a gesture yet are reserved so the
@@ -36,6 +38,9 @@ impl Owner {
             Self::Multi => Priority::Multi,
             Self::Window => Priority::Window,
             Self::Drag => Priority::Drag,
+            Self::Edge => Priority::Edge,
+            // The ring is a hold gesture; it shares the hold-combo slot.
+            Self::Ring => Priority::HoldCombo,
         }
     }
 }

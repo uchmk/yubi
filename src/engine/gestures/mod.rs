@@ -2,5 +2,7 @@
 //! over the session (the arbiter decides) and, once it owns it, emits its actions.
 
 pub mod drag;
+pub mod edge;
 pub mod multi;
+pub mod ring;
 pub mod window;

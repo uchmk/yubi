@@ -186,12 +186,12 @@ impl Diagnostics {
         };
         painter.rect_stroke(rect, radius, outline, StrokeKind::Inside);
 
-        if self
+        let touching = self
             .state
             .frame
             .as_ref()
-            .is_none_or(|f| f.contacts.is_empty())
-        {
+            .is_some_and(|f| any_tip(&f.contacts));
+        if !touching {
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
@@ -200,7 +200,9 @@ impl Diagnostics {
                 t.text_muted,
             );
         }
-        let Some(frame) = &self.state.frame else {
+        // After the last finger lifts the final frame still holds hovering (hollow) contacts;
+        // show the hint instead of them. Hollow circles appear only while a finger is down.
+        let Some(frame) = self.state.frame.as_ref().filter(|_| touching) else {
             return;
         };
         for c in &frame.contacts {
@@ -216,6 +218,11 @@ impl Diagnostics {
             painter.galley(pos, galley, t.on_accent);
         }
     }
+}
+
+/// True if at least one contact is touching the pad (tip switch on).
+fn any_tip(contacts: &[Contact]) -> bool {
+    contacts.iter().any(|c| c.tip)
 }
 
 fn draw_contact(painter: &egui::Painter, t: &Tokens, pad: Rect, c: &Contact) {
@@ -265,4 +272,29 @@ fn empty_state(ui: &mut Ui, t: &Tokens) {
                 .color(t.text_muted),
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contact(tip: bool) -> Contact {
+        Contact {
+            id: 0,
+            x: 0.5,
+            y: 0.5,
+            x_mm: 0.0,
+            y_mm: 0.0,
+            tip,
+            confidence: true,
+            pressure: None,
+        }
+    }
+
+    #[test]
+    fn hover_only_frame_counts_as_empty_pad() {
+        assert!(!any_tip(&[]));
+        assert!(!any_tip(&[contact(false), contact(false)]));
+        assert!(any_tip(&[contact(false), contact(true)]));
+    }
 }

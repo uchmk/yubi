@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Gesture engine and settings app for Apple Magic Trackpad on Windows"
 publish = false
+default-run = "yubi"
 
 [dependencies]
 eframe = "0.37"
@@ -24,4 +25,17 @@ windows = { version = "0.62", features = [
     "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
     "Win32_Security",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_HiDpi",
+    "Win32_System_Threading",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Pipes",
+    "Win32_UI_Shell",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_System_Performance",
+    "Win32_System_SystemInformation",
 ] }

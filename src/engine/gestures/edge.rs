@@ -182,8 +182,10 @@ impl EdgeState {
                         });
                     }
                     self.phase = Phase::Dead;
-                } else if dist(p, start) >= COMMIT_MM {
-                    // Moving, but not along the edge: an ordinary cursor move.
+                } else if dist(p, start) >= COMMIT_MM && along.abs() < AXIS_RATIO * cross.abs() {
+                    // Moving, but not along the edge: an ordinary cursor move. A slide that is
+                    // along the edge but still short of COMMIT_MM (a real finger drifts a little
+                    // inward, so the distance reaches it first) keeps waiting.
                     self.phase = Phase::Dead;
                 }
                 None
@@ -333,6 +335,27 @@ mod tests {
             band_of((3.0, 50.0), DIMS, 6.0, |s| s != EdgeSide::Left),
             None
         );
+    }
+
+    /// Recorded on hardware: the finger drifts ~0.9 mm inward while the first 3 mm along the
+    /// edge build up, so the straight-line distance reaches COMMIT_MM before the along part.
+    #[test]
+    fn slide_with_inward_drift_still_starts() {
+        let cfg = cfg_with(EdgeTarget::None, EdgeTarget::Volume, EdgeTarget::None);
+        let mut v = Vec::new();
+        for ms in (0..=200).step_by(10) {
+            v.push(frame(ms, vec![c(159.8, 25.4)]));
+        }
+        for i in 1..=20u64 {
+            let drift = (i as f32 * 0.3).min(0.9);
+            v.push(frame(
+                200 + i * 10,
+                vec![c(159.8 - drift, 25.4 + i as f32 * 0.98)],
+            ));
+        }
+        let out = run(&v, &cfg);
+        assert_eq!(suppress(&out).first(), Some(&Suppress::Cursor));
+        assert!(!steps(&out).is_empty());
     }
 
     #[test]

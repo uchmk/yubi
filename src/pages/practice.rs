@@ -36,7 +36,7 @@ impl Diagnostics {
                 None,
                 "練習モード",
                 "オンの間は、認識したジェスチャーを表示するだけで実行しません。\
-                 ほかのページへ移るか、ウィンドウを離れると自動でオフになります。",
+                 ほかのページへ移るか、ウィンドウを閉じると自動でオフになります。",
                 practice_on,
             );
         });
@@ -92,7 +92,11 @@ impl Diagnostics {
 
         section_header(ui, t, "判定");
         let s = &self.state;
-        group(ui, t, |g| match s.practice.latest() {
+        let shown = match self.practice_since {
+            Some(since) if *practice_on => s.practice.since(since),
+            _ => s.practice.clone(),
+        };
+        group(ui, t, |g| match shown.latest() {
             Some(j) => {
                 g.info_row("ジェスチャー", &format!("{}（{}）", j.gesture, j.token));
                 g.info_row("操作", j.action.as_deref().unwrap_or("—"));
@@ -125,7 +129,7 @@ impl Diagnostics {
 
         section_header(ui, t, "最近の判定");
         group(ui, t, |g| {
-            if s.practice.items().is_empty() {
+            if shown.items().is_empty() {
                 g.wrapped_row(|ui| {
                     ui.label(
                         RichText::new("履歴はまだありません。")
@@ -134,7 +138,7 @@ impl Diagnostics {
                     );
                 });
             }
-            for j in s.practice.items() {
+            for j in shown.items() {
                 let title = match &j.action {
                     Some(a) => format!("{} → {a}", j.gesture),
                     None => j.gesture.clone(),

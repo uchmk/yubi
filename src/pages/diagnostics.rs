@@ -31,6 +31,8 @@ pub struct Diagnostics {
     pub(super) state: MonitorState,
     /// A fixed state for screenshots; the engine's is ignored while it is set.
     pub(super) fake: Option<MonitorState>,
+    /// Practice history older than this belongs to an earlier practice session: hidden.
+    pub(super) practice_since: Option<std::time::Instant>,
 }
 
 impl Diagnostics {
@@ -38,6 +40,11 @@ impl Diagnostics {
         if self.fake.is_none() {
             self.state = state;
         }
+    }
+
+    /// Practice mode was just switched on: start the history afresh.
+    pub fn mark_practice_start(&mut self) {
+        self.practice_since = Some(std::time::Instant::now());
     }
 
     /// The engine's latest state (for the 押し込みと触覚 meter).

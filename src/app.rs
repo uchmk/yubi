@@ -77,6 +77,8 @@ pub struct App {
     icon_deadline: Option<Instant>,
     /// 練習モード (dry run): recognized gestures are shown, not run. Never saved.
     practice_on: bool,
+    /// `practice_on` as of the previous frame (to see the switch turn on).
+    practice_prev: bool,
     /// Windows' own gestures are off while practising (see `practice_gestures`).
     practice_win: practice_gestures::State,
     /// The pause generation last seen (`u64::MAX` before the first look, so the start is silent).
@@ -149,6 +151,7 @@ impl App {
             hide_frames: 0,
             icon_deadline: None,
             practice_on: false,
+            practice_prev: false,
             practice_win,
             seen_pause_gen: u64::MAX,
             applied_shortcut: None,
@@ -196,6 +199,7 @@ impl App {
         if self.hide_frames > 0 {
             self.hide_frames -= 1;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.practice_on = false;
             ctx.request_repaint();
         }
         let events = r.poll();
@@ -215,6 +219,8 @@ impl App {
         if close && !self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            // Hidden to the tray: practice must not keep swallowing gestures.
+            self.practice_on = false;
             r.on_hidden();
         }
         let mut ack = false;
@@ -255,12 +261,17 @@ impl App {
         self.diagnostics.update(self.engine.snapshot());
     }
 
-    /// The dry-run switch follows the page and the window focus, and goes to the engine.
-    fn sync_practice(&mut self, ctx: &egui::Context) {
-        let focused = ctx.input(|i| i.focused);
-        if self.devshot.is_none() && (self.page != Page::Practice || !focused) {
-            self.practice_on = false;
+    /// The dry-run switch follows the page (and a hide to the tray), not the window focus, and
+    /// goes to the engine.
+    fn sync_practice(&mut self) {
+        if self.devshot.is_none() {
+            self.practice_on = practice_stays(self.practice_on, self.page);
         }
+        if self.practice_on && !self.practice_prev {
+            // Old rows must not be mistaken for gestures made under this switch.
+            self.diagnostics.mark_practice_start();
+        }
+        self.practice_prev = self.practice_on;
         self.engine
             .dry_run
             .store(self.practice_on, Ordering::Relaxed);
@@ -675,7 +686,7 @@ impl eframe::App for App {
     /// Runs every frame, and also while the window is hidden (when `ui` does not).
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.resident_tick(ctx);
-        self.sync_practice(ctx);
+        self.sync_practice();
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -808,5 +819,22 @@ impl eframe::App for App {
         {
             let _ = config::save(&self.config_path, &self.cfg);
         }
+    }
+}
+
+/// Practice stays on only while the practice page is the one shown.
+fn practice_stays(on: bool, page: Page) -> bool {
+    on && page == Page::Practice
+}
+
+#[cfg(test)]
+mod practice_tests {
+    use super::*;
+
+    #[test]
+    fn practice_survives_only_on_its_page() {
+        assert!(practice_stays(true, Page::Practice));
+        assert!(!practice_stays(true, Page::Diagnostics));
+        assert!(!practice_stays(false, Page::Practice));
     }
 }

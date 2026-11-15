@@ -76,6 +76,18 @@ impl History {
         self.items.truncate(HISTORY_MAX);
     }
 
+    /// Only the entries recorded at or after `since`.
+    pub fn since(&self, since: Instant) -> History {
+        History {
+            items: self
+                .items
+                .iter()
+                .filter(|j| j.at >= since)
+                .cloned()
+                .collect(),
+        }
+    }
+
     pub fn latest(&self) -> Option<&Judgement> {
         self.items.first()
     }

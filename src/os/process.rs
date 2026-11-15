@@ -48,10 +48,12 @@ impl PidCache {
         self.map.insert(pid, (now, value));
     }
 
+    #[allow(dead_code, reason = "only the cache tests look at its size")]
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
+    #[allow(dead_code, reason = "pairs with len")]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }

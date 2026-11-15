@@ -4,11 +4,6 @@
 //! `release_all` can always let go (device gone, engine disabled, config changed, lock, exit).
 //! Everything goes through an `InputSink`, so the bookkeeping is testable without Win32.
 
-#![allow(
-    dead_code,
-    reason = "foundation for M3 gesture actions; used by tests and later milestones"
-)]
-
 /// Marks input injected by yubi (`dwExtraInfo`) so later hooks can let it through.
 pub const YUBI_INJECT_MARK: usize = 0x5955_4249;
 
@@ -31,6 +26,8 @@ pub enum Key {
 pub enum SynthEvent {
     Down(Key),
     Up(Key),
+    /// Relative pointer movement in pixels.
+    Move(i32, i32),
 }
 
 pub trait InputSink {
@@ -76,6 +73,33 @@ impl<S: InputSink> Executor<S> {
         let ok = self.sink.send(SynthEvent::Up(key));
         if ok {
             self.held.remove(i);
+        }
+        ok
+    }
+
+    /// Move the pointer by (dx, dy) pixels. Returns false if the system refused.
+    pub fn move_mouse(&mut self, dx: i32, dy: i32) -> bool {
+        dx == 0 && dy == 0 || self.sink.send(SynthEvent::Move(dx, dy))
+    }
+
+    /// Press all `keys` in order, then release them in reverse (a shortcut or a click).
+    /// Everything pressed here is owned by the executor, so a failure part-way lets go again.
+    /// Keys that were already held stay held. Returns false if any press was refused.
+    pub fn tap(&mut self, keys: &[Key]) -> bool {
+        let mut mine = Vec::new();
+        let mut ok = true;
+        for &k in keys {
+            let was_held = self.held.contains(&k);
+            if !self.press(k) {
+                ok = false;
+                break;
+            }
+            if !was_held {
+                mine.push(k);
+            }
+        }
+        while let Some(k) = mine.pop() {
+            ok &= self.release(k);
         }
         ok
     }
@@ -137,6 +161,21 @@ mod win {
         let (key, up) = match ev {
             SynthEvent::Down(k) => (k, false),
             SynthEvent::Up(k) => (k, true),
+            SynthEvent::Move(dx, dy) => {
+                return INPUT {
+                    r#type: INPUT_MOUSE,
+                    Anonymous: INPUT_0 {
+                        mi: MOUSEINPUT {
+                            dx,
+                            dy,
+                            mouseData: 0,
+                            dwFlags: MOUSEEVENTF_MOVE,
+                            time: 0,
+                            dwExtraInfo: YUBI_INJECT_MARK,
+                        },
+                    },
+                };
+            }
         };
         match key {
             Key::Vk(vk) => {
@@ -293,6 +332,63 @@ mod tests {
                 SynthEvent::Up(ALT)
             ]
         );
+    }
+
+    #[test]
+    fn tap_presses_in_order_and_releases_in_reverse() {
+        let mut f = Fake::default();
+        let mut e = Executor::new(&mut f);
+        assert!(e.tap(&[ALT, TAB]));
+        assert!(e.held().is_empty());
+        drop(e);
+        assert_eq!(
+            f.log,
+            vec![
+                SynthEvent::Down(ALT),
+                SynthEvent::Down(TAB),
+                SynthEvent::Up(TAB),
+                SynthEvent::Up(ALT)
+            ]
+        );
+    }
+
+    #[test]
+    fn tap_leaves_already_held_keys_alone() {
+        let mut f = Fake::default();
+        let mut e = Executor::new(&mut f);
+        e.press(ALT);
+        assert!(e.tap(&[ALT, TAB]));
+        assert_eq!(e.held(), &[ALT]);
+    }
+
+    #[test]
+    fn tap_lets_go_when_a_press_is_refused() {
+        struct Picky(Vec<SynthEvent>);
+        impl InputSink for &mut Picky {
+            fn send(&mut self, ev: SynthEvent) -> bool {
+                if ev == SynthEvent::Down(TAB) {
+                    return false;
+                }
+                self.0.push(ev);
+                true
+            }
+        }
+        let mut f = Picky(Vec::new());
+        let mut e = Executor::new(&mut f);
+        assert!(!e.tap(&[ALT, TAB]));
+        assert!(e.held().is_empty());
+        drop(e);
+        assert_eq!(f.0, vec![SynthEvent::Down(ALT), SynthEvent::Up(ALT)]);
+    }
+
+    #[test]
+    fn move_mouse_skips_zero_and_sends_otherwise() {
+        let mut f = Fake::default();
+        let mut e = Executor::new(&mut f);
+        assert!(e.move_mouse(0, 0));
+        assert!(e.move_mouse(3, -2));
+        drop(e);
+        assert_eq!(f.log, vec![SynthEvent::Move(3, -2)]);
     }
 
     #[test]

@@ -1,6 +1,5 @@
 //! OS-side building blocks: window manipulation, process lookup, key
 //! injection and master volume. Independent of the input/engine layers.
-#![allow(dead_code)]
 
 pub mod keys;
 pub mod process;

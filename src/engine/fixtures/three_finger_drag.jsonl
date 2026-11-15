@@ -1,0 +1,19 @@
+# Three fingers land, rest, then drag right about 5 mm and lift: a three-finger drag.
+# Needs drag.enabled with 3 fingers; the drag ends on the lift timeout after the last frame.
+{"t_us":0,"contacts":[{"id":1,"x_mm":50,"y_mm":50},{"id":2,"x_mm":60,"y_mm":50},{"id":3,"x_mm":70,"y_mm":50}]}
+{"t_us":11000,"contacts":[{"id":1,"x_mm":50,"y_mm":50},{"id":2,"x_mm":60,"y_mm":50},{"id":3,"x_mm":70,"y_mm":50}]}
+{"t_us":22000,"contacts":[{"id":1,"x_mm":50,"y_mm":50},{"id":2,"x_mm":60,"y_mm":50},{"id":3,"x_mm":70,"y_mm":50}]}
+{"t_us":33000,"contacts":[{"id":1,"x_mm":50,"y_mm":50},{"id":2,"x_mm":60,"y_mm":50},{"id":3,"x_mm":70,"y_mm":50}]}
+{"t_us":44000,"contacts":[{"id":1,"x_mm":50,"y_mm":50},{"id":2,"x_mm":60,"y_mm":50},{"id":3,"x_mm":70,"y_mm":50}]}
+{"t_us":55000,"contacts":[{"id":1,"x_mm":50,"y_mm":50},{"id":2,"x_mm":60,"y_mm":50},{"id":3,"x_mm":70,"y_mm":50}]}
+{"t_us":66000,"contacts":[{"id":1,"x_mm":50.6,"y_mm":50},{"id":2,"x_mm":60.6,"y_mm":50},{"id":3,"x_mm":70.6,"y_mm":50}]}
+{"t_us":77000,"contacts":[{"id":1,"x_mm":51.2,"y_mm":50},{"id":2,"x_mm":61.2,"y_mm":50},{"id":3,"x_mm":71.2,"y_mm":50}]}
+{"t_us":88000,"contacts":[{"id":1,"x_mm":51.8,"y_mm":50},{"id":2,"x_mm":61.8,"y_mm":50},{"id":3,"x_mm":71.8,"y_mm":50}]}
+{"t_us":99000,"contacts":[{"id":1,"x_mm":52.4,"y_mm":50},{"id":2,"x_mm":62.4,"y_mm":50},{"id":3,"x_mm":72.4,"y_mm":50}]}
+{"t_us":110000,"contacts":[{"id":1,"x_mm":53.0,"y_mm":50},{"id":2,"x_mm":63.0,"y_mm":50},{"id":3,"x_mm":73.0,"y_mm":50}]}
+{"t_us":121000,"contacts":[{"id":1,"x_mm":53.6,"y_mm":50},{"id":2,"x_mm":63.6,"y_mm":50},{"id":3,"x_mm":73.6,"y_mm":50}]}
+{"t_us":132000,"contacts":[{"id":1,"x_mm":54.2,"y_mm":50},{"id":2,"x_mm":64.2,"y_mm":50},{"id":3,"x_mm":74.2,"y_mm":50}]}
+{"t_us":143000,"contacts":[{"id":1,"x_mm":54.8,"y_mm":50},{"id":2,"x_mm":64.8,"y_mm":50},{"id":3,"x_mm":74.8,"y_mm":50}]}
+{"t_us":154000,"contacts":[{"id":1,"x_mm":55.4,"y_mm":50},{"id":2,"x_mm":65.4,"y_mm":50},{"id":3,"x_mm":75.4,"y_mm":50}]}
+{"t_us":165000,"contacts":[{"id":1,"x_mm":56.0,"y_mm":50},{"id":2,"x_mm":66.0,"y_mm":50},{"id":3,"x_mm":76.0,"y_mm":50}]}
+{"t_us":176000,"contacts":[]}

@@ -4,10 +4,14 @@
 //! "latest state" for the UI (monitor, diagnostics). It also lets go of every held key and
 //! button when the situation changes (see `Worker::release_everything`).
 
+pub mod dispatch;
 pub mod executor;
 pub mod recognizer;
 pub mod replay;
 pub mod session;
+
+#[cfg(test)]
+mod gesture_tests;
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -16,12 +20,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::input::{self, Contact, DeviceInfo, FpsCounter, InputEvent, InputHandle, TouchFrame};
+use dispatch::Dispatcher;
 use executor::Executor;
 use recognizer::{Action, GestureEvent, Recognizer};
 
@@ -41,6 +46,14 @@ impl executor::InputSink for Sink {
 
 /// Longest the engine sleeps, so stop requests and session events are noticed promptly.
 const MAX_WAIT: Duration = Duration::from_millis(100);
+
+/// How often the foreground app is looked up while yubi runs.
+const FOREGROUND_POLL: Duration = Duration::from_millis(500);
+
+/// How often a refused button release is retried.
+const RELEASE_RETRY: Duration = Duration::from_millis(100);
+/// How long the engine keeps retrying a refused up when it shuts down.
+const SHUTDOWN_RELEASE_WAIT: Duration = Duration::from_millis(1000);
 
 /// What the recognizer sees: one decoded frame, independent of the device.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,6 +129,12 @@ pub struct MonitorState {
     pub peak_contacts: usize,
     pub finger_count: usize,
     pub last_event: Option<GestureEvent>,
+    /// What yubi last did for real (drag, window move, trigger), or why it did not.
+    pub last_action: Option<String>,
+    /// Executable name of the foreground window.
+    pub foreground_exe: Option<String>,
+    /// A per-app profile turns yubi off for the foreground app.
+    pub app_blocked: bool,
     /// Master toggle as the engine sees it.
     pub gestures_enabled: bool,
     pub failed: Option<String>,
@@ -169,7 +188,7 @@ impl Engine {
 
         let worker = Worker {
             rx,
-            wake,
+            wake: wake.clone(),
             state: state.clone(),
             config: config.clone(),
             focused: focused.clone(),
@@ -178,6 +197,17 @@ impl Engine {
             interrupts,
             recognizer: Recognizer::default(),
             executor: Executor::new(Sink::default()),
+            dispatch: Dispatcher::with_worker({
+                let (state, wake) = (state.clone(), wake.clone());
+                move |msg| {
+                    if let Ok(mut s) = state.lock() {
+                        s.last_action = Some(msg);
+                    }
+                    wake();
+                }
+            }),
+            last_fg_poll: None,
+            last_release_retry: None,
             cfg: Config::default(),
             seen_generation: u64::MAX,
             seen_interrupts: 0,
@@ -236,6 +266,10 @@ struct Worker {
     interrupts: session::Interrupts,
     recognizer: Recognizer,
     executor: Executor<Sink>,
+    dispatch: Dispatcher,
+    /// When the foreground app was last looked up (it is polled, not hooked).
+    last_fg_poll: Option<Instant>,
+    last_release_retry: Option<Instant>,
     cfg: Config,
     seen_generation: u64,
     seen_interrupts: u64,
@@ -272,16 +306,47 @@ impl Worker {
                 let actions = self.recognizer.tick(input::now_us());
                 self.apply(actions);
             }
+            self.poll_foreground(false);
+            self.retry_release();
         }
         self.release_everything();
+        // A refused up must not leave a button down system-wide after yubi exits: keep retrying
+        // for a short, bounded time (the foreground may change back from an elevated window).
+        let deadline = Instant::now() + SHUTDOWN_RELEASE_WAIT;
+        while !self.executor.held().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(RELEASE_RETRY);
+            self.executor.release_all();
+        }
         self.flush_recorder();
     }
 
     /// Let go of every held key and button and forget any gesture in flight.
     fn release_everything(&mut self) {
-        self.executor.release_all();
+        let note = self.dispatch.release_everything(&mut self.executor);
         self.recognizer.reset();
-        self.with_state(|s| s.finger_count = 0);
+        self.with_state(|s| {
+            s.finger_count = 0;
+            if note.is_some() {
+                s.last_action = note;
+            }
+        });
+    }
+
+    /// A refused up leaves a button owned by the executor with no gesture holding it; try again
+    /// (at most every 100 ms) until it goes through.
+    fn retry_release(&mut self) {
+        if self.executor.held().is_empty()
+            || self
+                .last_release_retry
+                .is_some_and(|t| t.elapsed() < RELEASE_RETRY)
+        {
+            return;
+        }
+        self.last_release_retry = Some(Instant::now());
+        if let Some(note) = self.dispatch.retry_release(&mut self.executor) {
+            self.with_state(|s| s.last_action = Some(note));
+            (self.wake)();
+        }
     }
 
     /// Pick up a changed config. A change in the middle of a gesture cancels it.
@@ -380,20 +445,57 @@ impl Worker {
         self.apply(actions);
     }
 
+    /// Look up the foreground app (at most twice a second unless `force`) and decide whether a
+    /// per-app profile switches yubi off for it.
+    fn poll_foreground(&mut self, force: bool) {
+        if !force
+            && self
+                .last_fg_poll
+                .is_some_and(|t| t.elapsed() < FOREGROUND_POLL)
+        {
+            return;
+        }
+        self.last_fg_poll = Some(Instant::now());
+        let exe = crate::os::window::foreground().and_then(crate::os::process::exe_name_of);
+        let blocked = dispatch::app_blocked(&self.cfg.profiles, exe.as_deref());
+        self.dispatch.set_blocked(blocked);
+        let changed = self
+            .state
+            .lock()
+            .is_ok_and(|s| s.foreground_exe != exe || s.app_blocked != blocked);
+        if changed {
+            self.with_state(|s| {
+                s.foreground_exe = exe;
+                s.app_blocked = blocked;
+            });
+            (self.wake)();
+        }
+    }
+
     fn apply(&mut self, actions: Vec<Action>) {
         for a in actions {
-            match a {
-                Action::Debug(e) => {
-                    if self.log {
-                        eprintln!("yubi: gesture {e:?}");
-                    }
-                    let n = self.recognizer.snapshot().finger_count;
-                    self.with_state(|s| {
-                        s.last_event = Some(e);
-                        s.finger_count = n;
-                    });
-                    (self.wake)();
+            if let Action::Debug(e) = &a {
+                if self.log {
+                    eprintln!("yubi: gesture {e:?}");
                 }
+                if matches!(e, GestureEvent::TouchStart { .. }) {
+                    // The app is decided once per touch session, when the touch starts.
+                    self.poll_foreground(true);
+                }
+                let (e, n) = (*e, self.recognizer.snapshot().finger_count);
+                self.with_state(|s| {
+                    s.last_event = Some(e);
+                    s.finger_count = n;
+                });
+                (self.wake)();
+            }
+            let th = *self.recognizer.thresholds();
+            let note =
+                self.dispatch
+                    .handle(&a, &mut self.executor, &th, crate::os::window::cursor_pos);
+            if let Some(note) = note {
+                self.with_state(|s| s.last_action = Some(note));
+                (self.wake)();
             }
         }
     }

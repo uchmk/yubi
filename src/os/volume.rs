@@ -8,6 +8,8 @@
 //! and must be used only on the thread that opened it. If the default output
 //! device changes, drop it and `open` again.
 
+#![allow(dead_code, reason = "Volume and Brightness gestures arrive in M3b")]
+
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender};
 use windows::Win32::System::Com::{

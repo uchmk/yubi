@@ -2,10 +2,9 @@
 //!
 //! One line per frame: `{"t_us":1000,"button":false,"contacts":[{"id":1,"x_mm":40.0,"y_mm":50.0}]}`.
 //! Contact fields other than `id` are optional when reading (see `input::Contact`).
-
 #![allow(
     dead_code,
-    reason = "foundation for M3 gesture actions; used by tests and later milestones"
+    reason = "`parse` and `run` are test tooling; only `write_frame` is used by the app"
 )]
 
 use std::io::Write;

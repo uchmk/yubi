@@ -7,7 +7,7 @@ use eframe::egui::{
 };
 
 use crate::engine::MonitorState;
-use crate::engine::recognizer::GestureEvent;
+use crate::engine::recognizer::{FiveKind, GestureEvent};
 use crate::input::{Contact, DeviceInfo, now_us};
 use crate::nav::Page;
 use crate::theme::Tokens;
@@ -142,6 +142,22 @@ impl Diagnostics {
                 "最後のジェスチャー",
                 s.last_event.map_or("—".into(), event_label),
             ),
+            (
+                "最後の操作",
+                s.last_action.clone().unwrap_or_else(|| "—".into()),
+            ),
+            (
+                "前面のアプリ",
+                s.foreground_exe.clone().unwrap_or_else(|| "—".into()),
+            ),
+            (
+                "このアプリでの yubi",
+                if s.app_blocked {
+                    "無効（アプリ設定で除外）".to_owned()
+                } else {
+                    "有効".to_owned()
+                },
+            ),
             ("受信フレーム合計", s.frames_total.to_string()),
             ("破棄した部分フレーム", s.partial_frames.to_string()),
             ("破棄した接触", s.dropped_contacts.to_string()),
@@ -259,6 +275,12 @@ fn event_label(e: GestureEvent) -> String {
         } => format!("タッチ終了（{fingers} 本、{} ms）", duration_us / 1000),
         GestureEvent::Tap { fingers } => format!("タップ（{fingers} 本）"),
         GestureEvent::LongHold { fingers } => format!("長押し（{fingers} 本）"),
+        GestureEvent::Five(kind) => match kind {
+            FiveKind::PinchIn => "5本指ピンチイン".into(),
+            FiveKind::PinchOut => "5本指ピンチアウト".into(),
+            FiveKind::SwipeUp => "5本指スワイプ上".into(),
+            FiveKind::SwipeDown => "5本指スワイプ下".into(),
+        },
     }
 }
 

@@ -92,6 +92,18 @@ pub fn any_enabled(values: &Values) -> bool {
     values.iter().any(|v| *v != Some(0))
 }
 
+/// True when Windows' own gestures for `fingers` (3 or 4) are still on, so a yubi gesture with
+/// that many fingers would fight them. Slots: slide3, tap3, slide4, tap4; anything but an
+/// explicit 0 counts as on. Other finger counts never conflict.
+pub fn conflicts(values: &Values, fingers: u8) -> bool {
+    let slots = match fingers {
+        3 => [0, 1],
+        4 => [2, 3],
+        _ => return false,
+    };
+    slots.iter().any(|&i| values[i] != Some(0))
+}
+
 /// How a value reads on the page.
 pub fn describe(v: Option<u32>) -> &'static str {
     match v {
@@ -336,6 +348,18 @@ pub fn apply(_ops: &[RegOp]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conflicts_checks_only_the_matching_finger_count() {
+        let off3: Values = [Some(0), Some(0), Some(1), None];
+        assert!(!conflicts(&off3, 3));
+        assert!(conflicts(&off3, 4));
+        let half: Values = [Some(0), None, Some(0), Some(0)];
+        assert!(conflicts(&half, 3));
+        assert!(!conflicts(&half, 4));
+        assert!(!conflicts(&[None; 4], 5));
+        assert!(!conflicts(&[None; 4], 2));
+    }
 
     #[test]
     fn disable_skips_values_already_zero() {

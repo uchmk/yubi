@@ -316,7 +316,7 @@ impl App {
         let cfg = &mut self.cfg;
         match self.page {
             Page::Home => return home::home(ui, t, cfg, self.diagnostics.connected()),
-            Page::Drag => features::drag(ui, t, cfg),
+            Page::Drag => return features::drag(ui, t, cfg, &self.win_values),
             Page::Five => features::five(ui, t, cfg),
             Page::CustomPress => features::custom_press(ui, t, cfg),
             Page::LongHold => features::long_hold(ui, t, cfg),
@@ -324,7 +324,7 @@ impl App {
             Page::ThumbHold => features::hold_combos(ui, t, cfg, Page::ThumbHold),
             Page::Corner => features::corner(ui, t, cfg),
             Page::Edge => features::edge(ui, t, cfg),
-            Page::Window => features::window(ui, t, cfg),
+            Page::Window => return features::window(ui, t, cfg, &self.win_values),
             Page::Ring => features::ring(ui, t, cfg),
             Page::Profiles => features::profiles(ui, t, cfg),
             Page::Haptic => features::haptic(ui, t, cfg),
@@ -365,7 +365,8 @@ impl eframe::App for App {
         let now = ui.input(|i| i.time);
         let ctx_now = ui.ctx().clone();
         self.sync_engine(&ctx_now);
-        let general_open = self.page == Page::General;
+        // Pages that show the Windows-gesture state (or warn about it) re-read it when opened.
+        let general_open = matches!(self.page, Page::General | Page::Drag | Page::Window);
         if general_open && !self.win_page_was_open {
             self.refresh_win_values();
         }

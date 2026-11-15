@@ -8,6 +8,9 @@ use crate::config::{
 };
 use crate::icons;
 use crate::nav::Page;
+use crate::win_gestures;
+
+use super::Cmd;
 use crate::theme::Tokens;
 use crate::widgets::{
     self, SliderSpec, accent_button, combo_sized, group, icon_button, section_header, toggle,
@@ -33,8 +36,38 @@ fn feature_top(ui: &mut Ui, t: &Tokens, cfg: &mut Config, page: Page) -> bool {
     page.enabled_mut(cfg).is_some_and(|f| *f)
 }
 
-pub fn drag(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
+/// A warning card with a jump to 全般 when Windows' own `fingers`-finger gestures are still on.
+fn windows_conflict(
+    ui: &mut Ui,
+    t: &Tokens,
+    values: &win_gestures::Values,
+    fingers: u8,
+    on: bool,
+) -> Option<Cmd> {
+    if !on || !win_gestures::conflicts(values, fingers) {
+        return None;
+    }
+    let mut cmd = None;
+    group(ui, t, |g| {
+        g.wrapped_row(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "Windows の {fingers} 本指ジェスチャーが有効なままです。この機能と重なって、意図しない動作になることがあります。"
+                ))
+                .size(t.fs_small)
+                .color(t.accent),
+            );
+            if widgets::button(ui, t, "全般で無効にする").clicked() {
+                cmd = Some(Cmd::Goto(Page::General));
+            }
+        });
+    });
+    cmd
+}
+
+pub fn drag(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win: &win_gestures::Values) -> Option<Cmd> {
     let on = feature_top(ui, t, cfg, Page::Drag);
+    let cmd = windows_conflict(ui, t, win, cfg.drag.fingers, on);
     ui.add_enabled_ui(on, |ui| {
         section_header(ui, t, "動作");
         group(ui, t, |g| {
@@ -59,6 +92,7 @@ pub fn drag(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
             );
         });
     });
+    cmd
 }
 
 pub fn five(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
@@ -274,8 +308,15 @@ pub fn edge(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
     });
 }
 
-pub fn window(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
+pub fn window(
+    ui: &mut Ui,
+    t: &Tokens,
+    cfg: &mut Config,
+    win: &win_gestures::Values,
+) -> Option<Cmd> {
     let on = feature_top(ui, t, cfg, Page::Window);
+    // Window move is a three-finger gesture.
+    let cmd = windows_conflict(ui, t, win, 3, on && cfg.window.move_with_three_finger);
     ui.add_enabled_ui(on, |ui| {
         section_header(ui, t, "動作");
         group(ui, t, |g| {
@@ -300,6 +341,7 @@ pub fn window(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
             );
         });
     });
+    cmd
 }
 
 pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {

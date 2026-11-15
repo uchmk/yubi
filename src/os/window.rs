@@ -19,6 +19,11 @@
 //! `place` takes a rect in visible-frame terms and compensates by the insets,
 //! so snapped windows touch the work-area edge exactly.
 
+#![allow(
+    dead_code,
+    reason = "corner resize, work-area helpers and placement arrive in M3b/M3c"
+)]
+
 use std::ffi::c_void;
 
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT, WPARAM};
@@ -39,11 +44,11 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GA_ROOT, GetAncestor, GetClassNameW, GetDesktopWindow, GetForegroundWindow, GetShellWindow,
-    GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, IsWindow, IsZoomed, MINMAXINFO,
-    SMTO_ABORTIFHUNG, SW_RESTORE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-    SendMessageTimeoutW, SetForegroundWindow, SetWindowPos, ShowWindowAsync, WINDOWPLACEMENT,
-    WM_GETMINMAXINFO, WindowFromPoint,
+    GA_ROOT, GetAncestor, GetClassNameW, GetCursorPos, GetDesktopWindow, GetForegroundWindow,
+    GetShellWindow, GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, IsWindow,
+    IsZoomed, MINMAXINFO, SMTO_ABORTIFHUNG, SW_RESTORE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
+    SWP_NOSIZE, SWP_NOZORDER, SendMessageTimeoutW, SetForegroundWindow, SetWindowPos,
+    ShowWindowAsync, WINDOWPLACEMENT, WM_GETMINMAXINFO, WindowFromPoint,
 };
 
 use super::keys::{self, KeyCombo, VK_LWIN, Vk};
@@ -173,6 +178,14 @@ pub fn top_level_at(point: (i32, i32)) -> Option<Hwnd> {
         GetAncestor(h, GA_ROOT)
     };
     accept_top_level(root)
+}
+
+/// Cursor position in physical screen pixels.
+pub fn cursor_pos() -> Option<(i32, i32)> {
+    let mut p = POINT::default();
+    // SAFETY: valid out pointer.
+    unsafe { GetCursorPos(&mut p).ok()? };
+    Some((p.x, p.y))
 }
 
 /// The foreground window's root, with the same exclusions as `top_level_at`.

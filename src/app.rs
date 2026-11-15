@@ -14,7 +14,7 @@ use crate::config::{self, Config};
 use crate::engine::Engine;
 use crate::icons;
 use crate::nav::{NAV, Node, Page};
-use crate::pages::{Cmd, diagnostics::Diagnostics, features, general, home};
+use crate::pages::{Cmd, diagnostics::Diagnostics, features, general, general_io, home};
 use crate::resident::{self, Resident};
 use crate::search::{self, Entry};
 use crate::theme::{self, Tokens};
@@ -36,6 +36,8 @@ pub struct App {
     win_read_error: Option<String>,
     win_message: Option<String>,
     win_page_was_open: bool,
+    /// Export / import and haptic-permission state of the 全般 page.
+    general_state: general_io::GeneralState,
     applied_theme: config::ThemeChoice,
     /// User preference for the nav pane when the window is wide.
     nav_collapsed: bool,
@@ -72,6 +74,7 @@ impl App {
             win_read_error: None,
             win_message: None,
             win_page_was_open: false,
+            general_state: general_io::GeneralState::new(ctx),
             nav_collapsed: false,
             nav_expanded_narrow: false,
             group_open: [true; NAV.len()],
@@ -422,7 +425,14 @@ impl App {
                         .as_deref()
                         .or(self.win_message.as_deref()),
                 };
-                return general::general(ui, t, cfg, &self.config_path, &view);
+                return general::general(
+                    ui,
+                    t,
+                    cfg,
+                    &self.config_path,
+                    &view,
+                    &mut self.general_state,
+                );
             }
         }
         None
@@ -456,6 +466,7 @@ impl eframe::App for App {
             self.refresh_win_values();
         }
         self.win_page_was_open = general_open;
+        self.general_state.set_visible(self.page == Page::General);
         let narrow = ui.ctx().content_rect().width() < t.nav_auto_collapse_w;
         let collapsed = if narrow {
             !self.nav_expanded_narrow
@@ -495,13 +506,15 @@ impl eframe::App for App {
                     .inner_margin(Margin::symmetric(t.space_lg as i8, 0)),
             )
             .show(ui, |ui| {
-                ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.set_max_width(ui.available_width().min(t.content_max_w));
-                        cmd = self.content(ui, &t, now);
-                        ui.add_space(t.space_xl);
-                    });
+                let mut area = ScrollArea::vertical().auto_shrink([false, false]);
+                if let Some(y) = general_io::shot_scroll() {
+                    area = area.vertical_scroll_offset(y);
+                }
+                area.show(ui, |ui| {
+                    ui.set_max_width(ui.available_width().min(t.content_max_w));
+                    cmd = self.content(ui, &t, now);
+                    ui.add_space(t.space_xl);
+                });
             });
         if let Some(c) = cmd {
             self.run(c);

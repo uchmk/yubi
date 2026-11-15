@@ -98,6 +98,11 @@ fn key_exists(subkey: &str) -> bool {
     }
 }
 
+/// True when at least one of the driver's service keys exists (the driver is installed).
+pub fn driver_key_present() -> bool {
+    key_exists(USB_SERVICE_KEY) || key_exists(BT_SERVICE_KEY)
+}
+
 /// Read the current registry state (no elevation needed).
 pub fn read_state() -> PermissionState {
     let get = |svc: &str| read_dword(&parameters_key(svc), VALUE_NAME).map(|v| v == 1);

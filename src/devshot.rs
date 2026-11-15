@@ -80,6 +80,7 @@ impl DevShot {
             ("fingerhold", Page::FingerHold),
             ("diagnostics", Page::Diagnostics),
             ("monitor", Page::Monitor),
+            ("general", Page::General),
         ] {
             shots.push(Shot {
                 name: format!("narrow-{n}"),

@@ -410,6 +410,7 @@ fn section_label(key: &str) -> &str {
         "gestures_enabled" => "ジェスチャー全体",
         "general" => "全般",
         "drag" => "ドラッグ",
+        "three" => "3本指ジェスチャー",
         "four" => "4本指ジェスチャー",
         "five" => "5本指ジェスチャー",
         "sensitivity" => "感度",
@@ -467,7 +468,8 @@ fn setting_label(path: &str) -> String {
         "general.start_with_windows" => "Windows の起動時に開始",
         "general.pause_shortcut" => "一時停止のショートカット",
         "general.pause_in_fullscreen" => "全画面のアプリの間は自動で一時停止",
-        "five.enabled"
+        "three.enabled"
+        | "five.enabled"
         | "press.enabled"
         | "long_hold.enabled"
         | "finger_hold.enabled"
@@ -477,6 +479,13 @@ fn setting_label(path: &str) -> String {
         | "ring.enabled" => "機能を有効にする",
         "drag.lift_timeout_ms" => "指を離してから終了するまでの時間",
         "drag.keep_drag_on_release" => "離したあともドラッグを続ける",
+        "three.tap" => "タップ",
+        "three.swipe_left" => "左スワイプ",
+        "three.swipe_right" => "右スワイプ",
+        "three.pinch_in" => "ピンチイン",
+        "three.pinch_out" => "ピンチアウト",
+        "three.swipe_up" => "上スワイプ",
+        "three.swipe_down" => "下スワイプ",
         "five.tap" => "タップ",
         "five.swipe_left" => "左スワイプ",
         "five.swipe_right" => "右スワイプ",

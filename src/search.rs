@@ -69,6 +69,14 @@ const ROWS: &[Entry] = &[
     e(Page::Gesture, "ピンチアウト", "5本指で指を広げる"),
     e(Page::Gesture, "上にスワイプ", "5本指で上へなぞる"),
     e(Page::Gesture, "下にスワイプ", "5本指で下へなぞる"),
+    // After 4 and 5: Enter on a plain "タップ" keeps opening the 4-finger tab (3 is off by default).
+    e(Page::Gesture, "タップ", "3本指で軽く触れる"),
+    e(Page::Gesture, "左にスワイプ", "3本指で左へなぞる"),
+    e(Page::Gesture, "右にスワイプ", "3本指で右へなぞる"),
+    e(Page::Gesture, "上にスワイプ", "3本指で上へなぞる"),
+    e(Page::Gesture, "下にスワイプ", "3本指で下へなぞる"),
+    e(Page::Gesture, "ピンチイン", "3本指で指を寄せる"),
+    e(Page::Gesture, "ピンチアウト", "3本指で指を広げる"),
     e(
         Page::CustomPress,
         "軽い押し込みのしきい値",

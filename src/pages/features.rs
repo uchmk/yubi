@@ -310,7 +310,7 @@ pub fn drag(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win: &win_gestures::Value
     cmd
 }
 
-/// The tab of the ジェスチャー page (0: 4 fingers, 1: 5 fingers), kept between frames.
+/// The tab of the ジェスチャー page (0: 3 fingers, 1: 4 fingers, 2: 5 fingers), kept between frames.
 fn gesture_tab_id(ui: &Ui) -> egui::Id {
     ui.make_persistent_id("yubi-gesture-tab")
 }
@@ -322,27 +322,28 @@ static FORCE_TAB: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
 static PENDING_TAB: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(usize::MAX);
 
-/// Open the ジェスチャー page on tab `tab` (0: 4 fingers, 1: 5 fingers) the next time it shows.
+/// Open the ジェスチャー page on tab `tab` (0: 3, 1: 4, 2: 5 fingers) the next time it shows.
 pub fn request_gesture_tab(tab: usize) {
-    PENDING_TAB.store(tab.min(1), std::sync::atomic::Ordering::Relaxed);
+    PENDING_TAB.store(tab.min(2), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The tab to open for a gesture id such as `swipe.5.up` (`None` for ids of other pages).
 pub fn tab_of_key(key: &str) -> Option<usize> {
     match key.split('.').collect::<Vec<_>>().as_slice() {
-        ["tap" | "swipe" | "pinch", "5", ..] => Some(1),
-        ["tap" | "swipe" | "pinch", ..] => Some(0),
+        ["tap" | "swipe" | "pinch", "3", ..] => Some(0),
+        ["tap" | "swipe" | "pinch", "5", ..] => Some(2),
+        ["tap" | "swipe" | "pinch", ..] => Some(1),
         _ => None,
     }
 }
 
 pub fn force_gesture_tab(tab: usize) {
     if let Ok(mut f) = FORCE_TAB.lock() {
-        *f = Some(tab.min(1));
+        *f = Some(tab.min(2));
     }
 }
 
-/// The ジェスチャー page: tabs 4本指 / 5本指, each with its own enable toggle and the sections
+/// The ジェスチャー page: tabs 3本指 / 4本指 / 5本指, each with its own enable toggle and the sections
 /// タップ, スワイプ and ピンチ.
 pub fn gesture(
     ui: &mut Ui,
@@ -363,11 +364,11 @@ pub fn gesture(
     let pinned = FORCE_TAB.lock().ok().and_then(|f| *f);
     let mut tab: usize = pinned
         .or_else(|| ui.data(|d| d.get_temp(gesture_tab_id(ui))))
-        .unwrap_or(0)
-        .min(1);
+        .unwrap_or(1)
+        .min(2);
     let before = tab;
     ui.add_space(t.space_sm);
-    super::corner::segmented_tabs(ui, t, "gesture-tab", &["4本指", "5本指"], &mut tab);
+    super::corner::segmented_tabs(ui, t, "gesture-tab", &["3本指", "4本指", "5本指"], &mut tab);
     if tab != before {
         ui.data_mut(|d| d.insert_temp(gesture_tab_id(ui), tab));
         if let Ok(mut f) = FORCE_TAB.lock()
@@ -376,16 +377,16 @@ pub fn gesture(
             *f = Some(tab);
         }
     }
-    let n: u8 = if tab == 0 { 4 } else { 5 };
-    let (icon, title) = if tab == 0 {
-        (icons::FOUR_FINGER, "4本指ジェスチャーを有効にする")
-    } else {
-        (icons::FIVE_FINGER, "5本指ジェスチャーを有効にする")
+    let n: u8 = 3 + tab as u8;
+    let (icon, title) = match tab {
+        0 => (icons::FOUR_FINGER, "3本指ジェスチャーを有効にする"),
+        1 => (icons::FOUR_FINGER, "4本指ジェスチャーを有効にする"),
+        _ => (icons::FIVE_FINGER, "5本指ジェスチャーを有効にする"),
     };
-    let flag = if tab == 0 {
-        &mut cfg.four.enabled
-    } else {
-        &mut cfg.five.enabled
+    let flag = match tab {
+        0 => &mut cfg.three.enabled,
+        1 => &mut cfg.four.enabled,
+        _ => &mut cfg.five.enabled,
     };
     group(ui, t, |g| {
         g.toggle_row(
@@ -421,31 +422,43 @@ pub fn gesture(
     ui.add_enabled_ui(on, |ui| {
         section_header(ui, t, "タップ");
         group(ui, t, |g| {
-            let (id, slot) = if tab == 0 {
-                ("four-tap", &mut cfg.four.tap)
-            } else {
-                ("five-tap", &mut cfg.five.tap)
+            let (id, slot) = match tab {
+                0 => ("three-tap", &mut cfg.three.tap),
+                1 => ("four-tap", &mut cfg.four.tap),
+                _ => ("five-tap", &mut cfg.five.tap),
             };
             g.action_row("タップ", &format!("{n}本指で軽く触れたとき"), id, slot);
         });
         section_header(ui, t, "スワイプ");
         group(ui, t, |g| {
-            let rows: [(&str, &str, &str, &mut Action); 4] = if tab == 0 {
-                let f = &mut cfg.four;
-                [
-                    ("左にスワイプ", "左", "four-left", &mut f.swipe_left),
-                    ("右にスワイプ", "右", "four-right", &mut f.swipe_right),
-                    ("上にスワイプ", "上", "four-up", &mut f.swipe_up),
-                    ("下にスワイプ", "下", "four-down", &mut f.swipe_down),
-                ]
-            } else {
-                let f = &mut cfg.five;
-                [
-                    ("左にスワイプ", "左", "five-left", &mut f.swipe_left),
-                    ("右にスワイプ", "右", "five-right", &mut f.swipe_right),
-                    ("上にスワイプ", "上", "five-up", &mut f.swipe_up),
-                    ("下にスワイプ", "下", "five-down", &mut f.swipe_down),
-                ]
+            let rows: [(&str, &str, &str, &mut Action); 4] = match tab {
+                0 => {
+                    let f = &mut cfg.three;
+                    [
+                        ("左にスワイプ", "左", "three-left", &mut f.swipe_left),
+                        ("右にスワイプ", "右", "three-right", &mut f.swipe_right),
+                        ("上にスワイプ", "上", "three-up", &mut f.swipe_up),
+                        ("下にスワイプ", "下", "three-down", &mut f.swipe_down),
+                    ]
+                }
+                1 => {
+                    let f = &mut cfg.four;
+                    [
+                        ("左にスワイプ", "左", "four-left", &mut f.swipe_left),
+                        ("右にスワイプ", "右", "four-right", &mut f.swipe_right),
+                        ("上にスワイプ", "上", "four-up", &mut f.swipe_up),
+                        ("下にスワイプ", "下", "four-down", &mut f.swipe_down),
+                    ]
+                }
+                _ => {
+                    let f = &mut cfg.five;
+                    [
+                        ("左にスワイプ", "左", "five-left", &mut f.swipe_left),
+                        ("右にスワイプ", "右", "five-right", &mut f.swipe_right),
+                        ("上にスワイプ", "上", "five-up", &mut f.swipe_up),
+                        ("下にスワイプ", "下", "five-down", &mut f.swipe_down),
+                    ]
+                }
             };
             for (title, dir, id, slot) in rows {
                 g.action_row(title, &format!("{n}本指で{dir}へなぞったとき"), id, slot);
@@ -453,16 +466,19 @@ pub fn gesture(
         });
         section_header(ui, t, "ピンチ");
         group(ui, t, |g| {
-            let (a, b) = if tab == 0 {
-                (
+            let (a, b) = match tab {
+                0 => (
+                    ("three-in", &mut cfg.three.pinch_in),
+                    ("three-out", &mut cfg.three.pinch_out),
+                ),
+                1 => (
                     ("four-in", &mut cfg.four.pinch_in),
                     ("four-out", &mut cfg.four.pinch_out),
-                )
-            } else {
-                (
+                ),
+                _ => (
                     ("five-in", &mut cfg.five.pinch_in),
                     ("five-out", &mut cfg.five.pinch_out),
-                )
+                ),
             };
             g.action_row_of(
                 "ピンチイン",
@@ -899,6 +915,7 @@ pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
         });
         for n in cfg.ring_counts() {
             if cfg.drag.on(n)
+                || (cfg.three.enabled && n == 3)
                 || (cfg.four.enabled && n == 4)
                 || (cfg.five.enabled && n == 5)
             {

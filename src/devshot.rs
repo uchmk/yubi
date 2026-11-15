@@ -140,6 +140,10 @@ impl Fixture {
             }
             Self::GestureTab(tab) => {
                 cfg.gestures_enabled = true;
+                cfg.three.enabled = true;
+                cfg.three.tap = Action::Find;
+                cfg.three.swipe_left = Action::DesktopPrev;
+                cfg.three.swipe_right = Action::DesktopNext;
                 cfg.four.enabled = true;
                 cfg.five.enabled = true;
                 cfg.five.tap = Action::Find;
@@ -150,10 +154,10 @@ impl Fixture {
                 crate::pages::features::force_gesture_tab(usize::from(tab));
             }
             Self::WinActPicker => {
-                Self::GestureTab(0).apply_data(cfg);
+                Self::GestureTab(1).apply_data(cfg);
             }
             Self::WinActRows => {
-                Self::GestureTab(0).apply_data(cfg);
+                Self::GestureTab(1).apply_data(cfg);
                 cfg.four.swipe_left = Action::WindowArrange(crate::config::WindowPreset::LeftHalf);
                 cfg.four.swipe_right =
                     Action::WindowArrange(crate::config::WindowPreset::NextMonitor);
@@ -446,10 +450,10 @@ impl DevShot {
                 anim_t: None,
                 reduced: false,
             });
-            for tab in 0..2u8 {
+            for tab in 0..3u8 {
                 for (n, theme) in [("dark", ThemeChoice::Black), ("light", ThemeChoice::Light)] {
                     list.push(Shot {
-                        name: format!("gesture-tab{}-{n}", 4 + tab),
+                        name: format!("gesture-tab{}-{n}", 3 + tab),
                         page: Page::Gesture,
                         theme,
                         size: Vec2::new(WIDE.x, 1000.0),
@@ -979,6 +983,7 @@ impl DevShot {
                     Page::Gesture => {
                         add("gesture-t0".into(), page, Fixture::GestureTab(0));
                         add("gesture-t1".into(), page, Fixture::GestureTab(1));
+                        add("gesture-t2".into(), page, Fixture::GestureTab(2));
                     }
                     Page::Corner => {
                         for tab in 0..4u8 {

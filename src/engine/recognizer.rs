@@ -997,6 +997,22 @@ mod tests {
     }
 
     #[test]
+    fn session_latches_the_three_finger_bindings_only_when_enabled() {
+        let mut cfg = Config::default();
+        cfg.three.swipe_left = crate::config::Action::Find;
+        let mut r = Recognizer::default();
+        r.step(&frame(0, vec![c(1, 10.0, 10.0)]), &cfg);
+        assert!(r.g.multi_for(3).is_none());
+        cfg.three.enabled = true;
+        let mut r = Recognizer::default();
+        r.step(&frame(0, vec![c(1, 10.0, 10.0)]), &cfg);
+        assert_eq!(
+            r.g.multi_for(3).unwrap().swipe_left,
+            crate::config::Action::Find
+        );
+    }
+
+    #[test]
     fn swapping_a_finger_keeps_the_count_but_rebases() {
         let mut cfg = Config::default();
         cfg.four.enabled = false;

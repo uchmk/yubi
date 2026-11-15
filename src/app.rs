@@ -493,9 +493,15 @@ impl App {
     }
 
     fn finish_search(&mut self, page: Page, desc: &str) {
-        // A 5-finger hit opens the 5本指 tab of the ジェスチャー page.
+        // A 3- or 5-finger hit opens that tab of the ジェスチャー page (4本指 otherwise).
         if page == Page::Gesture {
-            features::request_gesture_tab(usize::from(desc.starts_with("5本指")));
+            features::request_gesture_tab(if desc.starts_with("3本指") {
+                0
+            } else if desc.starts_with("5本指") {
+                2
+            } else {
+                1
+            });
         }
         self.page = page;
         self.search_open = false;

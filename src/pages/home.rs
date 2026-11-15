@@ -117,30 +117,37 @@ fn right_column(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
     });
     group(ui, t, |g| {
         for page in FEATURES {
-            // The ジェスチャー page carries two switches (4 and 5 fingers): one row each.
-            let rows: Vec<(char, &str, &str, bool)> = if page == Page::Gesture {
+            // The ジェスチャー page carries three switches (3, 4 and 5 fingers): one row each.
+            // `which` is the finger count of a gesture row (0 for the other pages).
+            let rows: Vec<(char, &str, &str, usize)> = if page == Page::Gesture {
                 vec![
+                    (
+                        icons::FOUR_FINGER,
+                        "3本指ジェスチャー",
+                        "3本指のタップ・スワイプ・ピンチに操作を割り当てます。",
+                        3,
+                    ),
                     (
                         icons::FOUR_FINGER,
                         "4本指ジェスチャー",
                         "4本指のタップ・スワイプ・ピンチに操作を割り当てます。",
-                        true,
+                        4,
                     ),
                     (
                         icons::FIVE_FINGER,
                         "5本指ジェスチャー",
                         "5本指のタップ・スワイプ・ピンチに操作を割り当てます。",
-                        false,
+                        5,
                     ),
                 ]
             } else {
-                vec![(page.icon(), page.label(), page.subtitle(), true)]
+                vec![(page.icon(), page.label(), page.subtitle(), 0)]
             };
-            for (icon, label, desc, first) in rows {
-                let mut on = if page == Page::Gesture && !first {
-                    cfg.five.enabled
-                } else {
-                    page.is_on(cfg)
+            for (icon, label, desc, which) in rows {
+                let mut on = match which {
+                    3 => cfg.three.enabled,
+                    5 => cfg.five.enabled,
+                    _ => page.is_on(cfg),
                 };
                 let desc = if desc.is_empty() {
                     page.subtitle()
@@ -154,10 +161,10 @@ fn right_column(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
                     let was = on;
                     ui.add_enabled_ui(master, |ui| toggle(ui, t, &mut on));
                     if on != was {
-                        if page == Page::Gesture && !first {
-                            cfg.five.enabled = on;
-                        } else {
-                            page.set_on(cfg, on);
+                        match which {
+                            3 => cfg.three.enabled = on,
+                            5 => cfg.five.enabled = on,
+                            _ => page.set_on(cfg, on),
                         }
                     }
                 });

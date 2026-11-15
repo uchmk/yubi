@@ -697,7 +697,7 @@ pub struct GestureCfg {
     pub lift_us: u64,
     pub keep_drag: bool,
     pub flick: bool,
-    /// Indexed by `count - 3`. Three fingers have no multi bindings yet.
+    /// Indexed by `count - 3`; `None` while that count's gestures are off.
     pub multi: [Option<MultiCfg>; 3],
     /// `None` when edge sliders are off or none has a target.
     pub edge: Option<EdgeCfg>,
@@ -829,7 +829,7 @@ impl GestureCfg {
             keep_drag: cfg.drag.keep_drag_on_release,
             flick: cfg.window.flick_snap,
             multi: [
-                None,
+                cfg.three.enabled.then(|| multi(3)),
                 cfg.four.enabled.then(|| multi(4)),
                 cfg.five.enabled.then(|| multi(5)),
             ],
@@ -1129,5 +1129,24 @@ mod tests {
                 .is_some()
         );
         assert!(g.multi_for(3).is_none() && g.multi_for(5).is_none());
+        // The three-finger row follows the same rule once the three-finger gestures are on.
+        cfg.three.enabled = true;
+        cfg.three.swipe_left = config::Action::Find;
+        cfg.drag.only(3);
+        let g = GestureCfg::from_config(&cfg, None);
+        assert!(
+            g.multi_for(3)
+                .unwrap()
+                .bound(MultiKind::SwipeLeft)
+                .is_none()
+        );
+        cfg.drag.only(4);
+        let g = GestureCfg::from_config(&cfg, None);
+        assert!(
+            g.multi_for(3)
+                .unwrap()
+                .bound(MultiKind::SwipeLeft)
+                .is_some()
+        );
     }
 }

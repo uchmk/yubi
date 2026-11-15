@@ -65,8 +65,8 @@ pub const NAV: [Node; 6] = [
     Node::Item(Page::General),
 ];
 
-/// The feature pages with an enable toggle (the home list). `Gesture` carries two flags (4 and 5
-/// fingers); the 4-finger flag is the one `enabled_mut` returns, the page edits both.
+/// The feature pages with an enable toggle (the home list). `Gesture` carries three flags (3, 4 and
+/// 5 fingers); the 4-finger flag is the one `enabled_mut` returns, the page edits all three.
 pub const FEATURES: [Page; 9] = [
     Page::Drag,
     Page::Gesture,
@@ -119,7 +119,7 @@ impl Page {
         match self {
             Self::Home => "Magic Trackpad の状態と設定を確認します。",
             Self::Drag => "ドラッグの始め方と、保持・一時停止を設定します。",
-            Self::Gesture => "4本指・5本指のタップ・スワイプ・ピンチに操作を割り当てます。",
+            Self::Gesture => "3本指・4本指・5本指のタップ・スワイプ・ピンチに操作を割り当てます。",
             Self::CustomPress => "指の本数と押し込みの深さごとに操作を割り当てます。",
             Self::LongHold => "指を置き続けたときの操作を設定します。",
             Self::FingerHold => "ある指を置いたまま別の指で操作し、キーを送ります。",
@@ -236,12 +236,18 @@ mod tests {
             assert_eq!(changed.len(), 1, "{page:?}");
             covered[changed[0]] = true;
         }
-        // The ジェスチャー page has a second switch (5 fingers) that `enabled_mut` does not return.
-        let before = cfg.feature_flags();
-        cfg.five.enabled ^= true;
-        let after = cfg.feature_flags();
-        for i in 0..FEATURE_COUNT {
-            covered[i] |= before[i] != after[i];
+        // The ジェスチャー page has two more switches (3 and 5 fingers) that `enabled_mut` does
+        // not return.
+        for flip in [
+            |c: &mut Config| c.three.enabled ^= true,
+            |c: &mut Config| c.five.enabled ^= true,
+        ] {
+            let before = cfg.feature_flags();
+            flip(&mut cfg);
+            let after = cfg.feature_flags();
+            for i in 0..FEATURE_COUNT {
+                covered[i] |= before[i] != after[i];
+            }
         }
         assert!(
             covered.iter().all(|c| *c),

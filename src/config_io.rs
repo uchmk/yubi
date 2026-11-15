@@ -377,7 +377,9 @@ exe_name = \"A.EXE\"
         )
         .unwrap_err();
         assert!(matches!(&err, ConfigIoError::DuplicateProfile(e) if e == "A.EXE"));
-        let err = parse_import(
+        // Every gesture id has a config field now (three fingers included): a three-finger
+        // override imports cleanly.
+        let got = parse_import(
             "schema_version = 2
 [[profiles]]
 exe_name = \"a.exe\"
@@ -385,8 +387,12 @@ exe_name = \"a.exe\"
 \"swipe.3.left\" = \"none\"
 ",
         )
-        .unwrap_err();
-        assert!(matches!(&err, ConfigIoError::UnbindableOverride(k) if k.contains("swipe.3.left")));
+        .unwrap();
+        assert!(
+            got.config.profiles[0]
+                .overrides
+                .contains_key("swipe.3.left")
+        );
         let err = parse_import(
             "schema_version = 2
 [[profiles]]

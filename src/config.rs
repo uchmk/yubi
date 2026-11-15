@@ -23,7 +23,7 @@ pub const DEFAULT_MULTI: (f32, f32) = (0.07, 0.12);
 /// Smallest usable span between the relaxed baseline and the firm level (raw pressure scale).
 pub const MIN_CALIBRATION_SPAN: f32 = 0.05;
 /// Number of feature toggles counted by [`Config::enabled_count`].
-pub const FEATURE_COUNT: usize = 10;
+pub const FEATURE_COUNT: usize = 11;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -36,6 +36,7 @@ pub struct Config {
     /// M1 stored this table as `[gestures]`.
     #[serde(alias = "gestures")]
     pub drag: Drag,
+    pub three: Three,
     pub four: Four,
     pub five: Five,
     pub press: Press,
@@ -61,6 +62,7 @@ impl Default for Config {
             gestures_enabled: true,
             general: General::default(),
             drag: Drag::default(),
+            three: Three::default(),
             four: Four::default(),
             five: Five::default(),
             press: Press::default(),
@@ -799,6 +801,21 @@ impl Drag {
             };
         }
     }
+}
+
+/// Three-finger gestures. Off by default and unbound: Windows' own three-finger gestures
+/// (app switching, search) stay in charge until the user turns these on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Three {
+    pub enabled: bool,
+    pub tap: Action,
+    pub swipe_left: Action,
+    pub swipe_right: Action,
+    pub swipe_up: Action,
+    pub swipe_down: Action,
+    pub pinch_in: Action,
+    pub pinch_out: Action,
 }
 
 /// Four-finger gestures. On by default; the swipes follow Windows' own four-finger gestures
@@ -2198,6 +2215,13 @@ impl Sensitivity {
 macro_rules! slot_of {
     ($cfg:expr, $id:expr, $($m:tt)*) => {
         match $id {
+            "tap.3" => Some(&$($m)* $cfg.three.tap),
+            "swipe.3.left" => Some(&$($m)* $cfg.three.swipe_left),
+            "swipe.3.right" => Some(&$($m)* $cfg.three.swipe_right),
+            "swipe.3.up" => Some(&$($m)* $cfg.three.swipe_up),
+            "swipe.3.down" => Some(&$($m)* $cfg.three.swipe_down),
+            "pinch.3.in" => Some(&$($m)* $cfg.three.pinch_in),
+            "pinch.3.out" => Some(&$($m)* $cfg.three.pinch_out),
             "tap.4" => Some(&$($m)* $cfg.four.tap),
             "swipe.4.left" => Some(&$($m)* $cfg.four.swipe_left),
             "swipe.4.right" => Some(&$($m)* $cfg.four.swipe_right),
@@ -2398,8 +2422,7 @@ impl Config {
         }
     }
 
-    /// The global action bound to `id`. `None` when no config field backs the id (for example
-    /// `tap.3`, which the recognizer has no binding for); `Some(Action::None)` for a bindable but
+    /// The global action bound to `id`. `None` when no config field backs the id (an unknown id); `Some(Action::None)` for a bindable but
     /// unset gesture. Hold combos are keys only.
     pub fn binding(&self, id: &GestureId) -> Option<Action> {
         if let Some(a) = slot_of!(self, id.as_str(),) {
@@ -2471,6 +2494,7 @@ impl Config {
     pub fn feature_flags(&self) -> [bool; FEATURE_COUNT] {
         [
             self.drag.any(),
+            self.three.enabled,
             self.four.enabled,
             self.five.enabled,
             self.press.enabled,
@@ -2504,6 +2528,22 @@ impl Config {
                 DragStart::TapThenMove => "タップ後に",
             };
             out.push((format!("{n}本指で{how}動かす"), what.into()));
+        }
+        if self.three.enabled {
+            let f = &self.three;
+            for (name, a) in [
+                ("3本指でタップ", &f.tap),
+                ("3本指で左にスワイプ", &f.swipe_left),
+                ("3本指で右にスワイプ", &f.swipe_right),
+                ("3本指で上にスワイプ", &f.swipe_up),
+                ("3本指で下にスワイプ", &f.swipe_down),
+                ("3本指でピンチイン", &f.pinch_in),
+                ("3本指でピンチアウト", &f.pinch_out),
+            ] {
+                if named(a) {
+                    out.push((name.into(), a.label()));
+                }
+            }
         }
         if self.four.enabled {
             let f = &self.four;
@@ -3202,8 +3242,8 @@ pub fn parse_text(text: &str) -> Result<Parsed, ParseError> {
 
     let raw = config.clone();
     config.normalize();
-    // Overrides for ids that have a name but no global field (`tap.3`, `swipe.3.left` ...) could
-    // never be resolved: drop them. Checked after normalizing so `press.N` / corner slots exist.
+    // Overrides for ids that have no global field (or are not ids at all) could never be
+    // resolved: drop them. Checked after normalizing so `press.N` / corner slots exist.
     let mut unbindable_overrides = Vec::new();
     let mut inert_overrides = Vec::new();
     let mut profiles = std::mem::take(&mut config.profiles);
@@ -4465,6 +4505,48 @@ enabled = true
     }
 
     #[test]
+    fn three_is_off_and_unbound_by_default() {
+        // A file from before `[three]` existed loads with the three-finger gestures off, so
+        // Windows' own three-finger gestures keep working after an upgrade.
+        let cfg: Config = toml::from_str(
+            "[five]
+enabled = true
+",
+        )
+        .unwrap();
+        assert_eq!(cfg.three, Three::default());
+        assert!(!cfg.three.enabled);
+        for a in [
+            &cfg.three.tap,
+            &cfg.three.swipe_left,
+            &cfg.three.swipe_right,
+            &cfg.three.swipe_up,
+            &cfg.three.swipe_down,
+            &cfg.three.pinch_in,
+            &cfg.three.pinch_out,
+        ] {
+            assert_eq!(*a, Action::None);
+        }
+        // Round trip, and the assignments list follows the switch.
+        let mut cfg = Config::default();
+        cfg.three.enabled = true;
+        cfg.three.swipe_left = Action::Find;
+        cfg.three.pinch_out = Action::WindowZoom;
+        let back: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.three, cfg.three);
+        assert!(
+            cfg.assignments()
+                .contains(&("3本指で左にスワイプ".into(), Action::Find.label()))
+        );
+        cfg.three.enabled = false;
+        assert!(
+            !cfg.assignments()
+                .iter()
+                .any(|(n, _)| n.starts_with("3本指で左"))
+        );
+    }
+
+    #[test]
     fn four_defaults_and_old_files() {
         // A file from before `[four]` existed gets the four-finger defaults.
         let cfg: Config = toml::from_str("[five]\nenabled = true\n").unwrap();
@@ -4935,12 +5017,14 @@ exe_name = \"a.exe\"
 \"swipe.4.left\" = \"none\"
 \"tap.3\" = \"none\"
 \"swipe.3.left\" = \"none\"
-\"pinch.3.in\" = \"none\"
+\"swipe.4.sideways\" = \"none\"
+\"pinch.9.in\" = \"none\"
 ";
         let p = parse_text(text).unwrap();
         let keys: Vec<_> = p.config.profiles[0].overrides.keys().cloned().collect();
-        assert_eq!(keys, ["swipe.4.left"]);
-        assert_eq!(p.unbindable_overrides.len(), 3);
+        assert_eq!(keys, ["swipe.3.left", "swipe.4.left", "tap.3"]);
+        // Unknown ids are dropped as such; every real id has a field.
+        assert!(p.unbindable_overrides.is_empty());
         assert!(p.warnings.iter().any(|w| w.contains("a.exe")));
     }
 
@@ -5062,14 +5146,10 @@ command = 5
                 assert_eq!(cfg.binding(id), Some(sentinel), "{id}");
             }
         }
-        // 7 (four) + 7 (five) + 10 (press) + 5 (long hold) + 24 (corners) + 20 (hold combos).
-        assert_eq!(bound, 73);
-        // Ids without a field refuse.
-        for id in ["tap.3", "swipe.3.up", "swipe.3.left", "pinch.3.in"] {
-            let id = GestureId::parse(id).unwrap();
-            assert_eq!(cfg.binding(&id), None);
-            assert!(!cfg.set_binding(&id, Action::Find));
-        }
+        // 7 (three) + 7 (four) + 7 (five) + 10 (press) + 5 (long hold) + 24 (corners) + 20 (hold combos).
+        assert_eq!(bound, 80);
+        // Every id of the config is bindable now; an unknown token is not an id at all.
+        assert_eq!(bound, GestureId::all().len());
         // Walk the saved file: every action-valued entry (outside [edge]) is a sentinel.
         let value = toml::Value::try_from(&cfg).unwrap();
         fn walk(v: &toml::Value, path: &str, out: &mut Vec<(String, String)>) {
@@ -5102,7 +5182,7 @@ command = 5
                 );
             }
         }
-        assert_eq!(sentinels, 73);
+        assert_eq!(sentinels, 80);
     }
 
     #[test]

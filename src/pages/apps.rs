@@ -498,14 +498,15 @@ fn detail(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState, i: usiz
         group(ui, t, |g| scroll_speed_row(g, t, p, scroll_on));
 
         type Pick<'a> = Box<dyn Fn(&Info) -> bool + 'a>;
-        let on_page = |page: Page, five: Option<bool>| -> Pick<'static> {
+        let on_page = |page: Page, tab: Option<usize>| -> Pick<'static> {
             Box::new(move |x: &Info| {
-                x.page == page && five.is_none_or(|f| (features::tab_of_key(&x.id) == Some(1)) == f)
+                x.page == page && tab.is_none_or(|want| features::tab_of_key(&x.id) == Some(want))
             })
         };
-        let sections: [(&str, Pick); 3] = [
-            ("4本指ジェスチャー", on_page(Page::Gesture, Some(false))),
-            ("5本指ジェスチャー", on_page(Page::Gesture, Some(true))),
+        let sections: [(&str, Pick); 4] = [
+            ("3本指ジェスチャー", on_page(Page::Gesture, Some(0))),
+            ("4本指ジェスチャー", on_page(Page::Gesture, Some(1))),
+            ("5本指ジェスチャー", on_page(Page::Gesture, Some(2))),
             (Page::CustomPress.label(), on_page(Page::CustomPress, None)),
         ];
         for (title, pick) in &sections {

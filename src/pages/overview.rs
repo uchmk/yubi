@@ -118,6 +118,7 @@ pub fn feature_on(cfg: &Config, page: Page) -> bool {
 /// has one switch per finger count).
 pub fn feature_on_key(cfg: &Config, key: &str) -> bool {
     match key.split('.').collect::<Vec<_>>().as_slice() {
+        ["tap" | "swipe" | "pinch", "3", ..] => cfg.three.enabled,
         ["tap" | "swipe" | "pinch", "5", ..] => cfg.five.enabled,
         ["tap" | "swipe" | "pinch", ..] => cfg.four.enabled,
         _ => feature_on(cfg, page_of(key)),
@@ -435,12 +436,18 @@ fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conf
     // Features that are off but still have bindings (one entry per page, and per finger count on
     // the ジェスチャー page).
     type Pick = Box<dyn Fn(&Row) -> bool>;
-    let sections: [(Page, &str, Option<u8>, Pick); 8] = [
+    let sections: [(Page, &str, Option<u8>, Pick); 9] = [
+        (
+            Page::Gesture,
+            "3本指ジェスチャー",
+            Some(3),
+            Box::new(|r| r.page == Page::Gesture && fingers_of(&r.key) == Some(3)),
+        ),
         (
             Page::Gesture,
             "4本指ジェスチャー",
             Some(4),
-            Box::new(|r| r.page == Page::Gesture && fingers_of(&r.key) != Some(5)),
+            Box::new(|r| r.page == Page::Gesture && fingers_of(&r.key) == Some(4)),
         ),
         (
             Page::Gesture,
@@ -478,6 +485,7 @@ fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conf
     for (page, title, count, pick) in &sections {
         let page = *page;
         let on = match count {
+            Some(3) => cfg.three.enabled,
             Some(5) => cfg.five.enabled,
             Some(_) => cfg.four.enabled,
             None => feature_on(cfg, page),
@@ -914,7 +922,7 @@ mod tests {
         let ids = overridable_ids(&Config::default());
         let has = |s: &str| ids.iter().any(|i| i.as_str() == s);
         assert!(has("swipe.4.left") && has("pinch.5.in") && has("press.3.deep"));
-        assert!(!has("tap.3") && !has("swipe.3.left"));
+        assert!(has("tap.3") && has("swipe.3.left") && has("pinch.3.out"));
         assert!(
             !ids.iter()
                 .any(|i| { i.as_str().starts_with("corner.") || i.as_str().starts_with("hold.") })
@@ -1068,6 +1076,44 @@ mod tests {
                 .iter()
                 .any(|c| c.reason.contains("スワイプはドラッグとして"))
         );
+    }
+
+    #[test]
+    fn three_fingers_follow_the_rules_of_four_and_five() {
+        assert_eq!(gesture_name("swipe.3.up"), "3本指で上にスワイプ");
+        assert_eq!(page_of("pinch.3.in"), Page::Gesture);
+        let mut cfg = base();
+        cfg.three.swipe_left = Action::Find;
+        // Off with a binding: flagged on its own, apart from the four-finger switch.
+        let t = build(&cfg, &WIN_OFF);
+        let c: Vec<_> = t
+            .conflicts
+            .iter()
+            .filter(|c| c.kind == ConflictKind::Disabled)
+            .collect();
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].rows, vec!["swipe.3.left".to_owned()]);
+        assert!(c[0].reason.contains("3本指"));
+        // On: no longer flagged, but Windows' three-finger gestures win while they are on.
+        cfg.three.enabled = true;
+        let t = build(&cfg, &WIN_OFF);
+        assert!(t.conflicts.is_empty(), "{:?}", t.conflicts);
+        let t = build(&cfg, &WIN_ON);
+        let w = t
+            .conflicts
+            .iter()
+            .find(|c| c.kind == ConflictKind::WindowsWins)
+            .expect("windows wins");
+        assert!(w.rows.contains(&"swipe.3.left".to_owned()));
+        // A touch-and-move drag on the same count shadows the swipes.
+        cfg.drag.only(3);
+        let t = build(&cfg, &WIN_OFF);
+        let o = t
+            .conflicts
+            .iter()
+            .find(|c| c.kind == ConflictKind::Overlap)
+            .expect("overlap");
+        assert!(o.rows.contains(&"swipe.3.left".to_owned()));
     }
 
     #[test]

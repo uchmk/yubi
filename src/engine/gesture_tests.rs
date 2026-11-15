@@ -688,6 +688,119 @@ fn four_off_gives_nothing() {
     );
 }
 
+// ---- three fingers ----
+
+fn three_cfg() -> Config {
+    let mut cfg = Config::default();
+    cfg.drag.disable_all();
+    cfg.three.enabled = true;
+    cfg.three.tap = config::Action::Find;
+    cfg.three.swipe_left = config::Action::DesktopNext;
+    cfg.three.swipe_right = config::Action::DesktopPrev;
+    cfg.three.swipe_up = config::Action::TaskView;
+    cfg.three.swipe_down = config::Action::ShowDesktop;
+    cfg.three.pinch_in = config::Action::AppSwitch;
+    cfg.three.pinch_out = config::Action::WindowZoom;
+    cfg
+}
+
+fn three_swipe(cfg: &Config, dx: f32, dy: f32) -> Vec<config::Action> {
+    let mut s = Seq::default();
+    let p = ring_n(3, 1.0);
+    s.still(&p, 100);
+    s.glide(&p, dx, dy, 250);
+    s.lift(0);
+    triggers(&s.run(cfg))
+}
+
+#[test]
+fn three_swipes_fire_the_bound_actions_when_enabled() {
+    let cfg = three_cfg();
+    assert_eq!(
+        three_swipe(&cfg, -25.0, 0.0),
+        vec![config::Action::DesktopNext]
+    );
+    assert_eq!(
+        three_swipe(&cfg, 25.0, 0.0),
+        vec![config::Action::DesktopPrev]
+    );
+    assert_eq!(
+        three_swipe(&cfg, 0.0, -25.0),
+        vec![config::Action::TaskView]
+    );
+    assert_eq!(
+        three_swipe(&cfg, 0.0, 25.0),
+        vec![config::Action::ShowDesktop]
+    );
+}
+
+#[test]
+fn three_fires_nothing_when_off_or_by_default() {
+    let mut cfg = three_cfg();
+    cfg.three.enabled = false;
+    assert!(three_swipe(&cfg, -25.0, 0.0).is_empty());
+    let mut s = Seq::default();
+    s.still(&ring_n(3, 1.0), 60);
+    s.lift(0);
+    assert!(triggers(&s.run(&cfg)).is_empty());
+    // The default config has the three-finger gestures off and unbound.
+    assert!(three_swipe(&Config::default(), -25.0, 0.0).is_empty());
+}
+
+#[test]
+fn three_tap_and_pinch() {
+    let cfg = three_cfg();
+    let mut s = Seq::default();
+    s.still(&ring_n(3, 1.0), 60);
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![config::Action::Find]);
+    let mut s = Seq::default();
+    s.still(&ring_n(3, 1.0), 100);
+    for i in 1..=18u64 {
+        let k = 1.0 + (0.6 - 1.0) * i as f32 / 18.0;
+        s.frames.push(frame(s.t, &ring_n(3, k)));
+        s.t += STEP;
+    }
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![config::Action::AppSwitch]);
+}
+
+#[test]
+fn three_swipes_yield_to_a_three_finger_drag() {
+    let mut cfg = three_cfg();
+    cfg.drag.only(3);
+    cfg.drag.lift_timeout_ms = 300;
+    cfg.drag.keep_drag_on_release = false;
+    let mut s = Seq::default();
+    let p = ring_n(3, 1.0);
+    s.still(&p, 100);
+    s.glide(&p, -25.0, 0.0, 250);
+    s.lift(0);
+    let out = s.run(&cfg);
+    assert!(triggers(&out).is_empty());
+    assert_eq!(count(&out, |a| matches!(a, Action::DragBegin)), 1);
+}
+
+#[test]
+fn three_swipe_follows_a_per_app_override() {
+    let mut cfg = three_cfg();
+    let mut p = Profile {
+        exe_name: "app.exe".into(),
+        enabled: true,
+        ..Profile::default()
+    };
+    p.overrides
+        .insert("swipe.3.left".into(), config::Action::Find);
+    cfg.profiles.push(p);
+    let g = super::types::GestureCfg::from_config(&cfg, Some("app.exe"));
+    assert_eq!(g.multi_for(3).unwrap().swipe_left, config::Action::Find);
+    let g = super::types::GestureCfg::from_config(&cfg, Some("other.exe"));
+    assert_eq!(
+        g.multi_for(3).unwrap().swipe_left,
+        config::Action::DesktopNext
+    );
+}
+
 // ---- per-app filter and thresholds ----
 
 #[test]

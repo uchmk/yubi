@@ -60,7 +60,7 @@ pub fn corner(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
         group(ui, t, |g| {
             g.slider_row(
                 "角の大きさ",
-                "この四角の中から始めた操作だけが、コーナー操作になります。",
+                "この四角の中から始めた操作だけが、コーナー操作になります。操作を割り当てた角では、端のスライダーは始まりません。",
                 SliderSpec {
                     min: f64::from(Corners::SIZE.min),
                     max: f64::from(Corners::SIZE.max),

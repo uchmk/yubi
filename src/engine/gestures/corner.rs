@@ -12,11 +12,11 @@
 //! Once it commits, the cursor is frozen until the finger lifts and the slot's action runs:
 //! a one-shot action fires once; the window resize follows the finger live until it lifts.
 //!
-//! Arbitration with the edge slider: the edge slider starts from the same few millimetres, so
-//! while a corner swipe can still claim the touch (inside the window, and the direction has an
-//! action) the edge slider holds back (`would_claim`). When the slot of that direction is off,
-//! the swipe is not the corner's, and the edge slider may take it as usual. If both commit in
-//! the same frame the corner wins (`Priority::Corner`).
+//! Arbitration with the edge slider: the edge slider starts from the same few millimetres, so a
+//! corner zone that has any slot set belongs to the corner: an edge slide never starts there
+//! (`owns_zone`). A corner whose three slots are all off leaves its zone to the edge slider. As a
+//! second guard, while a corner swipe can still claim the touch the edge slider holds back
+//! (`would_claim`), and if both commit in the same frame the corner wins (`Priority::Corner`).
 
 use crate::config::{Action as Cfg, CornerDir};
 use crate::engine::arbitration::{Owner, Proposal};
@@ -90,6 +90,19 @@ pub fn classify(corner: usize, dx: f32, dy: f32) -> Option<CornerDir> {
     } else {
         None
     }
+}
+
+/// True when `start` is inside the zone of a corner that has at least one slot set: the edge
+/// slider does not start there.
+pub fn owns_zone(ctx: &Ctx, start: Point) -> bool {
+    let (Some(cfg), Some(dims)) = (ctx.g.corner.as_ref(), ctx.dims) else {
+        return false;
+    };
+    zone_of(start, dims, cfg.size_mm).is_some_and(|corner| {
+        CornerDir::ALL
+            .into_iter()
+            .any(|dir| cfg.slot(corner, dir).is_some())
+    })
 }
 
 /// True while the touch that landed at `start` at `t0` may still become a corner swipe that has
@@ -505,8 +518,21 @@ mod tests {
     }
 
     #[test]
-    fn edge_takes_the_slide_when_the_corner_slot_is_off() {
+    fn edge_never_starts_in_a_corner_zone_that_has_a_slot() {
+        // Only the vertical slot is set, and the slide goes along the top: not the corner's
+        // swipe, but its zone is still kept from the edge slider.
         let mut cfg = cfg_with(0, Cfg::None, Cfg::Find, Cfg::None);
+        cfg.edge.enabled = true;
+        cfg.edge.top = EdgeTarget::Volume;
+        let out = run(&rest_then_slide_along_top(), &cfg);
+        assert!(triggers(&out).is_empty());
+        assert!(!out.iter().any(|a| matches!(a, Action::EdgeStep { .. })));
+    }
+
+    #[test]
+    fn edge_takes_the_zone_of_a_corner_with_every_slot_off() {
+        // Another corner is set; the top-left one is all off.
+        let mut cfg = cfg_with(1, Cfg::Find, Cfg::Find, Cfg::Find);
         cfg.edge.enabled = true;
         cfg.edge.top = EdgeTarget::Volume;
         let out = run(&rest_then_slide_along_top(), &cfg);

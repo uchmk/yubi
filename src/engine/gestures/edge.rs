@@ -152,6 +152,11 @@ impl EdgeState {
                     }
                 };
                 let dims = ctx.dims?;
+                // A corner zone with a slot set is the corner's, not the edge slider's.
+                if super::corner::owns_zone(ctx, start) {
+                    self.phase = Phase::Dead;
+                    return None;
+                }
                 self.phase = match band_of(start, dims, ctx.th.edge_strip_mm, |s| {
                     *cfg.target(s) != crate::config::EdgeTarget::None
                 }) {

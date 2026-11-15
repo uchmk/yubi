@@ -7,6 +7,7 @@ use super::Cmd;
 use super::overview::{feature_on, gesture_name, overridable_ids, page_of, profile_title};
 use crate::config::{
     Action, ActionKind, Config, Cursor, CustomEdge, EDGE_KEYS, EdgeKind, EdgeTarget, Profile,
+    Scroll,
 };
 use crate::engine::resolve::{basename, profile_matches};
 use crate::icons;
@@ -135,7 +136,10 @@ pub fn apply_edge_choice(p: &mut Profile, key: &str, choice: EdgeChoice) {
 
 /// How many gestures and edges the profile replaces.
 pub fn override_count(p: &Profile) -> usize {
-    p.overrides.len() + p.edge_overrides.len() + usize::from(p.cursor_speed.is_some())
+    p.overrides.len()
+        + p.edge_overrides.len()
+        + usize::from(p.cursor_speed.is_some())
+        + usize::from(p.scroll_speed.is_some())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -447,6 +451,7 @@ fn detail(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState, i: usiz
         .collect();
 
     let global_speed = cfg.cursor.speed;
+    let scroll_on = cfg.scroll.enabled;
     let p = &mut cfg.profiles[i];
     let count = override_count(p);
     ui.add_enabled_ui(!blocked, |ui| {
@@ -459,6 +464,8 @@ fn detail(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState, i: usiz
         }
         section_header(ui, t, "カーソル");
         group(ui, t, |g| cursor_row(g, t, p, global_speed));
+        section_header(ui, t, "スクロール");
+        group(ui, t, |g| scroll_speed_row(g, t, p, scroll_on));
 
         let options = Choice::options();
         for page in [Page::Four, Page::Five, Page::CustomPress] {
@@ -544,6 +551,7 @@ fn detail(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState, i: usiz
                 p.overrides.clear();
                 p.edge_overrides.clear();
                 p.cursor_speed = None;
+                p.scroll_speed = None;
             }
         }
     });
@@ -608,6 +616,52 @@ fn cursor_row(g: &mut widgets::Group<'_>, t: &Tokens, p: &mut Profile, global: O
     }
 }
 
+/// The per-app two-finger scroll speed: 「全体と同じ」 or a multiplier of its own, applied on top
+/// of the global speeds. It only applies while yubi's two-finger scroll is on.
+fn scroll_speed_row(g: &mut widgets::Group<'_>, t: &Tokens, p: &mut Profile, scroll_on: bool) {
+    let desc = if scroll_on {
+        "全体の速さに掛ける倍率です。".to_owned()
+    } else {
+        "全体で 2 本指スクロールを使うがオフのため、使われません。".to_owned()
+    };
+    g.row(None, "スクロールの速度", &desc, |ui| {
+        ui.add_enabled_ui(scroll_on, |ui| {
+            let mut choice = SpeedChoice::of(p.scroll_speed);
+            if combo_sized(
+                ui,
+                t,
+                t.combo_w,
+                "profile-scroll-speed",
+                &mut choice,
+                &[SpeedChoice::Inherit, SpeedChoice::Own],
+                SpeedChoice::label,
+            ) {
+                apply_scroll_choice(p, choice == SpeedChoice::Own);
+            }
+        });
+    });
+    if let Some(v) = p.scroll_speed.as_mut() {
+        let r = Scroll::SPEED;
+        let spec = SliderSpec {
+            min: f64::from(r.min),
+            max: f64::from(r.max),
+            step: 0.1,
+            decimals: 1,
+            suffix: " 倍",
+        };
+        g.row(None, "このアプリの値", "", |ui| {
+            ui.add_enabled_ui(scroll_on, |ui| {
+                widgets::slider_with_value(ui, t, v, spec);
+            });
+        });
+    }
+}
+
+/// Switch the profile between 「全体と同じ」 and a multiplier of its own (starting at 1.0).
+fn apply_scroll_choice(p: &mut Profile, own: bool) {
+    p.scroll_speed = own.then_some(1.0);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpeedChoice {
     Inherit,
@@ -615,7 +669,7 @@ enum SpeedChoice {
 }
 
 impl SpeedChoice {
-    fn of(v: Option<u8>) -> Self {
+    fn of<T>(v: Option<T>) -> Self {
         if v.is_some() {
             Self::Own
         } else {
@@ -747,6 +801,17 @@ mod tests {
     }
 
     #[test]
+    fn the_scroll_speed_choice_starts_at_one() {
+        let mut p = profile("a.exe");
+        apply_scroll_choice(&mut p, true);
+        assert_eq!(p.scroll_speed, Some(1.0));
+        assert_eq!(override_count(&p), 1);
+        apply_scroll_choice(&mut p, false);
+        assert_eq!(p.scroll_speed, None);
+        assert_eq!(override_count(&p), 0);
+    }
+
+    #[test]
     fn the_cursor_speed_choice_starts_at_the_global_value() {
         let mut p = profile("a.exe");
         apply_speed_choice(&mut p, true, Some(14));
@@ -754,7 +819,7 @@ mod tests {
         assert_eq!(override_count(&p), 1);
         apply_speed_choice(&mut p, false, Some(14));
         assert_eq!(p.cursor_speed, None);
-        assert_eq!(SpeedChoice::of(None), SpeedChoice::Inherit);
+        assert_eq!(SpeedChoice::of::<u8>(None), SpeedChoice::Inherit);
     }
 
     #[test]

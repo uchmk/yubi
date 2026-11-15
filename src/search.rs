@@ -200,9 +200,41 @@ const ROWS: &[Entry] = &[
         "このアプリだけタッチパッドのカーソルの速さを変える",
     ),
     e(
+        Page::Profiles,
+        "スクロールの速度（アプリごと）",
+        "このアプリだけ 2 本指スクロールの速さを変える",
+    ),
+    e(
         Page::Sensitivity,
         "yubi でカーソルの速度を管理する",
         "Windows のタッチパッドの速度を yubi が保つ",
+    ),
+    e(
+        Page::Sensitivity,
+        "2 本指スクロールを使う",
+        "yubi が 2 本指スクロールを行う",
+    ),
+    e(
+        Page::Sensitivity,
+        "縦の速さ",
+        "2 本指スクロールの縦方向の倍率",
+    ),
+    e(
+        Page::Sensitivity,
+        "横の速さ",
+        "2 本指スクロールの横方向の倍率",
+    ),
+    e(Page::Sensitivity, "加速", "速くなぞるほど大きくスクロール"),
+    e(
+        Page::Sensitivity,
+        "スクロールの向き",
+        "ナチュラル・従来（スクロールの方向）",
+    ),
+    e(Page::Sensitivity, "縦横を固定する", "スクロールの軸ロック"),
+    e(
+        Page::Sensitivity,
+        "慣性スクロール",
+        "指を離したあともスクロールを続ける。慣性の強さ",
     ),
     e(Page::Sensitivity, "既定に戻す", "感度の値を初期値にします"),
     e(Page::Haptic, "押し込みの強さ", "ライブ表示と測定"),

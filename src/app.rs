@@ -44,6 +44,11 @@ pub struct App {
     demo_frames: u64,
     /// Windows gesture registry values, read when the 全般 page opens and after each change.
     win_values: win_gestures::Values,
+    /// Windows' two-finger scroll state (`None`: unknown).
+    win_pan: Option<bool>,
+    /// When `win_pan` was last read, and whether the window had focus in the previous frame.
+    win_pan_read_at: Option<std::time::Instant>,
+    was_focused: bool,
     win_read_error: Option<String>,
     win_message: Option<String>,
     win_page_was_open: bool,
@@ -105,6 +110,9 @@ impl App {
             press_ui: press::PressUi::default(),
             demo_frames: 0,
             win_values: [None; 4],
+            win_pan: None,
+            win_pan_read_at: None,
+            was_focused: true,
             win_read_error: None,
             win_message: None,
             win_page_was_open: false,
@@ -243,7 +251,13 @@ impl App {
         self.config_path.with_file_name(win_gestures::BACKUP_FILE)
     }
 
+    fn read_win_pan(&mut self) {
+        self.win_pan = win_gestures::pan_enabled();
+        self.win_pan_read_at = Some(std::time::Instant::now());
+    }
+
     fn refresh_win_values(&mut self) {
+        self.read_win_pan();
         match win_gestures::read_values() {
             Ok(v) => {
                 self.win_values = v;
@@ -311,6 +325,11 @@ impl App {
                 self.report("元に戻", r);
             }
             Cmd::TogglePause => self.engine.pause.toggle(),
+            Cmd::OpenTouchpadSettings => {
+                let _ = Command::new("explorer")
+                    .arg("ms-settings:devices-touchpad")
+                    .spawn();
+            }
             Cmd::OpenConfigFolder => {
                 if let Some(dir) = self.config_path.parent() {
                     let _ = std::fs::create_dir_all(dir);
@@ -518,7 +537,7 @@ impl App {
             Page::Overview => {
                 return overview::page(ui, t, cfg, &self.win_values, &mut self.overview);
             }
-            Page::Sensitivity => sensitivity::sensitivity(ui, t, cfg),
+            Page::Sensitivity => return sensitivity::sensitivity(ui, t, cfg, self.win_pan),
             Page::Haptic => press::page(ui, t, cfg, self.diagnostics.state(), &mut self.press_ui),
             Page::Monitor => self.diagnostics.monitor(ui, t),
             Page::Practice => self.diagnostics.practice(ui, t, &mut self.practice_on),
@@ -593,12 +612,25 @@ impl eframe::App for App {
         // Pages that show the Windows-gesture state (or warn about it) re-read it when opened.
         let general_open = matches!(
             self.page,
-            Page::General | Page::Drag | Page::Window | Page::Overview
+            Page::General | Page::Drag | Page::Window | Page::Overview | Page::Sensitivity
         );
         if general_open && !self.win_page_was_open {
             self.refresh_win_values();
         }
         self.win_page_was_open = general_open;
+        // The user may change the Windows setting the 感度 page warns about and come back: read
+        // it again when the window regains focus (a cheap registry read, at most once a second).
+        let focused = ui.input(|i| i.focused);
+        if focused
+            && !self.was_focused
+            && self.page == Page::Sensitivity
+            && self
+                .win_pan_read_at
+                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1))
+        {
+            self.read_win_pan();
+        }
+        self.was_focused = focused;
         self.general_state.set_visible(self.page == Page::General);
         let narrow = ui.ctx().content_rect().width() < t.nav_auto_collapse_w;
         let collapsed = if narrow {

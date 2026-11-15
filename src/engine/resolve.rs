@@ -69,6 +69,16 @@ pub fn resolve_edge(cfg: &Config, exe: Option<&str>, key: &str) -> EdgeTarget {
     }
 }
 
+/// The scroll-speed multiplier of the profile for `exe` (1.0 without one, or when the profile
+/// switches yubi off or has no override).
+pub fn scroll_speed(cfg: &Config, exe: Option<&str>) -> f32 {
+    matching_profile(&cfg.profiles, exe)
+        .filter(|p| p.enabled)
+        .and_then(|p| p.scroll_speed)
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +228,22 @@ mod tests {
             EdgeTarget::Zoom
         );
         assert_eq!(resolve_edge(&cfg, None, "edge.bogus"), EdgeTarget::None);
+    }
+
+    #[test]
+    fn scroll_speed_resolves_by_basename() {
+        let mut p = profile("Code.exe", true);
+        p.scroll_speed = Some(2.5);
+        let mut off = profile("game.exe", false);
+        off.scroll_speed = Some(3.0);
+        let mut cfg = cfg_with(p);
+        cfg.profiles.push(off);
+        assert_eq!(scroll_speed(&cfg, Some(r"C:\x\code.EXE")), 2.5);
+        assert_eq!(scroll_speed(&cfg, Some("other.exe")), 1.0);
+        assert_eq!(scroll_speed(&cfg, None), 1.0);
+        // A profile that switches yubi off gives no multiplier.
+        assert_eq!(scroll_speed(&cfg, Some("game.exe")), 1.0);
+        cfg.profiles[0].scroll_speed = Some(f32::NAN);
+        assert_eq!(scroll_speed(&cfg, Some("code.exe")), 1.0);
     }
 }

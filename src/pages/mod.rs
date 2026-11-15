@@ -21,4 +21,6 @@ pub enum Cmd {
     DisableWindowsGestures,
     RestoreWindowsGestures,
     TogglePause,
+    /// Open Windows' touchpad settings (`ms-settings:devices-touchpad`).
+    OpenTouchpadSettings,
 }

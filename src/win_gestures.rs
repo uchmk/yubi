@@ -212,6 +212,22 @@ fn move_backup_aside(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Whether Windows' own "2 本指でドラッグしてスクロール" is on (read through the touchpad API,
+/// [`crate::os::touchpad::two_finger_scroll_enabled`]): `None` when it cannot be read. `YUBI_WIN_PAN=on|off|unknown` overrides it for screenshots (only with `YUBI_SHOT` set). Kept apart from [`Values`]
+/// (the 3- and 4-finger set) so that array and its backup stay as they are.
+pub fn pan_enabled() -> Option<bool> {
+    // A debug override: only honoured together with `YUBI_SHOT`, never in a normal run.
+    if std::env::var_os("YUBI_SHOT").is_some() {
+        match std::env::var("YUBI_WIN_PAN").as_deref() {
+            Ok("on") => return Some(true),
+            Ok("off") => return Some(false),
+            Ok("unknown") => return None,
+            _ => {}
+        }
+    }
+    crate::os::touchpad::two_finger_scroll_enabled()
+}
+
 #[cfg(windows)]
 pub use reg::{apply, read_values};
 

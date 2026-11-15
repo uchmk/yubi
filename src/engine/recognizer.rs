@@ -16,6 +16,7 @@ use super::gestures::edge::EdgeState;
 use super::gestures::multi::{MultiHit, MultiState};
 use super::gestures::press::{PressHit, PressState};
 use super::gestures::ring::RingState;
+use super::gestures::scroll::ScrollState;
 use super::gestures::window::WindowState;
 use super::tracking::{Environment, Tracker};
 use super::types::{Ctx, GestureCfg, Point, SessionId, centroid};
@@ -65,6 +66,9 @@ pub struct Recognizer {
     press: PressState,
     /// Raw pressure of every active contact in the latest frame (median of the last three).
     pressures: Vec<f32>,
+    scroll: ScrollState,
+    /// The app (exe) the pan that started the running glide was made in.
+    glide_exe: Option<String>,
 }
 
 impl Recognizer {
@@ -110,6 +114,16 @@ impl Recognizer {
     pub fn set_foreground(&mut self, exe: Option<&str>, blocked: bool) {
         self.env.exe = exe.map(|e| e.trim().to_owned());
         self.env.app_blocked = blocked;
+        // Only a glide after the lift follows the app: it must not leak into another window.
+        if self.scroll.glide_deadline().is_some() && (blocked || self.env.exe != self.glide_exe) {
+            self.stop_glide();
+        }
+    }
+
+    /// Stop a scroll glide in flight (config change, pause, another app).
+    pub fn stop_glide(&mut self) {
+        self.scroll.stop_glide();
+        self.glide_exe = None;
     }
 
     /// The engine bumps this whenever the config changes; latched with the next touch.
@@ -160,6 +174,10 @@ impl Recognizer {
             .filter(|c| c.tip && c.confidence)
             .collect();
         let obs = self.tracker.observe(t, &active);
+        if !active.is_empty() {
+            // A touch stops a glide.
+            self.scroll.stop_glide();
+        }
         self.cur = active.iter().map(|c| (c.x_mm, c.y_mm)).collect();
         self.centroid = centroid(&self.cur);
         self.pressures = self
@@ -193,6 +211,7 @@ impl Recognizer {
     /// Fire timers that are due at `now_us`.
     pub fn tick(&mut self, now_us: u64) -> Vec<Action> {
         let mut out = Vec::new();
+        self.scroll.glide_tick(now_us, &mut out);
         if self
             .tracker
             .stale_deadline(self.th.stale_us)
@@ -215,6 +234,7 @@ impl Recognizer {
             self.session
                 .as_ref()
                 .and_then(|_| self.press.deadline(&self.th)),
+            self.scroll.glide_deadline(),
             self.session
                 .as_ref()
                 .and_then(|_| self.tracker.stale_deadline(self.th.stale_us)),
@@ -279,6 +299,7 @@ impl Recognizer {
         self.edge.release(out);
         self.ring.cancel(out);
         self.press.reset();
+        self.scroll.cancel();
         self.arb.clear();
         self.session = None;
         self.latched = None;
@@ -320,7 +341,7 @@ impl Recognizer {
         let Some(s) = self.session.take() else {
             return;
         };
-        self.latched = None;
+        let touch_exe = self.latched.take().and_then(|e| e.exe);
         let duration = t.saturating_sub(s.start_us);
         let mut is_tap = false;
         if s.peak > 0 {
@@ -337,6 +358,7 @@ impl Recognizer {
             }));
         }
         self.finish_gestures(&s, is_tap, t, out);
+        self.glide_exe = self.scroll.glide_deadline().and(touch_exe);
         if self.tracker.stable != 0 {
             self.tracker.stable = 0;
             out.push(Action::Debug(GestureEvent::FingerCount(0)));
@@ -369,6 +391,7 @@ impl Recognizer {
         self.edge.release(out);
         self.ring.finish(&self.g, t, out);
         self.multi.finish();
+        self.scroll.finish(self.g.scroll.as_ref(), &self.th, t);
         self.arb.clear();
     }
 
@@ -430,6 +453,10 @@ impl Recognizer {
                 press_hit = Some(h);
             }
         }
+        if ctx.g.scroll.is_some() {
+            let free = self.arb.is_free_for(Owner::Scroll);
+            proposals.extend(self.scroll.step(&ctx, free));
+        }
         let winner = self.arb.resolve(&proposals);
         if winner != Some(Owner::Pressure) && press_hit.take().is_some() {
             self.press.lost();
@@ -447,6 +474,11 @@ impl Recognizer {
             Some(Owner::Pressure) => {
                 if let Some(h) = press_hit {
                     self.press.commit(h, ctx.g.ticks, out);
+                }
+            }
+            Some(Owner::Scroll) => {
+                if let Some(cfg) = ctx.g.scroll.as_ref() {
+                    self.scroll.commit(&ctx, cfg, out);
                 }
             }
             None => {}
@@ -689,6 +721,46 @@ mod tests {
         assert!(latched.app_blocked);
         assert_eq!(latched.exe.as_deref(), Some("b.exe"));
         assert_eq!(latched.config_gen, 2);
+    }
+
+    /// A fast two-finger pan in `exe`, lifted; returns the recognizer with a glide in flight.
+    fn gliding(exe: &str) -> Recognizer {
+        let mut cfg = Config::default();
+        cfg.scroll.enabled = true;
+        cfg.scroll.inertia = true;
+        let mut r = Recognizer::default();
+        r.set_foreground(Some(exe), false);
+        let mut t = 0u64;
+        for k in 0..30 {
+            let y = 40.0 + k as f32 * 1.5;
+            r.step(&frame(t, vec![c(1, 40.0, y), c(2, 50.0, y)]), &cfg);
+            t += 11;
+        }
+        r.step(&frame(t, vec![]), &cfg);
+        assert!(r.scroll.glide_deadline().is_some(), "no glide to test");
+        r
+    }
+
+    #[test]
+    fn a_glide_stops_when_the_foreground_app_changes() {
+        let mut r = gliding("a.exe");
+        // The same app (polled again) keeps it.
+        r.set_foreground(Some("a.exe"), false);
+        assert!(r.next_deadline().is_some());
+        r.set_foreground(Some("b.exe"), false);
+        assert!(r.scroll.glide_deadline().is_none());
+        // A blocked app stops it too.
+        let mut r = gliding("a.exe");
+        r.set_foreground(Some("a.exe"), true);
+        assert!(r.scroll.glide_deadline().is_none());
+        // The engine's config change path.
+        let mut r = gliding("a.exe");
+        r.stop_glide();
+        assert!(r.next_deadline().is_none());
+        // Pausing resets the recognizer: a glide must not keep scrolling.
+        let mut r = gliding("a.exe");
+        r.reset();
+        assert!(r.scroll.glide_deadline().is_none());
     }
 
     #[test]

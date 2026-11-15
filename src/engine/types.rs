@@ -6,7 +6,7 @@
 use std::fmt;
 
 use super::gestures::press::PressCfg;
-use super::resolve::{resolve, resolve_edge};
+use super::resolve::{self, resolve, resolve_edge};
 use crate::config::{self, Config, Sensitivity};
 
 pub type Point = (f32, f32);
@@ -303,6 +303,12 @@ pub enum Action {
     WindowMoveEnd {
         snap: Option<SnapDir>,
     },
+    /// Two-finger scroll output in `WHEEL_DELTA` units (120 = one notch), at most one per input
+    /// frame. Positive `v` scrolls up and positive `h` scrolls right (the Win32 wheel convention).
+    Scroll {
+        h: i32,
+        v: i32,
+    },
     /// One-shot (multi-finger tap / pinch / swipe / press); never `config::Action::None`.
     Trigger(config::Action),
     /// Freeze the cursor (and hold clicks) from now on; `Off` always runs, even in a blocked app.
@@ -394,6 +400,26 @@ pub struct Thresholds {
     pub press_rearm_us: u64,
     /// Press: centroid movement beyond this before it fires cancels it (mm).
     pub press_move_mm: f32,
+    /// Scroll: the centroid of the two fingers must travel this far before scrolling begins (it
+    /// is raised above the tap travel so a tap never scrolls).
+    pub scroll_start_mm: f32,
+    /// Scroll: the centroid travel is at least this many times the change of finger spread
+    /// (otherwise the fingers are pinching, which stays Windows').
+    pub scroll_pan_ratio: f32,
+    /// Scroll: a spread change this large before the scroll begins rules the touch out as a pan.
+    pub scroll_pinch_mm: f32,
+    /// Scroll: wheel units per millimetre of centroid travel at speed 1.0 (before acceleration).
+    pub scroll_units_per_mm: f32,
+    /// Scroll axis lock: the dominant axis needs this many times the other one.
+    pub scroll_axis_ratio: f32,
+    /// Scroll inertia: the lift speed is measured over this long before the lift.
+    pub inertia_window_us: u64,
+    /// Scroll inertia: the last pan sample must be this recent at the lift.
+    pub inertia_stale_us: u64,
+    /// Scroll inertia: below this speed (wheel units per second) the glide ends (or never starts).
+    pub inertia_min_units_s: f32,
+    /// Scroll inertia: the fastest glide start (wheel units per second).
+    pub inertia_max_units_s: f32,
 }
 
 impl Default for Thresholds {
@@ -425,6 +451,15 @@ impl Default for Thresholds {
             press_persist_us: 22_000,
             press_rearm_us: 50_000,
             press_move_mm: 3.0,
+            scroll_start_mm: 3.0,
+            scroll_pan_ratio: 1.5,
+            scroll_pinch_mm: 4.0,
+            scroll_units_per_mm: 20.0,
+            scroll_axis_ratio: 2.0,
+            inertia_window_us: 80_000,
+            inertia_stale_us: 120_000,
+            inertia_min_units_s: 90.0,
+            inertia_max_units_s: 14_000.0,
         }
     }
 }
@@ -555,6 +590,36 @@ pub struct GestureCfg {
     pub press: [Option<PressCfg>; 5],
     /// Give a haptic tick when a press is recognised.
     pub ticks: bool,
+    /// Two-finger scroll, when enabled.
+    pub scroll: Option<ScrollCfg>,
+}
+
+/// The two-finger scroll settings of one touch session (per-app speed already applied).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollCfg {
+    pub v_gain: f32,
+    pub h_gain: f32,
+    pub accel: f32,
+    pub natural: bool,
+    pub axis_lock: bool,
+    pub inertia: bool,
+    pub inertia_strength: f32,
+}
+
+impl ScrollCfg {
+    pub fn from_config(cfg: &Config, exe: Option<&str>) -> Option<Self> {
+        let s = &cfg.scroll;
+        let app = resolve::scroll_speed(cfg, exe);
+        s.enabled.then_some(Self {
+            v_gain: s.vertical_speed * app,
+            h_gain: s.horizontal_speed * app,
+            accel: s.accel,
+            natural: s.direction == config::ScrollDirection::Natural,
+            axis_lock: s.axis_lock,
+            inertia: s.inertia,
+            inertia_strength: s.inertia_strength,
+        })
+    }
 }
 
 impl GestureCfg {
@@ -611,6 +676,7 @@ impl GestureCfg {
                     .cloned()
                     .collect(),
             }),
+            scroll: ScrollCfg::from_config(cfg, exe),
             ..Self::default()
         }
     }

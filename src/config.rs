@@ -47,6 +47,7 @@ pub struct Config {
     pub corner: Corners,
     pub edge: Edges,
     pub window: WindowOps,
+    pub scroll: Scroll,
     pub sensitivity: Sensitivity,
     pub profiles: Vec<Profile>,
     pub ring: Ring,
@@ -70,6 +71,7 @@ impl Default for Config {
             corner: Corners::default(),
             edge: Edges::default(),
             window: WindowOps::default(),
+            scroll: Scroll::default(),
             sensitivity: Sensitivity::default(),
             profiles: Vec::new(),
             ring: Ring::default(),
@@ -1150,6 +1152,80 @@ impl Default for WindowOps {
     }
 }
 
+/// Which way the content follows the fingers while scrolling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScrollDirection {
+    /// The content follows the fingers (a down motion scrolls up, like a touch screen).
+    Natural,
+    /// A down motion scrolls down, as Windows' own touchpad default does.
+    #[default]
+    Traditional,
+}
+
+impl ScrollDirection {
+    pub const ALL: [Self; 2] = [Self::Traditional, Self::Natural];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Natural => "ナチュラル（指に内容がついてくる）",
+            Self::Traditional => "従来（下になぞると下へ）",
+        }
+    }
+}
+
+/// Two-finger scrolling done by yubi (Windows' own two-finger scroll must be off, or the page
+/// scrolls twice). Off by default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Scroll {
+    pub enabled: bool,
+    /// Multiplier of the vertical scroll amount.
+    pub vertical_speed: f32,
+    /// Multiplier of the horizontal scroll amount.
+    pub horizontal_speed: f32,
+    /// Strength of the speed-dependent gain (0 = linear).
+    pub accel: f32,
+    pub direction: ScrollDirection,
+    /// Keep a mostly vertical (or horizontal) pan on its axis.
+    pub axis_lock: bool,
+    /// Keep scrolling for a moment after the fingers lift.
+    pub inertia: bool,
+    /// How long the glide lasts (0 = short, 1 = long).
+    pub inertia_strength: f32,
+}
+
+impl Default for Scroll {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            vertical_speed: 1.0,
+            horizontal_speed: 1.0,
+            accel: 0.3,
+            direction: ScrollDirection::default(),
+            axis_lock: true,
+            inertia: true,
+            inertia_strength: 0.5,
+        }
+    }
+}
+
+impl Scroll {
+    pub const SPEED: SensRange = SensRange { min: 0.2, max: 4.0 };
+    pub const ACCEL: SensRange = SensRange { min: 0.0, max: 1.0 };
+    pub const INERTIA: SensRange = SensRange { min: 0.0, max: 1.0 };
+
+    /// Pull every value into its range; a non-finite value falls back to the default.
+    pub fn clamp(&mut self) {
+        let d = Self::default();
+        let f = |v: f32, def: f32, r: SensRange| finite_or(v, def).clamp(r.min, r.max);
+        self.vertical_speed = f(self.vertical_speed, d.vertical_speed, Self::SPEED);
+        self.horizontal_speed = f(self.horizontal_speed, d.horizontal_speed, Self::SPEED);
+        self.accel = f(self.accel, d.accel, Self::ACCEL);
+        self.inertia_strength = f(self.inertia_strength, d.inertia_strength, Self::INERTIA);
+    }
+}
+
 /// Keys of `Profile::edge_overrides`.
 pub const EDGE_KEYS: [&str; 3] = ["edge.left", "edge.right", "edge.top"];
 
@@ -1173,6 +1249,9 @@ pub struct Profile {
     /// Touchpad cursor speed in this app; `None` uses the global one (`[cursor] speed`).
     #[serde(deserialize_with = "cursor_speed")]
     pub cursor_speed: Option<u8>,
+    /// Multiplier of the two-finger scroll speed in this app (on top of the global speeds).
+    /// `None` = no change.
+    pub scroll_speed: Option<f32>,
 }
 
 /// Windows' touchpad cursor speed, which yubi can manage (see `os::touchpad`).
@@ -1578,6 +1657,7 @@ impl Config {
         self.long_hold.fingers = self.long_hold.fingers.clamp(1, 5);
         self.ring.fingers = self.ring.fingers.clamp(3, 5);
         self.sensitivity.clamp();
+        self.scroll.clamp();
         let have = self.press.fingers.len();
         self.press
             .fingers
@@ -1594,6 +1674,9 @@ impl Config {
         for p in &mut self.profiles {
             p.edge_overrides.values_mut().for_each(clamp_edge);
             p.cursor_speed = p.cursor_speed.map(Cursor::clamp_speed);
+            p.scroll_speed = p
+                .scroll_speed
+                .map(|v| finite_or(v, 1.0).clamp(Scroll::SPEED.min, Scroll::SPEED.max));
         }
         self.cursor.speed = self.cursor.speed.map(Cursor::clamp_speed);
         let p = &mut self.press;
@@ -3549,7 +3632,10 @@ light = \"Find\"
         let c = Config::default();
         assert_eq!(c.cursor.speed, None);
         let text = toml::to_string(&c).unwrap();
-        assert!(!text.contains("speed"), "{text}");
+        // `[scroll]` has its own `*_speed` keys: only the cursor ones must be absent.
+        assert!(!text.contains("cursor_speed"), "{text}");
+        let after = text.split("[cursor]").nth(1).unwrap_or_default();
+        assert!(!after.contains("speed"), "{text}");
         let mut c = Config::default();
         c.cursor.speed = Some(12);
         c.profiles.push(Profile {

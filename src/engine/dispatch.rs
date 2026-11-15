@@ -578,6 +578,10 @@ impl Dispatcher {
                 }
                 None
             }
+            Action::Scroll { h, v } => {
+                // Sent as it comes; a refused wheel event is only worth a note, not a retry.
+                (!ex.wheel(*h, *v)).then(|| SEND_FAILED_NOTE.to_owned())
+            }
             Action::Trigger(a) => self.trigger(a, ex),
         }
     }
@@ -613,12 +617,12 @@ impl Dispatcher {
             match out {
                 config::EdgeOut::Act(a) => note = self.run_plan(a, ex, side.label()),
                 config::EdgeOut::Wheel(n) => {
-                    if !ex.wheel(*n, side.horizontal()) {
+                    if !ex.wheel_notches(*n, side.horizontal()) {
                         note = Some(SEND_FAILED_NOTE.to_owned());
                     }
                 }
                 config::EdgeOut::CtrlWheel(n) => {
-                    let ok = ex.press(CTRL) && ex.wheel(*n, side.horizontal());
+                    let ok = ex.press(CTRL) && ex.wheel_notches(*n, side.horizontal());
                     ex.release(CTRL);
                     if !ok {
                         note = Some(SEND_FAILED_NOTE.to_owned());
@@ -920,7 +924,7 @@ mod tests {
             let refused = match ev {
                 SynthEvent::Up(_) => self.refuse_up.get(),
                 SynthEvent::Down(_) => self.refuse_down.get(),
-                SynthEvent::Move(..) | SynthEvent::Wheel { .. } => false,
+                SynthEvent::Move(..) | SynthEvent::Wheel(..) => false,
             };
             if !refused {
                 self.log.push(ev);
@@ -1127,6 +1131,39 @@ mod tests {
             )
             .is_some()
         );
+    }
+
+    #[test]
+    fn scroll_is_sent_as_a_wheel_and_dropped_for_a_blocked_app() {
+        let (mut d, _rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        d.handle(&START, &mut ex, &th, CURSOR);
+        assert!(
+            d.handle(&Action::Scroll { h: 3, v: -120 }, &mut ex, &th, CURSOR)
+                .is_none()
+        );
+        d.set_blocked(true);
+        d.handle(&START, &mut ex, &th, CURSOR);
+        d.handle(&Action::Scroll { h: 0, v: 50 }, &mut ex, &th, CURSOR);
+        drop(ex);
+        assert_eq!(f.log, vec![SynthEvent::Wheel(3, -120)]);
+    }
+
+    #[test]
+    fn practice_mode_never_scrolls() {
+        let (mut d, _rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        d.set_dry_run(true);
+        d.handle(&START, &mut ex, &th, CURSOR);
+        d.handle(&Action::Scroll { h: 0, v: 120 }, &mut ex, &th, CURSOR);
+        d.set_dry_run(false);
+        d.handle(&Action::Scroll { h: 0, v: -120 }, &mut ex, &th, CURSOR);
+        drop(ex);
+        assert_eq!(f.log, vec![SynthEvent::Wheel(0, -120)]);
     }
 
     #[test]

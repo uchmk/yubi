@@ -42,24 +42,28 @@ pub fn run(frames: &[Frame], cfg: &Config) -> Vec<(u64, Action)> {
     let mut r = Recognizer::default();
     let mut out = Vec::new();
     for f in frames {
-        fire_timers_until(&mut r, f.t_us, &mut out);
+        let done = fire_timers_until(&mut r, f.t_us, &mut out);
+        debug_assert!(done, "timer cap hit before frame at {}", f.t_us);
         out.extend(r.step(f, cfg).into_iter().map(|a| (f.t_us, a)));
     }
     if let Some(last) = frames.last() {
-        // Let any remaining timer run out (bounded, a timer fires at most once).
-        fire_timers_until(&mut r, last.t_us + 10_000_000, &mut out);
+        // Let any remaining timer run out (bounded; a glide fires many times).
+        let done = fire_timers_until(&mut r, last.t_us + 10_000_000, &mut out);
+        debug_assert!(done, "timer cap hit while running out the last timers");
     }
     out
 }
 
-fn fire_timers_until(r: &mut Recognizer, until: u64, out: &mut Vec<(u64, Action)>) {
+/// Fire the timers due up to `until`. Returns false if it stopped at the iteration cap.
+fn fire_timers_until(r: &mut Recognizer, until: u64, out: &mut Vec<(u64, Action)>) -> bool {
     // Each iteration consumes a deadline; the cap only guards against a logic error.
-    for _ in 0..16 {
+    for _ in 0..4096 {
         let Some(due) = r.next_deadline().filter(|&d| d <= until) else {
-            return;
+            return true;
         };
         out.extend(r.tick(due).into_iter().map(|a| (due, a)));
     }
+    false
 }
 
 #[cfg(test)]

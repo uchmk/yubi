@@ -12,6 +12,7 @@ pub enum Owner {
     Edge,
     Ring,
     Pressure,
+    Scroll,
 }
 
 /// Same-frame tie-break, strongest first. The variants without a gesture yet are reserved so the
@@ -31,6 +32,8 @@ pub enum Priority {
     Multi,
     Window,
     Drag,
+    /// Two-finger scroll: weaker than a press, which also uses two fingers.
+    Scroll,
 }
 
 impl Owner {
@@ -43,6 +46,7 @@ impl Owner {
             Self::Edge => Priority::Edge,
             // The ring is a hold gesture; it shares the hold-combo slot.
             Self::Ring => Priority::HoldCombo,
+            Self::Scroll => Priority::Scroll,
         }
     }
 }
@@ -122,6 +126,25 @@ mod tests {
             b.resolve(&[p(Owner::Drag, 10), p(Owner::Window, 10)]),
             Some(Owner::Window)
         );
+    }
+
+    #[test]
+    fn scroll_is_the_weakest_and_a_press_beats_it_in_the_same_frame() {
+        let mut a = Arbiter::default();
+        assert_eq!(
+            a.resolve(&[
+                p(Owner::Scroll, 10),
+                p(Owner::Drag, 10),
+                p(Owner::Pressure, 10)
+            ]),
+            Some(Owner::Pressure)
+        );
+        let mut b = Arbiter::default();
+        assert_eq!(
+            b.resolve(&[p(Owner::Scroll, 10), p(Owner::Drag, 10)]),
+            Some(Owner::Drag)
+        );
+        assert!(Priority::Scroll > Priority::Drag);
     }
 
     #[test]

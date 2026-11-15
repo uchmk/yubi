@@ -156,7 +156,6 @@ pub fn set_cursor_speed(speed: u8, persist: bool) -> bool {
 }
 
 /// Whether Windows' two-finger scrolling (panning) is on. `None` when unsupported.
-#[allow(dead_code)] // for the two-finger scroll feature
 pub fn two_finger_scroll_enabled() -> Option<bool> {
     support().ok()?;
     get().map(|p| p.user_bits & PAN_ENABLED_BIT != 0)

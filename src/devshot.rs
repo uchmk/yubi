@@ -43,6 +43,8 @@ impl Fixture {
                 let on = self == Self::DemoSpeedOn;
                 cfg.cursor.speed = on.then_some(12);
                 cfg.profiles[0].cursor_speed = on.then_some(16);
+                cfg.scroll.enabled = true;
+                cfg.profiles[0].scroll_speed = on.then_some(1.5);
             }
             Self::DemoProfiles => {
                 cfg.gestures_enabled = true;

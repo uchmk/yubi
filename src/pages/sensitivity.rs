@@ -2,7 +2,8 @@
 
 use eframe::egui::{self, Align, Layout, RichText, Ui};
 
-use crate::config::{Config, Cursor, SensRange, Sensitivity};
+use super::Cmd;
+use crate::config::{Config, Cursor, Scroll, ScrollDirection, SensRange, Sensitivity};
 use crate::nav::Page;
 use crate::os::touchpad;
 use crate::theme::Tokens;
@@ -40,13 +41,156 @@ fn row<N: Num + PartialEq>(
     });
 }
 
-pub fn sensitivity(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
+/// A slider row that is greyed out while its feature is off.
+fn scroll_row(
+    g: &mut Group<'_>,
+    t: &Tokens,
+    on: bool,
+    title: &str,
+    desc: &str,
+    spec: SliderSpec,
+    slot: (&mut f32, f32),
+) {
+    let (value, default) = slot;
+    g.row(None, title, desc, |ui| {
+        ui.add_enabled_ui(on, |ui| {
+            let changed = *value != default;
+            let reset = ui.add_enabled_ui(changed, |ui| widgets::button(ui, t, "既定に戻す"));
+            if reset.inner.clicked() {
+                *value = default;
+            }
+            slider_with_value(ui, t, value, spec);
+        });
+    });
+}
+
+/// 2 本指スクロール: yubi's own two-finger scroll, with the warning while Windows' still runs.
+fn scroll_group(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win_pan: Option<bool>) -> Option<Cmd> {
+    let mut cmd = None;
+    let d = Scroll::default();
+    let s = &mut cfg.scroll;
+    group(ui, t, |g| {
+        g.toggle_row(
+            None,
+            "2 本指スクロールを使う",
+            "2 本指でなぞったときのスクロールを yubi が行い、速さをマウスホイールとは別に決められます。",
+            &mut s.enabled,
+        );
+        // Windows scrolls too unless its own switch is off: the page would move twice.
+        if s.enabled && win_pan != Some(false) {
+            g.wrapped_row(|ui| {
+                ui.vertical(|ui| {
+                let lead = if win_pan.is_some() {
+                    "Windows の「2 本指でドラッグしてスクロール」がオンのままです。ページが二重にスクロールします。"
+                } else {
+                    "Windows の「2 本指でドラッグしてスクロール」の状態を確認できません。オンのままだと、ページが二重にスクロールします。"
+                };
+                ui.label(RichText::new(lead).size(t.fs_small).color(t.accent));
+                ui.label(
+                    RichText::new(
+                        "設定 → Bluetooth とデバイス → タッチパッド → スクロールとズーム → 「2 本指でドラッグしてスクロール」をオフにしてください。",
+                    )
+                    .size(t.fs_small)
+                    .color(t.text_muted),
+                );
+                if widgets::button(ui, t, "Windows のタッチパッド設定を開く").clicked() {
+                    cmd = Some(Cmd::OpenTouchpadSettings);
+                }
+                });
+            });
+        }
+        let on = s.enabled;
+        scroll_row(
+            g,
+            t,
+            on,
+            "縦の速さ",
+            "縦にスクロールする量の倍率です。",
+            spec(Scroll::SPEED, 0.1, 1, " 倍"),
+            (&mut s.vertical_speed, d.vertical_speed),
+        );
+        scroll_row(
+            g,
+            t,
+            on,
+            "横の速さ",
+            "横にスクロールする量の倍率です。",
+            spec(Scroll::SPEED, 0.1, 1, " 倍"),
+            (&mut s.horizontal_speed, d.horizontal_speed),
+        );
+        scroll_row(
+            g,
+            t,
+            on,
+            "加速",
+            "速くなぞるほど大きくスクロールします。0 で一定です。",
+            spec(Scroll::ACCEL, 0.05, 2, ""),
+            (&mut s.accel, d.accel),
+        );
+        g.row(
+            None,
+            "スクロールの向き",
+            "指の動きとスクロールの向きの関係です。",
+            |ui| {
+                ui.add_enabled_ui(on, |ui| {
+                    widgets::combo(
+                        ui,
+                        t,
+                        "scroll-direction",
+                        &mut s.direction,
+                        &ScrollDirection::ALL,
+                        ScrollDirection::label,
+                    );
+                });
+            },
+        );
+        g.row(
+            None,
+            "縦横を固定する",
+            "ほぼ縦（横）になぞったとき、その向きだけにスクロールします。",
+            |ui| {
+                ui.add_enabled_ui(on, |ui| widgets::toggle(ui, t, &mut s.axis_lock));
+            },
+        );
+        g.row(
+            None,
+            "慣性スクロール",
+            "指を離したあともしばらくスクロールを続けます。",
+            |ui| {
+                ui.add_enabled_ui(on, |ui| widgets::toggle(ui, t, &mut s.inertia));
+            },
+        );
+        scroll_row(
+            g,
+            t,
+            on && s.inertia,
+            "慣性の強さ",
+            "大きいほど長く滑ります。",
+            spec(Scroll::INERTIA, 0.05, 2, ""),
+            (&mut s.inertia_strength, d.inertia_strength),
+        );
+    });
+    cmd
+}
+
+pub fn sensitivity(
+    ui: &mut Ui,
+    t: &Tokens,
+    cfg: &mut Config,
+    win_pan: Option<bool>,
+) -> Option<Cmd> {
     widgets::page_header(
         ui,
         t,
         Page::Sensitivity.label(),
         Page::Sensitivity.subtitle(),
     );
+    section_header(ui, t, "カーソル");
+    group(ui, t, |g| cursor_group(g, t, &mut cfg.cursor));
+
+    section_header(ui, t, "2 本指スクロール");
+    let cmd = scroll_group(ui, t, cfg, win_pan);
+
     let d = Sensitivity::default();
     let s = &mut cfg.sensitivity;
 
@@ -91,9 +235,6 @@ pub fn sensitivity(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
         );
     });
 
-    section_header(ui, t, "カーソル");
-    group(ui, t, |g| cursor_group(g, t, &mut cfg.cursor));
-
     section_header(ui, t, "詳細");
     // A shot can open the section to check its layout.
     let open = std::env::var_os("YUBI_SENS_OPEN").is_some();
@@ -103,6 +244,7 @@ pub fn sensitivity(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
         .show(ui, |ui| {
             detail(ui, t, s, &d);
         });
+    cmd
 }
 
 /// The touchpad cursor speed: Windows' own setting, kept by yubi while it runs.

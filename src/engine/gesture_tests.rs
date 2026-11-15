@@ -1104,3 +1104,182 @@ fn fingers_lifting_one_after_the_other_still_release_the_press() {
     s.lift(0);
     assert_eq!(triggers(&s.run(&cfg)), vec![Find]);
 }
+
+// ---- two-finger scroll ----
+
+fn scroll_cfg() -> Config {
+    let mut cfg = Config::default();
+    cfg.scroll.enabled = true;
+    cfg.scroll.direction = config::ScrollDirection::Natural;
+    cfg.scroll.accel = 0.0;
+    cfg.scroll.inertia = false;
+    cfg
+}
+
+/// The wheel totals (horizontal, vertical) of all scroll actions, and how many there were.
+fn wheel_sum(out: &[(u64, Action)]) -> (i32, i32, usize) {
+    out.iter().fold((0, 0, 0), |(h, v, n), (_, a)| match a {
+        Action::Scroll { h: dh, v: dv } => (h + dh, v + dv, n + 1),
+        _ => (h, v, n),
+    })
+}
+
+#[test]
+fn two_finger_pan_sends_the_expected_wheel_sum() {
+    let mut s = Seq::default();
+    let start = row(2, 40.0, 40.0);
+    s.still(&start, 60);
+    // 30 mm down over 300 ms, at the default 20 units per mm: 600 units, upward when natural.
+    s.glide(&start, 0.0, 30.0, 300);
+    s.lift(0);
+    let out = s.run(&scroll_cfg());
+    let (h, v, n) = wheel_sum(&out);
+    assert_eq!(h, 0);
+    assert!((595..=600).contains(&v), "vertical sum {v}");
+    assert!(n > 5, "output came in {n} pieces");
+    // At most one output per input frame.
+    let mut times: Vec<u64> = out
+        .iter()
+        .filter(|(_, a)| matches!(a, Action::Scroll { .. }))
+        .map(|(t, _)| *t)
+        .collect();
+    times.dedup();
+    assert_eq!(times.len(), n);
+    // Traditional direction flips the sign and keeps the magnitude.
+    let mut cfg = scroll_cfg();
+    cfg.scroll.direction = config::ScrollDirection::Traditional;
+    let (_, tv, _) = wheel_sum(&s.run(&cfg));
+    assert!((595..=600).contains(&-tv), "traditional sum {tv}");
+}
+
+#[test]
+fn two_finger_pan_speed_settings_scale_the_output() {
+    let mut s = Seq::default();
+    let start = row(2, 40.0, 40.0);
+    s.still(&start, 60);
+    s.glide(&start, 20.0, 20.0, 300);
+    s.lift(0);
+    let mut cfg = scroll_cfg();
+    cfg.scroll.axis_lock = false;
+    cfg.scroll.vertical_speed = 2.0;
+    cfg.scroll.horizontal_speed = 0.5;
+    let (h, v, _) = wheel_sum(&s.run(&cfg));
+    // 20 mm = 400 units; vertical x2, horizontal x0.5 and flipped (natural: right scrolls left).
+    assert!((795..=800).contains(&v), "v {v}");
+    assert!((-200..=-195).contains(&h), "h {h}");
+}
+
+#[test]
+fn two_finger_scroll_is_off_by_default_and_ignores_taps_and_pinches() {
+    let mut pan = Seq::default();
+    let start = row(2, 40.0, 40.0);
+    pan.still(&start, 60);
+    pan.glide(&start, 0.0, 30.0, 300);
+    pan.lift(0);
+    assert_eq!(wheel_sum(&pan.run(&Config::default())).2, 0);
+
+    // A tap with a little wobble.
+    let mut tap = Seq::default();
+    tap.still(&start, 50);
+    tap.glide(&start, 0.0, 1.0, 40);
+    tap.lift(0);
+    assert_eq!(wheel_sum(&tap.run(&scroll_cfg())).2, 0);
+
+    // A pinch: the fingers spread 12 mm while the centre barely moves.
+    let mut pinch = Seq::default();
+    pinch.still(&start, 60);
+    for i in 1..=25u32 {
+        let k = i as f32 / 25.0 * 6.0;
+        let pts = [
+            (40.0 - 5.0 - k, 40.0 + 0.1 * k),
+            (40.0 + 5.0 + k, 40.0 + 0.1 * k),
+        ];
+        pinch.frames.push(frame(pinch.t, &pts));
+        pinch.t += STEP;
+    }
+    pinch.lift(0);
+    assert_eq!(wheel_sum(&pinch.run(&scroll_cfg())).2, 0);
+}
+
+#[test]
+fn two_finger_scroll_leaves_three_finger_swipes_alone() {
+    let mut s = Seq::default();
+    let start = row(3, 40.0, 40.0);
+    s.still(&start, 60);
+    s.glide(&start, 0.0, 30.0, 300);
+    s.lift(0);
+    assert_eq!(wheel_sum(&s.run(&scroll_cfg())).2, 0);
+}
+
+#[test]
+fn inertia_continues_after_the_lift_and_ends() {
+    let mut s = Seq::default();
+    let start = row(2, 40.0, 40.0);
+    s.still(&start, 60);
+    s.glide(&start, 0.0, 40.0, 200);
+    s.lift(0);
+    let mut cfg = scroll_cfg();
+    let (_, plain, _) = wheel_sum(&s.run(&cfg));
+    cfg.scroll.inertia = true;
+    let out = s.run(&cfg);
+    let (_, glide, n) = wheel_sum(&out);
+    assert!(glide > plain + 100, "glide {glide} vs {plain}");
+    // The glide stops by itself, within a few seconds of the lift.
+    let last = out.last().map(|(t, _)| *t).unwrap();
+    assert!(last < s.t + 6_000_000, "still gliding at {last}");
+    assert!(n > 10);
+}
+
+#[test]
+fn a_new_touch_stops_the_glide() {
+    let mut s = Seq::default();
+    let start = row(2, 40.0, 40.0);
+    s.still(&start, 60);
+    s.glide(&start, 0.0, 40.0, 200);
+    s.lift(60);
+    // Put one finger down 60 ms after the lift: whatever is still gliding stops.
+    s.still(&[(40.0, 40.0)], 100);
+    s.lift(0);
+    let mut cfg = scroll_cfg();
+    cfg.scroll.inertia = true;
+    let out = s.run(&cfg);
+    let touch_us = s.frames[s.frames.len() - 10].t_us;
+    // The glide really existed: output after the lift and before the new touch.
+    let lift_us = s.frames[s.frames.len() - 11].t_us;
+    assert!(
+        out.iter()
+            .any(|(t, a)| matches!(a, Action::Scroll { .. }) && *t > lift_us && *t < touch_us),
+        "no glide output before the touch"
+    );
+    assert!(
+        out.iter()
+            .filter(|(_, a)| matches!(a, Action::Scroll { .. }))
+            .all(|(t, _)| *t < touch_us + 20_000),
+        "scrolled after the touch"
+    );
+}
+
+#[test]
+fn a_two_finger_firm_press_beats_scroll_and_a_pan_still_scrolls() {
+    use config::Action::Find;
+    let mut cfg = press_cfg(2, Find, config::Action::None);
+    cfg.scroll.enabled = true;
+    cfg.scroll.inertia = false;
+    let two = row(2, 40.0, 40.0);
+    // A firm press without moving: the press fires, nothing scrolls.
+    let mut s = Seq::default();
+    s.hold_p(&two, REST, 8);
+    s.hold_p(&two, 0.10, 12);
+    s.lift(0);
+    let out = s.run(&cfg);
+    assert_eq!(triggers(&out), vec![Find]);
+    assert_eq!(wheel_sum(&out).2, 0, "a press must not scroll");
+    // A pan at rest pressure: it scrolls, and no press fires.
+    let mut s = Seq::default();
+    s.hold_p(&two, REST, 8);
+    s.glide(&two, 0.0, 30.0, 300);
+    s.lift(0);
+    let out = s.run(&cfg);
+    assert!(triggers(&out).is_empty());
+    assert!(wheel_sum(&out).2 > 5);
+}

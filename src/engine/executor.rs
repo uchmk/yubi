@@ -28,11 +28,9 @@ pub enum SynthEvent {
     Up(Key),
     /// Relative pointer movement in pixels.
     Move(i32, i32),
-    /// Mouse wheel notches (positive = up or right).
-    Wheel {
-        notches: i32,
-        horizontal: bool,
-    },
+    /// Wheel movement in `WHEEL_DELTA` units (120 = one notch): horizontal, then vertical.
+    /// Positive scrolls right / up.
+    Wheel(i32, i32),
 }
 
 pub trait InputSink {
@@ -87,13 +85,20 @@ impl<S: InputSink> Executor<S> {
         dx == 0 && dy == 0 || self.sink.send(SynthEvent::Move(dx, dy))
     }
 
-    /// Turn the mouse wheel by `notches` (positive = up or right). Returns false if refused.
-    pub fn wheel(&mut self, notches: i32, horizontal: bool) -> bool {
-        notches == 0
-            || self.sink.send(SynthEvent::Wheel {
-                notches,
-                horizontal,
-            })
+    /// Turn the wheel by (dx, dy) `WHEEL_DELTA` units in one go. Returns false if refused.
+    pub fn wheel(&mut self, dx: i32, dy: i32) -> bool {
+        dx == 0 && dy == 0 || self.sink.send(SynthEvent::Wheel(dx, dy))
+    }
+
+    /// Turn the mouse wheel by `notches` (positive = up or right) on one axis. Returns false if
+    /// refused.
+    pub fn wheel_notches(&mut self, notches: i32, horizontal: bool) -> bool {
+        let units = notches.saturating_mul(120);
+        if horizontal {
+            self.wheel(units, 0)
+        } else {
+            self.wheel(0, units)
+        }
     }
 
     /// Press all `keys` in order, then release them in reverse (a shortcut or a click).
@@ -171,33 +176,40 @@ mod win {
         )
     }
 
+    fn wheel_input(flags: MOUSE_EVENT_FLAGS, amount: i32) -> INPUT {
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    // The field is unsigned; a negative amount is its two's complement.
+                    mouseData: amount as u32,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: YUBI_INJECT_MARK,
+                },
+            },
+        }
+    }
+
+    /// The wheel events of one `Wheel(dx, dy)` (horizontal first; zero axes are skipped).
+    fn wheel_inputs(dx: i32, dy: i32) -> Vec<INPUT> {
+        let mut v = Vec::with_capacity(2);
+        if dx != 0 {
+            v.push(wheel_input(MOUSEEVENTF_HWHEEL, dx));
+        }
+        if dy != 0 {
+            v.push(wheel_input(MOUSEEVENTF_WHEEL, dy));
+        }
+        v
+    }
+
     fn to_input(ev: SynthEvent) -> INPUT {
         let (key, up) = match ev {
+            SynthEvent::Wheel(..) => unreachable!("wheel events go through wheel_inputs"),
             SynthEvent::Down(k) => (k, false),
             SynthEvent::Up(k) => (k, true),
-            SynthEvent::Wheel {
-                notches,
-                horizontal,
-            } => {
-                return INPUT {
-                    r#type: INPUT_MOUSE,
-                    Anonymous: INPUT_0 {
-                        mi: MOUSEINPUT {
-                            dx: 0,
-                            dy: 0,
-                            // One notch is WHEEL_DELTA (120); the field carries a signed value.
-                            mouseData: notches.saturating_mul(120) as u32,
-                            dwFlags: if horizontal {
-                                MOUSEEVENTF_HWHEEL
-                            } else {
-                                MOUSEEVENTF_WHEEL
-                            },
-                            time: 0,
-                            dwExtraInfo: YUBI_INJECT_MARK,
-                        },
-                    },
-                };
-            }
             SynthEvent::Move(dx, dy) => {
                 return INPUT {
                     r#type: INPUT_MOUSE,
@@ -264,8 +276,14 @@ mod win {
 
     impl InputSink for SendInputSink {
         fn send(&mut self, ev: SynthEvent) -> bool {
-            let input = [to_input(ev)];
-            unsafe { SendInput(&input, size_of::<INPUT>() as i32) == 1 }
+            let inputs = match ev {
+                SynthEvent::Wheel(dx, dy) => wheel_inputs(dx, dy),
+                other => vec![to_input(other)],
+            };
+            if inputs.is_empty() {
+                return true;
+            }
+            unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) == inputs.len() as u32 }
         }
     }
 
@@ -289,6 +307,22 @@ mod win {
                 };
                 assert_eq!(extra, YUBI_INJECT_MARK);
             }
+        }
+
+        #[test]
+        fn wheel_events_carry_amount_flags_and_mark() {
+            let v = wheel_inputs(-60, 240);
+            assert_eq!(v.len(), 2);
+            let (h, w) = unsafe { (v[0].Anonymous.mi, v[1].Anonymous.mi) };
+            assert!(h.dwFlags.contains(MOUSEEVENTF_HWHEEL));
+            assert_eq!(h.mouseData as i32, -60);
+            assert!(w.dwFlags.contains(MOUSEEVENTF_WHEEL));
+            assert_eq!(w.mouseData as i32, 240);
+            assert_eq!(
+                (h.dwExtraInfo, w.dwExtraInfo),
+                (YUBI_INJECT_MARK, YUBI_INJECT_MARK)
+            );
+            assert_eq!(wheel_inputs(0, 0).len(), 0);
         }
 
         #[test]

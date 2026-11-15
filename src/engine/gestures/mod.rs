@@ -6,4 +6,5 @@ pub mod edge;
 pub mod multi;
 pub mod press;
 pub mod ring;
+pub mod scroll;
 pub mod window;

@@ -443,6 +443,8 @@ impl Worker {
         }
         self.enabled = self.cfg.gestures_enabled;
         self.sync_cursor();
+        // A glide belongs to the settings it started under; it also has no timer while paused.
+        self.recognizer.stop_glide();
         let enabled = self.enabled;
         self.with_state(|s| s.gestures_enabled = enabled);
     }

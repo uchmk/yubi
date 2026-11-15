@@ -13,8 +13,8 @@ fn main() -> eframe::Result {
 struct App;
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
-        eframe::egui::CentralPanel::default().show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
+        eframe::egui::CentralPanel::default().show(ui, |ui| {
             ui.heading("yubi");
             ui.label("Magic Trackpad gesture engine (skeleton)");
         });

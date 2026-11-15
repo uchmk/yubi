@@ -4,7 +4,7 @@
 use eframe::egui::{self, Align, Layout, RichText, Ui};
 
 use crate::config::{
-    Combo, Config, EdgeKind, EdgeTarget, Finger, HoldCombos, HoldTrigger, RingItem,
+    Combo, Config, EdgeKind, EdgeTarget, Finger, HoldCombos, HoldTrigger, Ring, RingItem,
 };
 use crate::icons;
 use crate::nav::Page;
@@ -382,6 +382,10 @@ pub fn corner(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
 pub fn edge(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
     let on = feature_top(ui, t, cfg, Page::Edge);
     ui.add_enabled_ui(on, |ui| {
+        section_header(ui, t, "使い方");
+        group(ui, t, |g| {
+            g.wrapped_row(|ui| edge_guide(ui, t, cfg));
+        });
         section_header(ui, t, "端ごとの対象");
         group(ui, t, |g| {
             let e = &mut cfg.edge;
@@ -408,6 +412,107 @@ pub fn edge(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
                 &mut cfg.edge.haptic_ticks,
             );
         });
+    });
+}
+
+/// Nominal Magic Trackpad size (mm) the diagram is drawn for; only the proportions matter.
+const PAD_MM: (f32, f32) = (160.0, 115.0);
+
+/// The target's name without a trailing "(...)" detail, to fit in the diagram.
+fn short_label(target: &EdgeTarget) -> &'static str {
+    let l = target.label();
+    l.split(" (").next().unwrap_or(l)
+}
+
+/// How to use the edge slider, with a drawing of the pad and the bands (width to scale).
+fn edge_guide(ui: &mut Ui, t: &Tokens, cfg: &Config) {
+    let strip = cfg.sensitivity.edge_strip_mm;
+    let detent = cfg.sensitivity.edge_detent_mm;
+    let e = &cfg.edge;
+    ui.vertical(|ui| {
+        let w = ui.available_width().clamp(160.0, 340.0);
+        let scale = w / PAD_MM.0;
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(w, PAD_MM.1 * scale), egui::Sense::hover());
+        let p = ui.painter_at(rect.expand(1.0));
+        p.rect_filled(rect, t.radius_md as f32, t.control);
+        let band = (strip * scale).clamp(2.0, w / 3.0);
+        let bands = [
+            (
+                &e.left,
+                "左端",
+                egui::Rect::from_min_size(rect.min, egui::vec2(band, rect.height())),
+            ),
+            (
+                &e.right,
+                "右端",
+                egui::Rect::from_min_size(
+                    egui::pos2(rect.right() - band, rect.top()),
+                    egui::vec2(band, rect.height()),
+                ),
+            ),
+            (
+                &e.top,
+                "上端",
+                egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), band)),
+            ),
+        ];
+        for (target, _, r) in &bands {
+            if **target != EdgeTarget::None {
+                p.rect_filled(*r, 0.0, t.accent_soft);
+                p.rect_stroke(
+                    *r,
+                    0.0,
+                    egui::Stroke::new(t.stroke_thin, t.accent),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+        p.rect_stroke(
+            rect,
+            t.radius_md as f32,
+            egui::Stroke::new(t.stroke_thin, t.border),
+            egui::StrokeKind::Inside,
+        );
+        let font = egui::FontId::proportional(t.fs_small);
+        for (target, name, r) in &bands {
+            let text = format!("{name}: {}", short_label(target));
+            let color = if **target == EdgeTarget::None {
+                t.text_muted
+            } else {
+                t.text
+            };
+            let (pos, anchor) = match *name {
+                "左端" => (
+                    egui::pos2(r.right() + 6.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                ),
+                "右端" => (
+                    egui::pos2(r.left() - 6.0, rect.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                ),
+                _ => (
+                    egui::pos2(rect.center().x, r.bottom() + 6.0),
+                    egui::Align2::CENTER_TOP,
+                ),
+            };
+            p.text(pos, anchor, text, font.clone(), color);
+        }
+        ui.add_space(t.space_xs);
+        for line in [
+            format!(
+                "ハイライトの帯が反応する範囲です（端から {strip:.1} mm。図の幅は目安で、実際のトラックパッドに近い比率で描いています）。"
+            ),
+            "1. 指 1 本を、帯の中に置きます。".to_owned(),
+            "2. 約 0.15 秒、動かさずに待ちます（2 mm 以内）。".to_owned(),
+            "3. 端に沿ってなぞります（左右の端は上下に、上の端は左右に）。3 mm ほど進むと有効になり、カーソルは止まります。".to_owned(),
+            format!(
+                "{detent:.1} mm なぞるごとに 1 ステップ進みます。左右の端は上へ、上の端は右へなぞるのが「進む」方向（音量なら上げる）、逆が「戻る」です。"
+            ),
+            "指を離すか、2 本目の指を置くと終わります。".to_owned(),
+        ] {
+            ui.label(RichText::new(line).size(t.fs_small).color(t.text_muted));
+        }
     });
 }
 
@@ -503,14 +608,63 @@ pub fn window(
 pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
     let on = feature_top(ui, t, cfg, Page::Ring);
     ui.add_enabled_ui(on, |ui| {
+        section_header(ui, t, "使い方");
+        group(ui, t, |g| {
+            g.wrapped_row(|ui| {
+                ui.vertical(|ui| {
+                    let n = cfg.ring.fingers.clamp(3, 5);
+                    for line in [
+                        format!(
+                            "1. {n} 本の指を、動かさずにトラックパッドへ置いたままにします。{} ms ほどでカーソルの位置にリングが現れます。",
+                            cfg.sensitivity.hold_ms
+                        ),
+                        "2. 指を置いたまま、選びたい項目の方向へ手ごと 8 mm 以上動かします。真上が先頭の項目で、時計回りに並びます。".to_owned(),
+                        "3. すべての指を一緒に離すと、選んだ項目が実行されます。".to_owned(),
+                        "取り消し: 中央に戻して離す、Esc キー、手を大きく動かす（約 4.5 cm 以上）、何もせず 5 秒たつ、指の本数が変わる。".to_owned(),
+                    ] {
+                        ui.label(RichText::new(line).size(t.fs_small).color(t.text_muted));
+                    }
+                });
+            });
+        });
+        let n = cfg.ring.fingers.clamp(3, 5);
+        if (cfg.drag.enabled && cfg.drag.fingers == n)
+            || (cfg.four.enabled && n == 4)
+            || (cfg.five.enabled && n == 5)
+        {
+            ui.label(
+                RichText::new(format!(
+                    "{n} 本指には別のジェスチャーも割り当てられています。指を {} ms 動かさずに置くと、そちらより先にリングが開きます。",
+                    cfg.sensitivity.hold_ms
+                ))
+                .size(t.fs_small)
+                .color(t.accent),
+            );
+            ui.add_space(t.space_sm);
+        }
+        if !cfg.ring.has_usable_items() {
+            group(ui, t, |g| {
+                g.wrapped_row(|ui| {
+                    let msg = if cfg.ring.items.is_empty() {
+                        "項目が空のため、既定の項目（コピー・貼り付け・元に戻す・スクリーンショット・タスクビュー・デスクトップ表示）を使っています。"
+                    } else {
+                        "動作が設定された項目がないため、既定の項目を使っています。"
+                    };
+                    ui.label(RichText::new(msg).size(t.fs_small).color(t.accent));
+                    if widgets::button(ui, t, "既定の項目を一覧に追加して編集する").clicked() {
+                        cfg.ring.items = Ring::default_items();
+                    }
+                });
+            });
+        }
         section_header(ui, t, "呼び出し");
         group(ui, t, |g| {
             let hold_ms = &mut cfg.sensitivity.hold_ms;
             let r = &mut cfg.ring;
             g.slider_row(
                 "指の本数",
-                "リングメニューを開く指の本数です。",
-                SliderSpec::int(1, 5, 1, " 本"),
+                "リングメニューを開く指の本数です（3〜5 本）。",
+                SliderSpec::int(3, 5, 1, " 本"),
                 &mut r.fingers,
             );
             g.slider_row(
@@ -543,7 +697,10 @@ pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
             }
             if items.is_empty() {
                 g.raw_row(|ui| {
-                    ui.label(RichText::new("項目はまだありません。").color(t.text_muted));
+                    ui.label(
+                        RichText::new("項目はまだありません（上の既定の項目が使われます）。")
+                            .color(t.text_muted),
+                    );
                 });
             }
         });

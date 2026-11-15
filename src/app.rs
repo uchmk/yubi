@@ -538,7 +538,15 @@ impl App {
             Page::Overview => {
                 return overview::page(ui, t, cfg, &self.win_values, &mut self.overview);
             }
-            Page::Sensitivity => return sensitivity::sensitivity(ui, t, cfg, self.win_pan),
+            Page::Sensitivity => {
+                return sensitivity::sensitivity(
+                    ui,
+                    t,
+                    cfg,
+                    self.win_pan,
+                    self.engine.pause.view().paused,
+                );
+            }
             Page::Haptic => press::page(ui, t, cfg, self.diagnostics.state(), &mut self.press_ui),
             Page::Monitor => self.diagnostics.monitor(ui, t),
             Page::Practice => self.diagnostics.practice(ui, t, &mut self.practice_on),

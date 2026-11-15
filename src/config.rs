@@ -1311,6 +1311,46 @@ impl Default for Ring {
     }
 }
 
+impl Ring {
+    /// The slots the ring offers when none of the configured items has an action (an empty list,
+    /// the new-install state, or only unset slots). The file keeps the list as written; this is
+    /// applied at run time, and the ring page can copy it into the list for editing.
+    pub fn default_items() -> Vec<RingItem> {
+        let keys = |label: &str, combo: &str| RingItem {
+            label: label.into(),
+            action: Action::Keys(combo.into()),
+        };
+        vec![
+            keys("コピー", "Ctrl+C"),
+            keys("貼り付け", "Ctrl+V"),
+            keys("元に戻す", "Ctrl+Z"),
+            keys("スクリーンショット", "Win+Shift+S"),
+            RingItem {
+                label: Action::TaskView.label(),
+                action: Action::TaskView,
+            },
+            RingItem {
+                label: Action::ShowDesktop.label(),
+                action: Action::ShowDesktop,
+            },
+        ]
+    }
+
+    /// Whether at least one configured item can run.
+    pub fn has_usable_items(&self) -> bool {
+        self.items.iter().any(|i| i.action != Action::None)
+    }
+
+    /// The items the ring really shows: the configured ones, or the defaults when none can run.
+    pub fn effective_items(&self) -> Vec<RingItem> {
+        if self.has_usable_items() {
+            self.items.clone()
+        } else {
+            Self::default_items()
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct RingItem {
@@ -3298,6 +3338,27 @@ exe_name = \"a.exe\"
         assert_eq!(keys, ["swipe.4.left"]);
         assert_eq!(p.unbindable_overrides.len(), 3);
         assert!(p.warnings.iter().any(|w| w.contains("a.exe")));
+    }
+
+    #[test]
+    fn an_empty_or_unset_ring_falls_back_to_the_default_items() {
+        let mut r = Ring::default();
+        assert!(!r.has_usable_items());
+        assert_eq!(r.effective_items(), Ring::default_items());
+        assert!(
+            Ring::default_items()
+                .iter()
+                .all(|i| i.action != Action::None)
+        );
+        r.items = vec![RingItem::default()];
+        assert_eq!(r.effective_items(), Ring::default_items());
+        r.items = vec![RingItem {
+            label: "x".into(),
+            action: Action::TaskView,
+        }];
+        assert_eq!(r.effective_items().len(), 1);
+        // The list on disk stays as written.
+        assert!(Ring::default().items.is_empty());
     }
 
     #[test]

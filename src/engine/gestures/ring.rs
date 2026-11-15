@@ -621,17 +621,18 @@ mod tests {
     }
 
     #[test]
-    fn disabled_or_empty_ring_never_opens() {
+    fn disabled_ring_never_opens_and_empty_ring_uses_defaults() {
         let mut c = cfg();
         c.ring.enabled = false;
         let mut rig = Rig::new(c);
         rig.hold(900, &hand(5, 40.0, 60.0));
         assert!(rig.ring_actions().is_empty());
+        // No runnable item: the default items are offered instead of nothing.
         let mut c = cfg();
         c.ring.items.clear();
         let mut rig = Rig::new(c);
         rig.hold(900, &hand(5, 40.0, 60.0));
-        assert!(rig.ring_actions().is_empty());
+        assert!(!rig.ring_actions().is_empty());
     }
 
     #[test]

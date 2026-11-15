@@ -583,7 +583,7 @@ pub struct GestureCfg {
     pub multi: [Option<MultiCfg>; 3],
     /// `None` when edge sliders are off or none has a target.
     pub edge: Option<EdgeCfg>,
-    /// `None` when the ring is off or no slot has an action.
+    /// `None` when the ring is off (with no runnable item the default items are used).
     pub ring: Option<RingCfg>,
     /// Press bindings and thresholds, indexed by `count - 1`; `None` = that count does nothing
     /// (switched off or both actions unset).
@@ -659,21 +659,15 @@ impl GestureCfg {
                     top: resolve_edge(cfg, exe, EdgeSide::Top.key()),
                 })
                 .filter(EdgeCfg::any),
-            ring: (cfg.ring.enabled
-                && cfg
-                    .ring
-                    .items
-                    .iter()
-                    .any(|i| i.action != config::Action::None))
-            .then(|| RingCfg {
+            // With no runnable item the built-in defaults are offered, so the ring always opens.
+            ring: cfg.ring.enabled.then(|| RingCfg {
                 fingers: usize::from(cfg.ring.fingers.clamp(3, 5)),
                 hold_us: u64::from(cfg.sensitivity.hold_ms) * 1000,
                 items: cfg
                     .ring
-                    .items
-                    .iter()
+                    .effective_items()
+                    .into_iter()
                     .take(RING_MAX_ITEMS)
-                    .cloned()
                     .collect(),
             }),
             scroll: ScrollCfg::from_config(cfg, exe),

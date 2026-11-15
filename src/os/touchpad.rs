@@ -80,10 +80,12 @@ fn call(set: bool, p: &mut Params, persist: bool) -> bool {
     const SPI_SETTOUCHPADPARAMETERS: SYSTEM_PARAMETERS_INFO_ACTION =
         SYSTEM_PARAMETERS_INFO_ACTION(0x00AF);
     let (action, flags) = if set {
+        // Flags 0 changes what the call reads back, but the pointer may keep its old speed: the
+        // change is only broadcast with `SPIF_SENDCHANGE`. A temporary value skips the ini write.
         let f = if persist {
             SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
         } else {
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)
+            SPIF_SENDCHANGE
         };
         (SPI_SETTOUCHPADPARAMETERS, f)
     } else {
@@ -142,7 +144,8 @@ pub fn cursor_speed() -> Option<u8> {
 }
 
 /// Set the touchpad cursor speed. `persist` writes it to the user's settings (what the user
-/// chose); without it the value only lasts until the next change or sign-out. Returns whether
+/// chose); without it the value only lasts until the next change or sign-out (it is still
+/// broadcast, so the pointer picks it up at once). Returns whether
 /// Windows accepted it.
 pub fn set_cursor_speed(speed: u8, persist: bool) -> bool {
     if support().is_err() {

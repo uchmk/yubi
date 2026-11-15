@@ -76,29 +76,39 @@ fn scroll_group(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win_pan: Option<bool>
             "2 本指でなぞったときのスクロールを yubi が行い、速さをマウスホイールとは別に決められます。",
             &mut s.enabled,
         );
-        // Windows scrolls too unless its own switch is off: the page would move twice.
-        if s.enabled && win_pan != Some(false) {
-            g.wrapped_row(|ui| {
-                ui.vertical(|ui| {
-                let lead = if win_pan.is_some() {
-                    "Windows の「2 本指でドラッグしてスクロール」がオンのままです。ページが二重にスクロールします。"
-                } else {
-                    "Windows の「2 本指でドラッグしてスクロール」の状態を確認できません。オンのままだと、ページが二重にスクロールします。"
-                };
-                ui.label(RichText::new(lead).size(t.fs_small).color(t.accent));
+        g.wrapped_row(|ui| {
+            ui.vertical(|ui| {
                 ui.label(
                     RichText::new(
-                        "設定 → Bluetooth とデバイス → タッチパッド → スクロールとズーム → 「2 本指でドラッグしてスクロール」をオフにしてください。",
+                        "Windows の標準のスクロールと違い、縦と横の速さ・加速・慣性を細かく決められ、アプリごとに速さも変えられます。既定ではオフです。上のスイッチをオンにすると、yubi が 2 本指スクロールを行います。",
                     )
                     .size(t.fs_small)
                     .color(t.text_muted),
                 );
+                // Windows scrolls too unless its own switch is off: the page would move twice.
+                let (state, clash) = match win_pan {
+                    Some(true) => ("オン", true),
+                    Some(false) => ("オフ", false),
+                    None => ("確認できません", true),
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "Windows の「2 本指でドラッグしてスクロール」の現在の状態: {state}"
+                    ))
+                    .size(t.fs_small)
+                    .color(if clash && s.enabled { t.accent } else { t.text }),
+                );
+                let hint = if clash && s.enabled {
+                    "オンのままだと、ページが二重にスクロールします。Windows 側をオフにすると yubi のスクロールだけになります。"
+                } else {
+                    "yubi のスクロールを使うときは、Windows 側をオフにしてください（設定 → Bluetooth とデバイス → タッチパッド → スクロールとズーム）。"
+                };
+                ui.label(RichText::new(hint).size(t.fs_small).color(t.text_muted));
                 if widgets::button(ui, t, "Windows のタッチパッド設定を開く").clicked() {
                     cmd = Some(Cmd::OpenTouchpadSettings);
                 }
-                });
             });
-        }
+        });
         let on = s.enabled;
         scroll_row(
             g,
@@ -178,6 +188,7 @@ pub fn sensitivity(
     t: &Tokens,
     cfg: &mut Config,
     win_pan: Option<bool>,
+    paused: bool,
 ) -> Option<Cmd> {
     widgets::page_header(
         ui,
@@ -186,7 +197,7 @@ pub fn sensitivity(
         Page::Sensitivity.subtitle(),
     );
     section_header(ui, t, "カーソル");
-    group(ui, t, |g| cursor_group(g, t, &mut cfg.cursor));
+    group(ui, t, |g| cursor_group(g, t, &mut cfg.cursor, paused));
 
     section_header(ui, t, "2 本指スクロール");
     let cmd = scroll_group(ui, t, cfg, win_pan);
@@ -248,7 +259,7 @@ pub fn sensitivity(
 }
 
 /// The touchpad cursor speed: Windows' own setting, kept by yubi while it runs.
-fn cursor_group(g: &mut Group<'_>, t: &Tokens, cur: &mut Cursor) {
+fn cursor_group(g: &mut Group<'_>, t: &Tokens, cur: &mut Cursor, paused: bool) {
     let support = touchpad::support();
     let usable = support.is_ok();
     let desc = match &support {
@@ -276,27 +287,42 @@ fn cursor_group(g: &mut Group<'_>, t: &Tokens, cur: &mut Cursor) {
     let (lo, hi) = Cursor::RANGE;
     let spec = SliderSpec::int(u16::from(lo), u16::from(hi), 1, "");
     let mut speed = cur.speed.unwrap_or(touchpad::SPEED_DEFAULT);
-    g.row(
-        None,
-        "カーソルの速度",
-        "タッチパッドでカーソルを動かす速さです。マウスの速度とは別の設定です。",
-        |ui| {
-            ui.add_enabled_ui(usable && cur.speed.is_some(), |ui| {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(speed.to_string()).size(t.fs_body));
-                    ui.add_space(t.space_sm);
-                    ui.label(RichText::new("速い").size(t.fs_small).color(t.text_muted));
-                    let mut v = f64::from(speed);
-                    if widgets::slider(ui, t, &mut v, spec) {
-                        speed = u8::from_f64(v);
-                    }
-                    ui.label(RichText::new("遅い").size(t.fs_small).color(t.text_muted));
-                });
+    let now = if usable {
+        windows_speed(&g.ctx())
+    } else {
+        None
+    };
+    let speed_desc = match now {
+        Some(now) => format!(
+            "タッチパッドでカーソルを動かす速さです。マウスの速度とは別の設定です。Windows の現在の値: {now}"
+        ),
+        None => "タッチパッドでカーソルを動かす速さです。マウスの速度とは別の設定です。".to_owned(),
+    };
+    g.row(None, "カーソルの速度", &speed_desc, |ui| {
+        ui.add_enabled_ui(usable && cur.speed.is_some(), |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(RichText::new(speed.to_string()).size(t.fs_body));
+                ui.add_space(t.space_sm);
+                ui.label(RichText::new("速い").size(t.fs_small).color(t.text_muted));
+                let mut v = f64::from(speed);
+                if widgets::slider(ui, t, &mut v, spec) {
+                    speed = u8::from_f64(v);
+                }
+                ui.label(RichText::new("遅い").size(t.fs_small).color(t.text_muted));
             });
-        },
-    );
+        });
+    });
     if cur.speed.is_some() && cur.speed != Some(speed) {
         cur.speed = Some(speed);
+    }
+    if paused && cur.speed.is_some() {
+        g.wrapped_row(|ui| {
+            ui.label(
+                RichText::new("一時停止中は Windows の設定に戻しています")
+                    .size(t.fs_small)
+                    .color(t.accent),
+            );
+        });
     }
     g.wrapped_row(|ui| {
         ui.label(
@@ -308,6 +334,22 @@ fn cursor_group(g: &mut Group<'_>, t: &Tokens, cur: &mut Cursor) {
             .color(t.text_muted),
         );
     });
+}
+
+/// Windows' current touchpad speed, read at most every 500 ms (cached in egui's memory).
+fn windows_speed(ctx: &egui::Context) -> Option<u8> {
+    use std::time::{Duration, Instant};
+    let id = egui::Id::unique("windows-cursor-speed");
+    let cached: Option<(Instant, Option<u8>)> = ctx.data(|d| d.get_temp(id));
+    if let Some((at, v)) = cached
+        && at.elapsed() < Duration::from_millis(500)
+    {
+        return v;
+    }
+    let v = touchpad::cursor_speed();
+    ctx.data_mut(|d| d.insert_temp(id, (Instant::now(), v)));
+    ctx.request_repaint_after(Duration::from_millis(500));
+    v
 }
 
 fn detail(ui: &mut Ui, t: &Tokens, s: &mut Sensitivity, d: &Sensitivity) {

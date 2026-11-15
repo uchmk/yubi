@@ -249,13 +249,35 @@ fn list(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState) {
             });
         }
         if cfg.profiles.is_empty() {
-            g.raw_row(|ui| {
-                ui.label(
-                    RichText::new(
-                        "アプリはまだ登録されていません。下から追加すると、アプリごとに操作を変えられます。",
-                    )
-                    .color(t.text_muted),
-                );
+            g.wrapped_row(|ui| {
+                ui.vertical(|ui| {
+                    for (line, strong) in [
+                        ("アプリはまだ登録されていません。", true),
+                        (
+                            "アプリごとの設定は、そのアプリが前面にある間だけ、全体の設定を差し替える仕組みです。",
+                            false,
+                        ),
+                        (
+                            "追加するには、下の「アプリを追加」に実行ファイル名（例: code.exe）を入力して「追加」を押すか、「実行中のアプリから選ぶ」で選びます。",
+                            false,
+                        ),
+                        (
+                            "差し替えられるもの: 各ジェスチャーの動作、エッジスライダーの対象、カーソルの速度、2 本指スクロールの速さ、そのアプリでの yubi の停止。",
+                            false,
+                        ),
+                        (
+                            "例: code.exe を追加して、左端のエッジスライダーを「スクロール」にすると、VS Code の前面にいるときだけ左端でスクロールできます。",
+                            false,
+                        ),
+                    ] {
+                        let text = RichText::new(line);
+                        ui.label(if strong {
+                            text.color(t.text)
+                        } else {
+                            text.size(t.fs_small).color(t.text_muted)
+                        });
+                    }
+                });
             });
         }
     });

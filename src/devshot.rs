@@ -175,6 +175,7 @@ impl DevShot {
             ("four", Page::Four),
             ("five", Page::Five),
             ("edge", Page::Edge),
+            ("ring", Page::Ring),
             ("sensitivity", Page::Sensitivity),
             ("fingerhold", Page::FingerHold),
             ("diagnostics", Page::Diagnostics),
@@ -187,6 +188,19 @@ impl DevShot {
                 page,
                 theme: ThemeChoice::Black,
                 size: NARROW,
+                fixture: Fixture::Keep,
+                profile: None,
+                fake: false,
+                practice: false,
+            });
+        }
+        // The 感度 page tall enough to show the cursor and scroll sections without scrolling.
+        for (n, w) in [("wide", WIDE.x), ("narrow", NARROW.x)] {
+            shots.push(Shot {
+                name: format!("sensitivity-tall-{n}"),
+                page: Page::Sensitivity,
+                theme: ThemeChoice::Black,
+                size: Vec2::new(w, 1100.0),
                 fixture: Fixture::Keep,
                 profile: None,
                 fake: false,

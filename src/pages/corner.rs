@@ -74,7 +74,8 @@ pub fn corner(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
     let before = view;
     ui.add_enabled_ui(on, |ui| {
         ui.add_space(t.space_sm);
-        segmented(ui, t, &mut view.tab);
+        let labels = CornerTrigger::ALL.map(CornerTrigger::label);
+        segmented_tabs(ui, t, "corner-tab", &labels, &mut view.tab);
         let tr = CornerTrigger::ALL[view.tab.min(3)];
         // The selection belongs to the tab it was made on.
         if view.selected.is_some_and(|(_, s)| s.trigger() != tr) {
@@ -142,9 +143,14 @@ pub fn corner(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
     }
 }
 
-/// Segmented control over the four triggers.
-fn segmented(ui: &mut Ui, t: &Tokens, tab: &mut usize) {
-    let labels = CornerTrigger::ALL.map(CornerTrigger::label);
+/// Segmented control over `labels` (`salt` keeps the ids of two controls apart).
+pub(super) fn segmented_tabs(
+    ui: &mut Ui,
+    t: &Tokens,
+    salt: &'static str,
+    labels: &[&str],
+    tab: &mut usize,
+) {
     let avail = ui.available_width();
     let seg_w = (avail / labels.len() as f32).clamp(64.0, 112.0);
     let size = Vec2::new(seg_w * labels.len() as f32, t.control_h + 4.0);
@@ -163,7 +169,7 @@ fn segmented(ui: &mut Ui, t: &Tokens, tab: &mut usize) {
             Vec2::new(seg_w, rect.height()),
         )
         .shrink(2.0);
-        let resp = ui.interact(r, ui.auto_id_with(("corner-tab", i)), Sense::click());
+        let resp = ui.interact(r, ui.auto_id_with((salt, i)), Sense::click());
         if resp.clicked() {
             *tab = i;
         }

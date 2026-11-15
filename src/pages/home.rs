@@ -111,15 +111,36 @@ fn right_column(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
     });
     group(ui, t, |g| {
         for page in FEATURES {
-            let Some(flag) = page.enabled_mut(cfg) else {
-                continue;
+            // The ジェスチャー page carries two switches (4 and 5 fingers): one row each.
+            let rows: Vec<(char, &str, &str, bool)> = if page == Page::Gesture {
+                vec![
+                    (icons::FOUR_FINGER, "4本指ジェスチャー", "", true),
+                    (icons::FIVE_FINGER, "5本指ジェスチャー", "", false),
+                ]
+            } else {
+                vec![(page.icon(), page.label(), page.subtitle(), true)]
             };
-            g.row(Some(page.icon()), page.label(), page.subtitle(), |ui| {
-                if icon_button(ui, t, icons::CHEVRON_RIGHT, "開く").clicked() {
-                    cmd = Some(Cmd::Goto(page));
-                }
-                ui.add_enabled_ui(master, |ui| toggle(ui, t, flag));
-            });
+            for (icon, label, desc, first) in rows {
+                let flag = if page == Page::Gesture && !first {
+                    &mut cfg.five.enabled
+                } else {
+                    let Some(flag) = page.enabled_mut(cfg) else {
+                        continue;
+                    };
+                    flag
+                };
+                let desc = if desc.is_empty() {
+                    page.subtitle()
+                } else {
+                    desc
+                };
+                g.row(Some(icon), label, desc, |ui| {
+                    if icon_button(ui, t, icons::CHEVRON_RIGHT, "開く").clicked() {
+                        cmd = Some(Cmd::Goto(page));
+                    }
+                    ui.add_enabled_ui(master, |ui| toggle(ui, t, flag));
+                });
+            }
         }
     });
     cmd

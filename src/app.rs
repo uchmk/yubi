@@ -471,21 +471,22 @@ impl App {
             if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 goto = search::filter(&self.search_index, &self.query)
                     .first()
-                    .map(|e| e.page);
+                    .map(|e| (e.page, e.desc));
             }
         });
-        if let Some(p) = goto {
-            self.finish_search(p);
+        if let Some((p, desc)) = goto {
+            self.finish_search(p, desc);
             return;
         }
         if self.search_open && !self.query.trim().is_empty() {
             let pos = text_rect.left_bottom() + egui::vec2(0.0, t.space_xs);
             let ctx = ui.ctx().clone();
-            let results: Vec<(Page, &str, &str)> = search::filter(&self.search_index, &self.query)
-                .into_iter()
-                .take(t.search_results_max)
-                .map(|e| (e.page, e.title, e.desc))
-                .collect();
+            let results: Vec<(Page, &'static str, &'static str)> =
+                search::filter(&self.search_index, &self.query)
+                    .into_iter()
+                    .take(t.search_results_max)
+                    .map(|e| (e.page, e.title, e.desc))
+                    .collect();
             let area = Area::new(Id::unique("search_results"))
                 .order(Order::Foreground)
                 .fixed_pos(pos)
@@ -523,13 +524,13 @@ impl App {
                                 );
                             }
                             if r.clicked() {
-                                goto = Some(*page);
+                                goto = Some((*page, *desc));
                             }
                         }
                     });
                 });
-            if let Some(p) = goto {
-                self.finish_search(p);
+            if let Some((p, desc)) = goto {
+                self.finish_search(p, desc);
                 return;
             }
             let clicked_outside = ui.input(|i| i.pointer.any_pressed())
@@ -542,7 +543,11 @@ impl App {
         }
     }
 
-    fn finish_search(&mut self, page: Page) {
+    fn finish_search(&mut self, page: Page, desc: &str) {
+        // A 5-finger hit opens the 5本指 tab of the ジェスチャー page.
+        if page == Page::Gesture {
+            features::request_gesture_tab(usize::from(desc.starts_with("5本指")));
+        }
         self.page = page;
         self.search_open = false;
         self.query.clear();
@@ -609,8 +614,7 @@ impl App {
         match self.page {
             Page::Home => return home::home(ui, t, cfg, self.diagnostics.connected()),
             Page::Drag => return features::drag(ui, t, cfg, &self.win_values),
-            Page::Four => return features::four(ui, t, cfg, &self.win_values),
-            Page::Five => features::five(ui, t, cfg),
+            Page::Gesture => return features::gesture(ui, t, cfg, &self.win_values),
             Page::CustomPress => {
                 let key = self
                     .diagnostics
@@ -625,7 +629,6 @@ impl App {
             Page::ThumbHold => features::hold_combos(ui, t, cfg, Page::ThumbHold),
             Page::Corner => corner::corner(ui, t, cfg),
             Page::Edge => features::edge(ui, t, cfg),
-            Page::Window => return features::window(ui, t, cfg, &self.win_values),
             Page::Ring => return features::ring(ui, t, cfg),
             Page::Profiles => return apps::page(ui, t, cfg, &mut self.apps),
             Page::Overview => {
@@ -723,7 +726,7 @@ impl eframe::App for App {
         // Pages that show the Windows-gesture state (or warn about it) re-read it when opened.
         let general_open = matches!(
             self.page,
-            Page::General | Page::Drag | Page::Window | Page::Overview | Page::Sensitivity
+            Page::General | Page::Drag | Page::Gesture | Page::Overview | Page::Sensitivity
         );
         if general_open && !self.win_page_was_open {
             self.refresh_win_values();

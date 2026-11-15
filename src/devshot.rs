@@ -44,6 +44,8 @@ pub enum Fixture {
     CornerEdge,
     /// A ring with eight items, including an app launch with a long path.
     RingFull,
+    /// The ジェスチャー page on tab `0` (4 fingers) or `1` (5 fingers), with some actions set.
+    GestureTab(u8),
 }
 
 impl Fixture {
@@ -107,6 +109,18 @@ impl Fixture {
                 for i in [0, 1] {
                     cfg.corner.corners[i] = crate::config::CornerCfg::default();
                 }
+            }
+            Self::GestureTab(tab) => {
+                cfg.gestures_enabled = true;
+                cfg.four.enabled = true;
+                cfg.five.enabled = true;
+                cfg.five.tap = Action::Find;
+                cfg.five.swipe_left = Action::DesktopPrev;
+                cfg.five.swipe_right = Action::DesktopNext;
+                cfg.five.swipe_up = Action::TaskView;
+                cfg.five.pinch_in = Action::ShowDesktop;
+                cfg.drag.fingers = 3;
+                crate::pages::features::force_gesture_tab(usize::from(tab));
             }
             Self::RingFull => {
                 use crate::config::RingItem;
@@ -225,15 +239,13 @@ impl DevShot {
         let all = [
             ("home", Page::Home),
             ("drag", Page::Drag),
-            ("four", Page::Four),
-            ("five", Page::Five),
+            ("gesture", Page::Gesture),
             ("press", Page::CustomPress),
             ("longhold", Page::LongHold),
             ("fingerhold", Page::FingerHold),
             ("thumbhold", Page::ThumbHold),
             ("corner", Page::Corner),
             ("edge", Page::Edge),
-            ("window", Page::Window),
             ("ring", Page::Ring),
             ("profiles", Page::Profiles),
             ("sensitivity", Page::Sensitivity),
@@ -273,8 +285,7 @@ impl DevShot {
         }
         for &(n, page) in &[
             ("home", Page::Home),
-            ("four", Page::Four),
-            ("five", Page::Five),
+            ("gesture", Page::Gesture),
             ("longhold", Page::LongHold),
             ("edge", Page::Edge),
             ("ring", Page::Ring),
@@ -326,6 +337,39 @@ impl DevShot {
                 anim_t: None,
                 reduced: false,
             });
+        }
+        if std::env::var_os("YUBI_SHOT_NAV").is_some() {
+            // The navigation (both groups open) and the ジェスチャー page, both tabs, dark and light.
+            let mut list = Vec::new();
+            list.push(Shot {
+                name: "nav-wide".into(),
+                page: Page::Drag,
+                theme: ThemeChoice::Black,
+                size: Vec2::new(WIDE.x, 900.0),
+                fixture: Fixture::Keep,
+                profile: None,
+                fake: false,
+                practice: false,
+                anim_t: None,
+                reduced: false,
+            });
+            for tab in 0..2u8 {
+                for (n, theme) in [("dark", ThemeChoice::Black), ("light", ThemeChoice::Light)] {
+                    list.push(Shot {
+                        name: format!("gesture-tab{}-{n}", 4 + tab),
+                        page: Page::Gesture,
+                        theme,
+                        size: Vec2::new(WIDE.x, 1000.0),
+                        fixture: Fixture::GestureTab(tab),
+                        profile: None,
+                        fake: false,
+                        practice: false,
+                        anim_t: None,
+                        reduced: false,
+                    });
+                }
+            }
+            shots = list;
         }
         // The practice page with a made-up state: three fingers down and a short history.
         for (n, size) in [("wide", WIDE), ("narrow", NARROW)] {

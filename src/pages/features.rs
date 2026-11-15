@@ -80,7 +80,10 @@ fn overlap_note(ui: &mut Ui, t: &Tokens, cfg: &Config, on: bool) {
 
 pub fn drag(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win: &win_gestures::Values) -> Option<Cmd> {
     let on = feature_top(ui, t, cfg, Page::Drag);
-    let cmd = windows_conflict(ui, t, win, cfg.drag.fingers, on);
+    // Window move is a three-finger gesture: one card covers it and a 3-finger drag.
+    let win_on = cfg.window.enabled && cfg.window.move_with_three_finger;
+    let mut cmd = windows_conflict(ui, t, win, cfg.drag.fingers, on);
+    let drag_covers_three = on && cfg.drag.fingers == 3;
     overlap_note(ui, t, cfg, on);
     ui.add_enabled_ui(on, |ui| {
         section_header(ui, t, "動作");
@@ -106,20 +109,145 @@ pub fn drag(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win: &win_gestures::Value
             );
         });
     });
+    // Window operations live here until they fold into the per-count drag rows.
+    section_header(ui, t, "ウィンドウ操作");
+    cmd = cmd.or(windows_conflict(
+        ui,
+        t,
+        win,
+        3,
+        win_on && !drag_covers_three,
+    ));
+    group(ui, t, |g| {
+        g.toggle_row(
+            Some(icons::WINDOW),
+            "ウィンドウ操作を有効にする",
+            "オフにすると、ウィンドウの移動・スナップ・サイズ変更は動きません。",
+            &mut cfg.window.enabled,
+        );
+    });
+    ui.add_enabled_ui(cfg.window.enabled, |ui| {
+        group(ui, t, |g| {
+            let w = &mut cfg.window;
+            g.toggle_row(
+                None,
+                "3本指でウィンドウを移動",
+                "3本指でタップしてからスワイプすると、ウィンドウを動かします。",
+                &mut w.move_with_three_finger,
+            );
+            g.toggle_row(
+                None,
+                "フリックでスナップ",
+                "ウィンドウをはじくと、画面の端や角に寄せます。",
+                &mut w.flick_snap,
+            );
+            g.toggle_row(
+                None,
+                "コーナースワイプでサイズ変更",
+                "角から反対側の角へなぞって、ウィンドウサイズを変更します。",
+                &mut w.corner_resize,
+            );
+        });
+    });
     cmd
 }
 
-/// The 4-finger page: tap, four swipe directions and pinch, plus the notes about what overlaps.
-pub fn four(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win: &win_gestures::Values) -> Option<Cmd> {
-    let on = feature_top(ui, t, cfg, Page::Four);
-    let mut cmd = windows_conflict(ui, t, win, 4, on);
-    if on && cfg.drag.enabled && cfg.drag.fingers == 4 {
+/// The tab of the ジェスチャー page (0: 4 fingers, 1: 5 fingers), kept between frames.
+fn gesture_tab_id(ui: &Ui) -> egui::Id {
+    ui.make_persistent_id("yubi-gesture-tab")
+}
+
+/// Development aid (devshots): pin the ジェスチャー tab.
+static FORCE_TAB: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
+
+/// A tab picked by a jump from the search or the overview; the page takes it on its next frame.
+static PENDING_TAB: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Open the ジェスチャー page on tab `tab` (0: 4 fingers, 1: 5 fingers) the next time it shows.
+pub fn request_gesture_tab(tab: usize) {
+    PENDING_TAB.store(tab.min(1), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The tab to open for a gesture id such as `swipe.5.up` (`None` for ids of other pages).
+pub fn tab_of_key(key: &str) -> Option<usize> {
+    match key.split('.').collect::<Vec<_>>().as_slice() {
+        ["tap" | "swipe" | "pinch", "5", ..] => Some(1),
+        ["tap" | "swipe" | "pinch", ..] => Some(0),
+        _ => None,
+    }
+}
+
+pub fn force_gesture_tab(tab: usize) {
+    if let Ok(mut f) = FORCE_TAB.lock() {
+        *f = Some(tab.min(1));
+    }
+}
+
+/// The ジェスチャー page: tabs 4本指 / 5本指, each with its own enable toggle and the sections
+/// タップ, スワイプ and ピンチ.
+pub fn gesture(
+    ui: &mut Ui,
+    t: &Tokens,
+    cfg: &mut Config,
+    win: &win_gestures::Values,
+) -> Option<Cmd> {
+    widgets::page_header(ui, t, Page::Gesture.label(), Page::Gesture.subtitle());
+    let pending = PENDING_TAB.swap(usize::MAX, std::sync::atomic::Ordering::Relaxed);
+    if pending != usize::MAX {
+        ui.data_mut(|d| d.insert_temp(gesture_tab_id(ui), pending));
+        if let Ok(mut f) = FORCE_TAB.lock()
+            && f.is_some()
+        {
+            *f = Some(pending);
+        }
+    }
+    let pinned = FORCE_TAB.lock().ok().and_then(|f| *f);
+    let mut tab: usize = pinned
+        .or_else(|| ui.data(|d| d.get_temp(gesture_tab_id(ui))))
+        .unwrap_or(0)
+        .min(1);
+    let before = tab;
+    ui.add_space(t.space_sm);
+    super::corner::segmented_tabs(ui, t, "gesture-tab", &["4本指", "5本指"], &mut tab);
+    if tab != before {
+        ui.data_mut(|d| d.insert_temp(gesture_tab_id(ui), tab));
+        if let Ok(mut f) = FORCE_TAB.lock()
+            && f.is_some()
+        {
+            *f = Some(tab);
+        }
+    }
+    let n: u8 = if tab == 0 { 4 } else { 5 };
+    let (icon, title) = if tab == 0 {
+        (icons::FOUR_FINGER, "4本指ジェスチャーを有効にする")
+    } else {
+        (icons::FIVE_FINGER, "5本指ジェスチャーを有効にする")
+    };
+    let flag = if tab == 0 {
+        &mut cfg.four.enabled
+    } else {
+        &mut cfg.five.enabled
+    };
+    group(ui, t, |g| {
+        g.toggle_row(
+            Some(icon),
+            title,
+            "オフにすると、この本数のジェスチャーは無視されます。",
+            flag,
+        );
+    });
+    let on = *flag;
+    let mut cmd = windows_conflict(ui, t, win, n, on);
+    if on && cfg.drag.enabled && cfg.drag.fingers == n {
         group(ui, t, |g| {
             g.wrapped_row(|ui| {
                 ui.label(
-                    RichText::new("ドラッグに 4 本指を使っているため、スワイプは使えません")
-                        .size(t.fs_small)
-                        .color(t.accent),
+                    RichText::new(format!(
+                        "ドラッグに {n} 本指を使っているため、スワイプは使えません"
+                    ))
+                    .size(t.fs_small)
+                    .color(t.accent),
                 );
                 if widgets::button(ui, t, "ドラッグを開く").clicked() {
                     cmd = Some(Cmd::Goto(Page::Drag));
@@ -128,93 +256,61 @@ pub fn four(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win: &win_gestures::Value
         });
     }
     ui.add_enabled_ui(on, |ui| {
-        let f = &mut cfg.four;
         section_header(ui, t, "タップ");
         group(ui, t, |g| {
-            g.action_row("タップ", "4本指で軽く触れたとき", "four-tap", &mut f.tap);
+            let (id, slot) = if tab == 0 {
+                ("four-tap", &mut cfg.four.tap)
+            } else {
+                ("five-tap", &mut cfg.five.tap)
+            };
+            g.action_row("タップ", &format!("{n}本指で軽く触れたとき"), id, slot);
         });
         section_header(ui, t, "スワイプ");
         group(ui, t, |g| {
-            g.action_row(
-                "左にスワイプ",
-                "4本指で左へなぞったとき",
-                "four-left",
-                &mut f.swipe_left,
-            );
-            g.action_row(
-                "右にスワイプ",
-                "4本指で右へなぞったとき",
-                "four-right",
-                &mut f.swipe_right,
-            );
-            g.action_row(
-                "上にスワイプ",
-                "4本指で上へなぞったとき",
-                "four-up",
-                &mut f.swipe_up,
-            );
-            g.action_row(
-                "下にスワイプ",
-                "4本指で下へなぞったとき",
-                "four-down",
-                &mut f.swipe_down,
-            );
+            let rows: [(&str, &str, &str, &mut Action); 4] = if tab == 0 {
+                let f = &mut cfg.four;
+                [
+                    ("左にスワイプ", "左", "four-left", &mut f.swipe_left),
+                    ("右にスワイプ", "右", "four-right", &mut f.swipe_right),
+                    ("上にスワイプ", "上", "four-up", &mut f.swipe_up),
+                    ("下にスワイプ", "下", "four-down", &mut f.swipe_down),
+                ]
+            } else {
+                let f = &mut cfg.five;
+                [
+                    ("左にスワイプ", "左", "five-left", &mut f.swipe_left),
+                    ("右にスワイプ", "右", "five-right", &mut f.swipe_right),
+                    ("上にスワイプ", "上", "five-up", &mut f.swipe_up),
+                    ("下にスワイプ", "下", "five-down", &mut f.swipe_down),
+                ]
+            };
+            for (title, dir, id, slot) in rows {
+                g.action_row(title, &format!("{n}本指で{dir}へなぞったとき"), id, slot);
+            }
         });
         section_header(ui, t, "ピンチ");
         group(ui, t, |g| {
-            g.action_row(
-                "ピンチイン",
-                "4本指で指を寄せたとき",
-                "four-in",
-                &mut f.pinch_in,
-            );
+            let (a, b) = if tab == 0 {
+                (
+                    ("four-in", &mut cfg.four.pinch_in),
+                    ("four-out", &mut cfg.four.pinch_out),
+                )
+            } else {
+                (
+                    ("five-in", &mut cfg.five.pinch_in),
+                    ("five-out", &mut cfg.five.pinch_out),
+                )
+            };
+            g.action_row("ピンチイン", &format!("{n}本指で指を寄せたとき"), a.0, a.1);
             g.action_row(
                 "ピンチアウト",
-                "4本指で指を広げたとき",
-                "four-out",
-                &mut f.pinch_out,
+                &format!("{n}本指で指を広げたとき"),
+                b.0,
+                b.1,
             );
         });
     });
     cmd
-}
-
-pub fn five(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
-    let on = feature_top(ui, t, cfg, Page::Five);
-    ui.add_enabled_ui(on, |ui| {
-        section_header(ui, t, "ピンチ");
-        group(ui, t, |g| {
-            let f = &mut cfg.five;
-            g.action_row(
-                "ピンチイン",
-                "5本指で指を寄せたとき",
-                "five-in",
-                &mut f.pinch_in,
-            );
-            g.action_row(
-                "ピンチアウト",
-                "5本指で指を広げたとき",
-                "five-out",
-                &mut f.pinch_out,
-            );
-        });
-        section_header(ui, t, "スワイプ");
-        group(ui, t, |g| {
-            let f = &mut cfg.five;
-            g.action_row(
-                "上にスワイプ",
-                "5本指で上へなぞったとき",
-                "five-up",
-                &mut f.swipe_up,
-            );
-            g.action_row(
-                "下にスワイプ",
-                "5本指で下へなぞったとき",
-                "five-down",
-                &mut f.swipe_down,
-            );
-        });
-    });
 }
 
 pub fn custom_press(
@@ -594,42 +690,6 @@ fn edge_target_rows(
             &mut c.step_mm,
         );
     }
-}
-
-pub fn window(
-    ui: &mut Ui,
-    t: &Tokens,
-    cfg: &mut Config,
-    win: &win_gestures::Values,
-) -> Option<Cmd> {
-    let on = feature_top(ui, t, cfg, Page::Window);
-    // Window move is a three-finger gesture.
-    let cmd = windows_conflict(ui, t, win, 3, on && cfg.window.move_with_three_finger);
-    ui.add_enabled_ui(on, |ui| {
-        section_header(ui, t, "動作");
-        group(ui, t, |g| {
-            let w = &mut cfg.window;
-            g.toggle_row(
-                None,
-                "3本指でウィンドウを移動",
-                "3本指でタップしてからスワイプすると、ウィンドウを動かします。",
-                &mut w.move_with_three_finger,
-            );
-            g.toggle_row(
-                None,
-                "フリックでスナップ",
-                "ウィンドウをはじくと、画面の端や角に寄せます。",
-                &mut w.flick_snap,
-            );
-            g.toggle_row(
-                None,
-                "コーナースワイプでサイズ変更",
-                "角から反対側の角へなぞって、ウィンドウサイズを変更します。",
-                &mut w.corner_resize,
-            );
-        });
-    });
-    cmd
 }
 
 /// "3 本の指", "3 本または 5 本の指", "3 本、4 本、5 本のいずれかの指" (nothing bound: a hint).

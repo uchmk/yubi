@@ -90,8 +90,7 @@ pub fn gesture_name(key: &str) -> String {
 pub fn page_of(key: &str) -> Page {
     let parts: Vec<&str> = key.split('.').collect();
     match parts.as_slice() {
-        ["tap" | "swipe" | "pinch", "5", ..] => Page::Five,
-        ["tap" | "swipe" | "pinch", ..] => Page::Four,
+        ["tap" | "swipe" | "pinch", ..] => Page::Gesture,
         ["press", ..] => Page::CustomPress,
         ["hold", "long", _] => Page::LongHold,
         ["hold", "thumb", ..] => Page::ThumbHold,
@@ -105,8 +104,6 @@ pub fn page_of(key: &str) -> Page {
 /// Whether the feature page that owns `page` is switched on.
 pub fn feature_on(cfg: &Config, page: Page) -> bool {
     match page {
-        Page::Four => cfg.four.enabled,
-        Page::Five => cfg.five.enabled,
         Page::CustomPress => cfg.press.enabled,
         Page::LongHold => cfg.long_hold.enabled,
         Page::FingerHold => cfg.finger_hold.enabled,
@@ -114,6 +111,16 @@ pub fn feature_on(cfg: &Config, page: Page) -> bool {
         Page::Corner => cfg.corner.enabled,
         Page::Edge => cfg.edge.enabled,
         _ => true,
+    }
+}
+
+/// Whether the feature that owns the gesture or edge `key` is switched on (the ジェスチャー page
+/// has one switch per finger count).
+pub fn feature_on_key(cfg: &Config, key: &str) -> bool {
+    match key.split('.').collect::<Vec<_>>().as_slice() {
+        ["tap" | "swipe" | "pinch", "5", ..] => cfg.five.enabled,
+        ["tap" | "swipe" | "pinch", ..] => cfg.four.enabled,
+        _ => feature_on(cfg, page_of(key)),
     }
 }
 
@@ -418,28 +425,71 @@ fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conf
         });
     }
 
-    // Features that are off but still have bindings (one entry per page).
-    for page in [
-        Page::Four,
-        Page::Five,
-        Page::CustomPress,
-        Page::LongHold,
-        Page::FingerHold,
-        Page::ThumbHold,
-        Page::Corner,
-        Page::Edge,
-    ] {
-        if feature_on(cfg, page) {
+    // Features that are off but still have bindings (one entry per page, and per finger count on
+    // the ジェスチャー page).
+    type Pick = Box<dyn Fn(&Row) -> bool>;
+    let sections: [(Page, &str, Option<u8>, Pick); 8] = [
+        (
+            Page::Gesture,
+            "4本指ジェスチャー",
+            Some(4),
+            Box::new(|r| r.page == Page::Gesture && fingers_of(&r.key) != Some(5)),
+        ),
+        (
+            Page::Gesture,
+            "5本指ジェスチャー",
+            Some(5),
+            Box::new(|r| r.page == Page::Gesture && fingers_of(&r.key) == Some(5)),
+        ),
+        (
+            Page::CustomPress,
+            "",
+            None,
+            Box::new(|r| r.page == Page::CustomPress),
+        ),
+        (
+            Page::LongHold,
+            "",
+            None,
+            Box::new(|r| r.page == Page::LongHold),
+        ),
+        (
+            Page::FingerHold,
+            "",
+            None,
+            Box::new(|r| r.page == Page::FingerHold),
+        ),
+        (
+            Page::ThumbHold,
+            "",
+            None,
+            Box::new(|r| r.page == Page::ThumbHold),
+        ),
+        (Page::Corner, "", None, Box::new(|r| r.page == Page::Corner)),
+        (Page::Edge, "", None, Box::new(|r| r.page == Page::Edge)),
+    ];
+    for (page, title, count, pick) in &sections {
+        let page = *page;
+        let on = match count {
+            Some(5) => cfg.five.enabled,
+            Some(_) => cfg.four.enabled,
+            None => feature_on(cfg, page),
+        };
+        if on {
             continue;
         }
-        let affected = keys(&|r| r.page == page);
+        let affected = keys(&|r| pick(r));
         if !affected.is_empty() {
+            let name = if title.is_empty() {
+                page.label()
+            } else {
+                title
+            };
             out.push(Conflict {
                 kind: ConflictKind::Disabled,
                 rows: affected,
                 reason: format!(
-                    "「{}」がオフのため、この割り当ては動きません。ページで有効にしてください。",
-                    page.label()
+                    "「{name}」がオフのため、この割り当ては動きません。ページで有効にしてください。"
                 ),
                 page,
             });
@@ -454,7 +504,7 @@ fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conf
         let affected = keys(&|r| {
             fingers_of(&r.key) == Some(fingers)
                 && !r.key.starts_with("press.")
-                && feature_on(cfg, r.page)
+                && feature_on_key(cfg, &r.key)
         });
         if !affected.is_empty() {
             out.push(Conflict {
@@ -490,7 +540,7 @@ fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conf
     if cfg.drag.enabled {
         let n = cfg.drag.fingers;
         let prefix = format!("swipe.{n}.");
-        let affected = keys(&|r| r.key.starts_with(&prefix) && feature_on(cfg, r.page));
+        let affected = keys(&|r| r.key.starts_with(&prefix) && feature_on_key(cfg, &r.key));
         if !affected.is_empty() {
             out.push(Conflict {
                 kind: ConflictKind::Overlap,
@@ -506,7 +556,7 @@ fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conf
                 kind: ConflictKind::Overlap,
                 rows: Vec::new(),
                 reason: "3本指のドラッグと3本指でのウィンドウ移動は、同じ操作から始まるため区別できません。".into(),
-                page: Page::Window,
+                page: Page::Drag,
             });
         }
     }
@@ -526,7 +576,7 @@ fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conf
                 rows: affected,
                 reason: "コーナースワイプが、ウィンドウのサイズ変更（角から反対側の角へなぞる）と重なります。"
                     .into(),
-                page: Page::Window,
+                page: Page::Drag,
             });
         }
     }
@@ -617,6 +667,9 @@ pub fn page(
                 tag(ui, t, c.kind.label());
                 ui.label(RichText::new(&c.reason).size(t.fs_body));
                 if widgets::button(ui, t, "開く").clicked() {
+                    if let Some(tab) = c.rows.first().and_then(|k| super::features::tab_of_key(k)) {
+                        super::features::request_gesture_tab(tab);
+                    }
                     cmd = Some(Cmd::Goto(c.page));
                 }
             });
@@ -767,6 +820,9 @@ pub fn page(
                 if r.on_hover_text(format!("「{}」を開く", row.page.label()))
                     .clicked()
                 {
+                    if let Some(tab) = super::features::tab_of_key(&row.key) {
+                        super::features::request_gesture_tab(tab);
+                    }
                     cmd = Some(Cmd::Goto(row.page));
                 }
             });
@@ -869,7 +925,7 @@ mod tests {
         let t = build(&cfg, &WIN_OFF);
         assert_eq!(row(&t, "swipe.4.left").global, Action::Find.label());
         assert!(t.rows.iter().all(|r| r.key != "tap.4"));
-        assert_eq!(row(&t, "swipe.4.left").page, Page::Four);
+        assert_eq!(row(&t, "swipe.4.left").page, Page::Gesture);
         assert!(t.columns.is_empty());
     }
 
@@ -929,7 +985,7 @@ mod tests {
             .filter(|c| c.kind == ConflictKind::Disabled)
             .collect();
         assert_eq!(c.len(), 1);
-        assert_eq!(c[0].page, Page::Four);
+        assert_eq!(c[0].page, Page::Gesture);
         assert!(c[0].rows.contains(&"swipe.4.left".to_owned()));
         assert!(c[0].reason.contains("オフ"));
         assert_eq!(t.kinds_of("swipe.4.left"), vec![ConflictKind::Disabled]);

@@ -23,7 +23,7 @@ pub const DEFAULT_MULTI: (f32, f32) = (0.07, 0.12);
 /// Smallest usable span between the relaxed baseline and the firm level (raw pressure scale).
 pub const MIN_CALIBRATION_SPAN: f32 = 0.05;
 /// Number of feature toggles counted by [`Config::enabled_count`].
-pub const FEATURE_COUNT: usize = 11;
+pub const FEATURE_COUNT: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -594,6 +594,9 @@ impl Default for Four {
 #[serde(default)]
 pub struct Five {
     pub enabled: bool,
+    pub tap: Action,
+    pub swipe_left: Action,
+    pub swipe_right: Action,
     pub pinch_in: Action,
     pub pinch_out: Action,
     pub swipe_up: Action,
@@ -1963,6 +1966,9 @@ macro_rules! slot_of {
             "swipe.4.down" => Some(&$($m)* $cfg.four.swipe_down),
             "pinch.4.in" => Some(&$($m)* $cfg.four.pinch_in),
             "pinch.4.out" => Some(&$($m)* $cfg.four.pinch_out),
+            "tap.5" => Some(&$($m)* $cfg.five.tap),
+            "swipe.5.left" => Some(&$($m)* $cfg.five.swipe_left),
+            "swipe.5.right" => Some(&$($m)* $cfg.five.swipe_right),
             "swipe.5.up" => Some(&$($m)* $cfg.five.swipe_up),
             "swipe.5.down" => Some(&$($m)* $cfg.five.swipe_down),
             "pinch.5.in" => Some(&$($m)* $cfg.five.pinch_in),
@@ -2235,7 +2241,6 @@ impl Config {
             self.thumb_hold.enabled,
             self.corner.enabled,
             self.edge.enabled,
-            self.window.enabled,
             self.ring.enabled,
         ]
     }
@@ -2275,6 +2280,9 @@ impl Config {
         if self.five.enabled {
             let f = &self.five;
             for (name, a) in [
+                ("5本指でタップ", &f.tap),
+                ("5本指で左にスワイプ", &f.swipe_left),
+                ("5本指で右にスワイプ", &f.swipe_right),
                 ("5本指でピンチイン", &f.pinch_in),
                 ("5本指でピンチアウト", &f.pinch_out),
                 ("5本指で上にスワイプ", &f.swipe_up),
@@ -2870,7 +2878,7 @@ pub fn parse_text(text: &str) -> Result<Parsed, ParseError> {
 
     let raw = config.clone();
     config.normalize();
-    // Overrides for ids that have a name but no global field (`tap.5`, `swipe.3.left` ...) could
+    // Overrides for ids that have a name but no global field (`tap.3`, `swipe.3.left` ...) could
     // never be resolved: drop them. Checked after normalizing so `press.N` / corner slots exist.
     let mut unbindable_overrides = Vec::new();
     let mut inert_overrides = Vec::new();
@@ -3897,7 +3905,7 @@ enabled = true
         // are on; edge sliders are off.
         assert_eq!(cfg.enabled_count(), (3, FEATURE_COUNT));
         cfg.drag.enabled = true;
-        cfg.window.enabled = true;
+        cfg.edge.enabled = true;
         assert_eq!(cfg.enabled_count(), (5, FEATURE_COUNT));
     }
 
@@ -4389,7 +4397,7 @@ step_mm = 0.1
 exe_name = \"a.exe\"
 [profiles.overrides]
 \"swipe.4.left\" = \"none\"
-\"tap.5\" = \"none\"
+\"tap.3\" = \"none\"
 \"swipe.3.left\" = \"none\"
 \"pinch.3.in\" = \"none\"
 ";
@@ -4518,10 +4526,10 @@ command = 5
                 assert_eq!(cfg.binding(id), Some(sentinel), "{id}");
             }
         }
-        // 7 (four) + 4 (five) + 10 (press) + 5 (long hold) + 24 (corners) + 20 (hold combos).
-        assert_eq!(bound, 70);
+        // 7 (four) + 7 (five) + 10 (press) + 5 (long hold) + 24 (corners) + 20 (hold combos).
+        assert_eq!(bound, 73);
         // Ids without a field refuse.
-        for id in ["tap.3", "tap.5", "swipe.3.up", "swipe.5.left", "pinch.3.in"] {
+        for id in ["tap.3", "swipe.3.up", "swipe.3.left", "pinch.3.in"] {
             let id = GestureId::parse(id).unwrap();
             assert_eq!(cfg.binding(&id), None);
             assert!(!cfg.set_binding(&id, Action::Find));
@@ -4558,7 +4566,7 @@ command = 5
                 );
             }
         }
-        assert_eq!(sentinels, 70);
+        assert_eq!(sentinels, 73);
     }
 
     #[test]

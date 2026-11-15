@@ -125,6 +125,9 @@ fn five_cfg() -> Config {
     cfg.five.pinch_out = config::Action::ShowDesktop;
     cfg.five.swipe_up = config::Action::AppSwitch;
     cfg.five.swipe_down = config::Action::Find;
+    cfg.five.tap = config::Action::MiddleClick;
+    cfg.five.swipe_left = config::Action::DesktopNext;
+    cfg.five.swipe_right = config::Action::DesktopPrev;
     cfg
 }
 
@@ -466,6 +469,34 @@ fn five_swipe_up_and_down() {
         }),
         vec![config::Action::Find]
     );
+}
+
+#[test]
+fn five_swipe_left_and_right() {
+    assert_eq!(
+        five_run(100, |s, p| {
+            s.glide(p, -25.0, 0.0, 250);
+        }),
+        vec![config::Action::DesktopNext]
+    );
+    assert_eq!(
+        five_run(100, |s, p| {
+            s.glide(p, 25.0, 0.0, 250);
+        }),
+        vec![config::Action::DesktopPrev]
+    );
+}
+
+#[test]
+fn five_tap_fires_when_bound() {
+    assert_eq!(five_run(60, |_, _| {}), vec![config::Action::MiddleClick]);
+    // Unbound: a tap does nothing.
+    let mut s = Seq::default();
+    s.still(&ring(80.0, 57.0, 1.0), 60);
+    s.lift(0);
+    let mut cfg = five_cfg();
+    cfg.five.tap = config::Action::None;
+    assert!(triggers(&s.run(&cfg)).is_empty());
 }
 
 #[test]

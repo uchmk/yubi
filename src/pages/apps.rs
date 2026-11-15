@@ -4,7 +4,8 @@
 use eframe::egui::{self, Align, Layout, RichText, Ui};
 
 use super::Cmd;
-use super::overview::{feature_on, gesture_name, overridable_ids, page_of, profile_title};
+use super::features;
+use super::overview::{feature_on_key, gesture_name, overridable_ids, page_of, profile_title};
 use crate::config::{
     Action, ActionKind, Config, Cursor, CustomEdge, EDGE_KEYS, EdgeKind, EdgeTarget, Profile,
     Scroll,
@@ -460,7 +461,7 @@ fn detail(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState, i: usiz
             Info {
                 name: gesture_name(id.as_str()),
                 global: cfg.binding(&id).map(|a| a.label()).unwrap_or_default(),
-                on: feature_on(cfg, page),
+                on: feature_on_key(cfg, id.as_str()),
                 id: id.as_str().to_owned(),
                 page,
             }
@@ -496,12 +497,23 @@ fn detail(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState, i: usiz
         group(ui, t, |g| scroll_speed_row(g, t, p, scroll_on));
 
         let options = Choice::options();
-        for page in [Page::Four, Page::Five, Page::CustomPress] {
-            let rows: Vec<&Info> = infos.iter().filter(|x| x.page == page).collect();
+        type Pick<'a> = Box<dyn Fn(&Info) -> bool + 'a>;
+        let on_page = |page: Page, five: Option<bool>| -> Pick<'static> {
+            Box::new(move |x: &Info| {
+                x.page == page && five.is_none_or(|f| (features::tab_of_key(&x.id) == Some(1)) == f)
+            })
+        };
+        let sections: [(&str, Pick); 3] = [
+            ("4本指ジェスチャー", on_page(Page::Gesture, Some(false))),
+            ("5本指ジェスチャー", on_page(Page::Gesture, Some(true))),
+            (Page::CustomPress.label(), on_page(Page::CustomPress, None)),
+        ];
+        for (title, pick) in &sections {
+            let rows: Vec<&Info> = infos.iter().filter(|x| pick(x)).collect();
             if rows.is_empty() {
                 continue;
             }
-            section_header(ui, t, page.label());
+            section_header(ui, t, title);
             group(ui, t, |g| {
                 for info in rows {
                     let mut desc = format!("全体: {}", info.global);

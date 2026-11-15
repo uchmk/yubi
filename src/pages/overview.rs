@@ -68,11 +68,11 @@ pub fn gesture_name(key: &str) -> String {
                 .iter()
                 .find(|(t, _)| t == c)
                 .map_or(*c, |(_, j)| *j);
-            if *kind == "tap" {
-                format!("{c}の角を押す")
-            } else {
-                format!("{c}の角からスワイプ")
-            }
+            let dir = crate::config::CornerDir::ALL
+                .iter()
+                .find(|d| d.token() == *kind)
+                .map_or(*kind, |d| d.label());
+            format!("{c}の角から{dir}にスワイプ")
         }
         ["edge", "left"] => "左端をなぞる".to_owned(),
         ["edge", "right"] => "右端をなぞる".to_owned(),
@@ -447,7 +447,7 @@ fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conf
         }
     }
     if cfg.corner.enabled && cfg.window.enabled && cfg.window.corner_resize {
-        let affected = keys(&|r| r.key.starts_with("corner.") && r.key.ends_with(".swipe"));
+        let affected = keys(&|r| r.key.starts_with("corner.") && r.key.ends_with(".diagonal"));
         if !affected.is_empty() {
             out.push(Conflict {
                 kind: ConflictKind::Overlap,
@@ -756,7 +756,10 @@ mod tests {
         assert_eq!(gesture_name("swipe.4.left"), "4本指で左にスワイプ");
         assert_eq!(gesture_name("pinch.5.out"), "5本指でピンチアウト");
         assert_eq!(gesture_name("press.2.deep"), "2本指で深く押し込む");
-        assert_eq!(gesture_name("corner.bl.swipe"), "左下の角からスワイプ");
+        assert_eq!(
+            gesture_name("corner.bl.diagonal"),
+            "左下の角から斜めにスワイプ"
+        );
         assert_eq!(gesture_name("edge.top"), "上端をなぞる");
         assert_eq!(
             gesture_name("hold.thumb.index.tap"),

@@ -547,7 +547,7 @@ pub fn combo_menu(
 
 /// Action combo box plus a key-string field when "キー入力" is chosen.
 pub fn action_picker(ui: &mut Ui, t: &Tokens, id: impl Hash + Debug, action: &mut Action) {
-    action_picker_of(ui, t, id, action, &ActionKind::ALL);
+    action_picker_with(ui, t, id, action, &ActionKind::ALL, ActionKind::label);
 }
 
 /// [`action_picker`] limited to the action kinds in `kinds`.
@@ -558,10 +558,28 @@ pub fn action_picker_of(
     action: &mut Action,
     kinds: &[ActionKind],
 ) {
+    action_picker_with(ui, t, id, action, kinds, ActionKind::label);
+}
+
+/// [`action_picker`] with its own list of kinds and names for them (for example one that also
+/// offers the window resize, or calls "なし" "オフ").
+pub fn action_picker_with(
+    ui: &mut Ui,
+    t: &Tokens,
+    id: impl Hash + Debug,
+    action: &mut Action,
+    kinds: &[ActionKind],
+    label: fn(ActionKind) -> &'static str,
+) {
     let mut kind = action.kind();
-    if combo(ui, t, id, &mut kind, kinds, ActionKind::label) {
+    if combo(ui, t, id, &mut kind, kinds, label) {
         action.set_kind(kind);
     }
+    action_fields(ui, t, action);
+}
+
+/// The extra field an action needs (keys, or a step), if any.
+pub fn action_fields(ui: &mut Ui, t: &Tokens, action: &mut Action) {
     match action {
         Action::Keys(keys) => {
             ui.add(

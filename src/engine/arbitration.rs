@@ -10,6 +10,7 @@ pub enum Owner {
     Window,
     Multi,
     Edge,
+    Corner,
     Ring,
     /// A plain long-hold action (the ring-menu choice is `Ring`).
     Hold,
@@ -20,10 +21,7 @@ pub enum Owner {
 /// Same-frame tie-break, strongest first. The variants without a gesture yet are reserved so the
 /// order is settled before they arrive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[allow(
-    dead_code,
-    reason = "owner, hold combo, corner and edge gestures come later"
-)]
+#[allow(dead_code, reason = "the `Owner` priority is reserved")]
 pub enum Priority {
     /// The gesture that already owns the session.
     Owner,
@@ -46,6 +44,7 @@ impl Owner {
             Self::Window => Priority::Window,
             Self::Drag => Priority::Drag,
             Self::Edge => Priority::Edge,
+            Self::Corner => Priority::Corner,
             // The ring is a hold gesture; it shares the hold-combo slot.
             Self::Ring | Self::Hold => Priority::HoldCombo,
             Self::Scroll => Priority::Scroll,

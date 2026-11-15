@@ -7,7 +7,7 @@ use eframe::egui::{
 };
 
 use crate::engine::MonitorState;
-use crate::engine::dispatch::{multi_label, press_label};
+use crate::engine::dispatch::{corner_swipe_label, multi_label, press_label};
 use crate::engine::recognizer::GestureEvent;
 use crate::input::{Contact, DeviceInfo, now_us};
 use crate::nav::Page;
@@ -274,6 +274,7 @@ fn event_label(e: GestureEvent) -> String {
         GestureEvent::LongHold { fingers } => format!("長押し（{fingers} 本）"),
         GestureEvent::Multi { fingers, kind } => multi_label(fingers, kind),
         GestureEvent::Press { fingers, deep } => press_label(fingers, deep),
+        GestureEvent::Corner { corner, dir } => corner_swipe_label(corner, dir),
     }
 }
 

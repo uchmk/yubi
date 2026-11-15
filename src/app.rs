@@ -15,8 +15,8 @@ use crate::engine::Engine;
 use crate::icons;
 use crate::nav::{NAV, Node, Page};
 use crate::pages::{
-    Cmd, apps, diagnostics::Diagnostics, features, general, general_io, home, overview, press,
-    sensitivity,
+    Cmd, apps, corner, diagnostics::Diagnostics, features, general, general_io, home, overview,
+    press, sensitivity,
 };
 use crate::practice_gestures;
 use crate::resident::{self, Resident};
@@ -612,7 +612,7 @@ impl App {
             Page::LongHold => return features::long_hold(ui, t, cfg),
             Page::FingerHold => features::hold_combos(ui, t, cfg, Page::FingerHold),
             Page::ThumbHold => features::hold_combos(ui, t, cfg, Page::ThumbHold),
-            Page::Corner => features::corner(ui, t, cfg),
+            Page::Corner => corner::corner(ui, t, cfg),
             Page::Edge => features::edge(ui, t, cfg),
             Page::Window => return features::window(ui, t, cfg, &self.win_values),
             Page::Ring => return features::ring(ui, t, cfg),

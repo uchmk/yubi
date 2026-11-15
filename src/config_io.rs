@@ -391,11 +391,13 @@ exe_name = \"a.exe\"
 [[profiles]]
 exe_name = \"a.exe\"
 [profiles.overrides]
-\"corner.br.swipe\" = \"none\"
+\"hold.thumb.index.tap\" = \"none\"
 ",
         )
         .unwrap_err();
-        assert!(matches!(&err, ConfigIoError::InertOverride(k) if k.contains("corner.br.swipe")));
+        assert!(
+            matches!(&err, ConfigIoError::InertOverride(k) if k.contains("hold.thumb.index.tap"))
+        );
         let err = parse_import(
             "schema_version = 2
 [[profiles]]
@@ -453,7 +455,7 @@ swipe_up = \"teleport\"
 [[profiles]]
 exe_name = \"a.exe\"
 [profiles.overrides]
-\"corner.br.swipe\" = \"none\"
+\"hold.long\" = \"none\"
 [[profiles]]
 exe_name = \"A.EXE\"
 ",

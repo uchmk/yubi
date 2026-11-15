@@ -20,10 +20,9 @@ use crate::widgets::{
 
 const FINGER_COMBO_W: f32 = 120.0;
 const TRIGGER_COMBO_W: f32 = 120.0;
-const CORNER_NAMES: [&str; 4] = ["左上", "右上", "左下", "右下"];
 
 /// Page header plus the card with the feature's enable toggle. Returns whether the feature is on.
-fn feature_top(ui: &mut Ui, t: &Tokens, cfg: &mut Config, page: Page) -> bool {
+pub(super) fn feature_top(ui: &mut Ui, t: &Tokens, cfg: &mut Config, page: Page) -> bool {
     widgets::page_header(ui, t, page.label(), page.subtitle());
     group(ui, t, |g| {
         if let Some(flag) = page.enabled_mut(cfg) {
@@ -383,30 +382,6 @@ pub fn hold_combos(ui: &mut Ui, t: &Tokens, cfg: &mut Config, page: Page) {
             list.combos.push(Combo {
                 hold: if thumb { Finger::Thumb } else { Finger::Index },
                 ..Combo::default()
-            });
-        }
-    });
-}
-
-pub fn corner(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
-    let on = feature_top(ui, t, cfg, Page::Corner);
-    ui.add_enabled_ui(on, |ui| {
-        for (i, name) in CORNER_NAMES.iter().enumerate() {
-            section_header(ui, t, name);
-            group(ui, t, |g| {
-                let c = &mut cfg.corner.corners[i];
-                g.action_row(
-                    "押す",
-                    "角を押し込んだときの操作です。",
-                    ("corner-press", i),
-                    &mut c.press,
-                );
-                g.action_row(
-                    "スワイプ",
-                    "反対側の角へなぞったときの操作です。",
-                    ("corner-swipe", i),
-                    &mut c.swipe,
-                );
             });
         }
     });

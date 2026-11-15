@@ -150,6 +150,9 @@ pub enum Action {
     DesktopPrev,
     DesktopNext,
     Keys(String),
+    /// Corner gestures only (the diagonal slot): resize the foreground window from the corner
+    /// opposite the one the finger started in, for as long as the finger keeps moving.
+    ResizeFromOpposite,
 }
 
 /// Step the picker starts with when the user switches to a volume or brightness action.
@@ -176,6 +179,8 @@ pub enum ActionKind {
     DesktopPrev,
     DesktopNext,
     Keys,
+    /// Offered by the corner diagonal slot only; see [`ActionKind::WITH_RESIZE`].
+    ResizeFromOpposite,
 }
 
 impl ActionKind {
@@ -197,6 +202,26 @@ impl ActionKind {
         Self::Keys,
     ];
 
+    /// [`ALL`](Self::ALL) plus the window resize, for the diagonal slot of a pad corner.
+    pub const WITH_RESIZE: [Self; 16] = [
+        Self::None,
+        Self::TaskView,
+        Self::ShowDesktop,
+        Self::AppSwitch,
+        Self::TabSwitch,
+        Self::Find,
+        Self::MiddleClick,
+        Self::RightClick,
+        Self::RingMenu,
+        Self::VolumeStep,
+        Self::BrightnessStep,
+        Self::ToggleMute,
+        Self::DesktopPrev,
+        Self::DesktopNext,
+        Self::Keys,
+        Self::ResizeFromOpposite,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::None => "なし",
@@ -214,6 +239,7 @@ impl ActionKind {
             Self::DesktopPrev => "前のデスクトップ",
             Self::DesktopNext => "次のデスクトップ",
             Self::Keys => "キー入力",
+            Self::ResizeFromOpposite => "反対側の角でウィンドウサイズを変更",
         }
     }
 }
@@ -245,6 +271,7 @@ impl Action {
             Self::DesktopPrev => ActionKind::DesktopPrev,
             Self::DesktopNext => ActionKind::DesktopNext,
             Self::Keys(_) => ActionKind::Keys,
+            Self::ResizeFromOpposite => ActionKind::ResizeFromOpposite,
         }
     }
 
@@ -269,6 +296,7 @@ impl Action {
             ActionKind::DesktopPrev => Self::DesktopPrev,
             ActionKind::DesktopNext => Self::DesktopNext,
             ActionKind::Keys => Self::Keys(String::new()),
+            ActionKind::ResizeFromOpposite => Self::ResizeFromOpposite,
         };
     }
 
@@ -299,6 +327,7 @@ impl Action {
             Self::DesktopPrev => "desktop_prev".into(),
             Self::DesktopNext => "desktop_next".into(),
             Self::Keys(k) => format!("keys:{k}"),
+            Self::ResizeFromOpposite => "resize_opposite".into(),
         }
     }
 
@@ -323,6 +352,7 @@ impl Action {
             "mute" => Self::ToggleMute,
             "desktop_prev" => Self::DesktopPrev,
             "desktop_next" => Self::DesktopNext,
+            "resize_opposite" => Self::ResizeFromOpposite,
             "volume" | "brightness" => return TokenParse::Legacy,
             other => {
                 if let Some(k) = other.strip_prefix("keys:") {
@@ -864,25 +894,129 @@ pub struct HoldCombos {
     pub combos: Vec<Combo>,
 }
 
+/// The three directions a swipe out of a pad corner can take. Written for the top-left corner;
+/// the other corners mirror it (see [`Corners::NAMES`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CornerDir {
+    /// Along the top or bottom edge, away from the corner.
+    Horizontal,
+    /// Along the left or right edge, away from the corner.
+    Vertical,
+    /// Toward the middle of the pad.
+    Diagonal,
+}
+
+impl CornerDir {
+    pub const ALL: [Self; 3] = [Self::Horizontal, Self::Vertical, Self::Diagonal];
+
+    /// Spelling in gesture ids (`corner.tl.diagonal`).
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Horizontal => "horizontal",
+            Self::Vertical => "vertical",
+            Self::Diagonal => "diagonal",
+        }
+    }
+
+    /// Japanese name, as in "左上・斜め".
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Horizontal => "横",
+            Self::Vertical => "縦",
+            Self::Diagonal => "斜め",
+        }
+    }
+}
+
+/// The three swipe slots of one pad corner. An old config's `swipe` is read as `diagonal` (the
+/// old swipe went toward the opposite corner); its `press` is dropped with a note, because a
+/// physical click in a corner is an ordinary click.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct CornerCfg {
-    pub press: Action,
-    pub swipe: Action,
+    pub horizontal: Action,
+    pub vertical: Action,
+    #[serde(alias = "swipe")]
+    pub diagonal: Action,
+    /// Read only to report that an old `press` was ignored; never written.
+    #[serde(
+        rename = "press",
+        deserialize_with = "legacy_corner_press",
+        skip_serializing
+    )]
+    legacy_press: (),
+}
+
+/// `corner.<c>.swipe` / `corner.<c>.press` of the old layout -> (`<c>`, slot).
+fn parse_old_corner_key(k: &str) -> Option<(&str, &str)> {
+    let rest = k.strip_prefix("corner.")?;
+    let (c, slot) = rest.split_once('.')?;
+    (["tl", "tr", "bl", "br"].contains(&c) && matches!(slot, "swipe" | "press"))
+        .then_some((c, slot))
+}
+
+fn legacy_corner_press<'de, D: Deserializer<'de>>(d: D) -> Result<(), D::Error> {
+    if Action::deserialize(d)? != Action::None {
+        scan_note(|s| {
+            s.bad.push(
+                "コーナーの「押す」操作は廃止されたため、無視しました（スワイプの設定は残っています）"
+                    .to_owned(),
+            );
+        });
+    }
+    Ok(())
+}
+
+impl CornerCfg {
+    pub fn slot(&self, dir: CornerDir) -> &Action {
+        match dir {
+            CornerDir::Horizontal => &self.horizontal,
+            CornerDir::Vertical => &self.vertical,
+            CornerDir::Diagonal => &self.diagonal,
+        }
+    }
+
+    pub fn slot_mut(&mut self, dir: CornerDir) -> &mut Action {
+        match dir {
+            CornerDir::Horizontal => &mut self.horizontal,
+            CornerDir::Vertical => &mut self.vertical,
+            CornerDir::Diagonal => &mut self.diagonal,
+        }
+    }
+
+    /// True when any of the three slots does something.
+    pub fn any(&self) -> bool {
+        CornerDir::ALL
+            .into_iter()
+            .any(|d| *self.slot(d) != Action::None)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Corners {
     pub enabled: bool,
+    /// Side of the square corner zone a swipe must start in (mm).
+    pub size_mm: f32,
     /// Top-left, top-right, bottom-left, bottom-right (always 4 entries after `normalize`).
     pub corners: Vec<CornerCfg>,
+}
+
+impl Corners {
+    /// Names of the four corners, in `corners` order.
+    pub const NAMES: [&'static str; 4] = ["左上", "右上", "左下", "右下"];
+    pub const SIZE: SensRange = SensRange {
+        min: 6.0,
+        max: 30.0,
+    };
+    pub const DEFAULT_SIZE_MM: f32 = 12.0;
 }
 
 impl Default for Corners {
     fn default() -> Self {
         Self {
             enabled: false,
+            size_mm: Self::DEFAULT_SIZE_MM,
             corners: vec![CornerCfg::default(); 4],
         }
     }
@@ -1676,12 +1810,13 @@ macro_rules! slot_of {
                         }
                         false => None,
                     }
-                } else if let Some((i, swipe)) = parse_corner(other) {
+                } else if let Some((i, dir)) = parse_corner(other) {
                     match $cfg.corner.corners.len() > i {
-                        true => {
-                            let c = &$($m)* $cfg.corner.corners[i];
-                            Some(if swipe { &$($m)* c.swipe } else { &$($m)* c.press })
-                        }
+                        true => Some(&$($m)* $cfg.corner.corners[i]).map(|c| match dir {
+                            CornerDir::Horizontal => &$($m)* c.horizontal,
+                            CornerDir::Vertical => &$($m)* c.vertical,
+                            CornerDir::Diagonal => &$($m)* c.diagonal,
+                        }),
                         false => None,
                     }
                 } else {
@@ -1703,15 +1838,12 @@ fn parse_press(id: &str) -> Option<(usize, bool)> {
     }
 }
 
-/// `corner.br.swipe` -> (3, true).
-fn parse_corner(id: &str) -> Option<(usize, bool)> {
+/// `corner.br.diagonal` -> (3, Diagonal).
+fn parse_corner(id: &str) -> Option<(usize, CornerDir)> {
     let (corner, kind) = id.strip_prefix("corner.")?.split_once('.')?;
     let i = ["tl", "tr", "bl", "br"].iter().position(|c| *c == corner)?;
-    match kind {
-        "tap" => Some((i, false)),
-        "swipe" => Some((i, true)),
-        _ => None,
-    }
+    let dir = CornerDir::ALL.into_iter().find(|d| d.token() == kind)?;
+    Some((i, dir))
 }
 
 /// `hold.thumb.index.swipe` -> (thumb hold, finger, trigger).
@@ -1773,6 +1905,16 @@ impl Config {
             .extend((have + 1..=5).map(PressFinger::for_count));
         self.press.fingers.truncate(5);
         self.corner.corners.resize_with(4, CornerCfg::default);
+        self.corner.size_mm = finite_or(self.corner.size_mm, Corners::DEFAULT_SIZE_MM)
+            .clamp(Corners::SIZE.min, Corners::SIZE.max);
+        // The window resize needs a finger that keeps going toward the middle: diagonal only.
+        for c in &mut self.corner.corners {
+            for slot in [&mut c.horizontal, &mut c.vertical] {
+                if *slot == Action::ResizeFromOpposite {
+                    *slot = Action::None;
+                }
+            }
+        }
         for e in [
             &mut self.edge.left,
             &mut self.edge.right,
@@ -1996,13 +2138,15 @@ impl Config {
             }
         }
         if self.corner.enabled {
-            const NAMES: [&str; 4] = ["左上", "右上", "左下", "右下"];
-            for (name, c) in NAMES.iter().zip(&self.corner.corners) {
-                if named(&c.press) {
-                    out.push((format!("{name}の角を押す"), c.press.label()));
-                }
-                if named(&c.swipe) {
-                    out.push((format!("{name}の角からスワイプ"), c.swipe.label()));
+            for (name, c) in Corners::NAMES.iter().zip(&self.corner.corners) {
+                for dir in CornerDir::ALL {
+                    let a = c.slot(dir);
+                    if named(a) {
+                        out.push((
+                            format!("{name}の角から{}にスワイプ", dir.label()),
+                            a.label(),
+                        ));
+                    }
                 }
             }
         }
@@ -2499,6 +2643,34 @@ pub fn parse_text(text: &str) -> Result<Parsed, ParseError> {
     for p in &mut config.profiles {
         let before = p.overrides.len() + p.edge_overrides.len();
         let exe = p.exe_name.trim().to_owned();
+        // Corner keys of the old layout: `swipe` is now the diagonal slot, `press` is gone.
+        let old: Vec<String> = p
+            .overrides
+            .keys()
+            .filter(|k| parse_old_corner_key(k).is_some())
+            .cloned()
+            .collect();
+        let mut dropped_press = false;
+        for k in old {
+            let Some((c, old_slot)) = parse_old_corner_key(&k) else {
+                continue;
+            };
+            let value = p.overrides.remove(&k);
+            if old_slot == "swipe" {
+                if let Some(v) = value {
+                    p.overrides
+                        .entry(format!("corner.{c}.diagonal"))
+                        .or_insert(v);
+                }
+            } else {
+                dropped_press = true;
+            }
+        }
+        if dropped_press {
+            warnings.push(format!(
+                "「{exe}」のアプリ別設定にあるコーナーの「押す」操作は廃止されたため、削除しました"
+            ));
+        }
         p.overrides.retain(|k, _| {
             let ok = GestureId::parse(k).is_some();
             if !ok {
@@ -2528,9 +2700,9 @@ pub fn parse_text(text: &str) -> Result<Parsed, ParseError> {
         let before = p.overrides.len();
         let mut inert = 0usize;
         p.overrides.retain(|k, _| {
-            // The engine resolves no corner or hold gesture yet: an override would do nothing.
-            if k.starts_with("corner.") || (k.starts_with("hold.") && !k.starts_with("hold.long."))
-            {
+            // The engine resolves no hold gesture but the per-app long hold yet: an override
+            // would do nothing.
+            if k.starts_with("hold.") && !k.starts_with("hold.long.") {
                 inert_overrides.push(format!("{exe}: {k}"));
                 inert += 1;
                 return false;
@@ -2548,7 +2720,7 @@ pub fn parse_text(text: &str) -> Result<Parsed, ParseError> {
         }
         if inert > 0 {
             warnings.push(format!(
-                "「{exe}」のアプリ別設定にあるコーナー・ホールドの項目は、まだ適用されないため削除しました"
+                "「{exe}」のアプリ別設定にあるホールドの項目は、まだ適用されないため削除しました"
             ));
         }
     }
@@ -2793,7 +2965,7 @@ mod tests {
             trigger: HoldTrigger::Swipe,
             keys: "Alt+Tab".into(),
         });
-        cfg.corner.corners[3].swipe = Action::Find;
+        cfg.corner.corners[3].diagonal = Action::Find;
         cfg.edge.enabled = true;
         cfg.edge.left = EdgeTarget::Custom(CustomEdge {
             forward: "Ctrl+Tab".into(),
@@ -2938,6 +3110,76 @@ items = [
 "#;
 
     #[test]
+    fn old_corner_swipe_becomes_diagonal_and_press_is_dropped() {
+        let p = parse_text(
+            "[corner]
+enabled = true
+
+[[corner.corners]]
+swipe = \"find\"
+press = \"mute\"
+",
+        )
+        .unwrap();
+        let c = &p.config.corner.corners[0];
+        assert_eq!(c.diagonal, Action::Find);
+        assert_eq!(c.horizontal, Action::None);
+        assert_eq!(c.vertical, Action::None);
+        assert!(
+            p.warnings.iter().any(|w| w.contains("廃止")),
+            "{:?}",
+            p.warnings
+        );
+    }
+
+    #[test]
+    fn old_corner_override_keys_migrate() {
+        let p = parse_text(
+            "schema_version = 2
+[[profiles]]
+exe_name = \"a.exe\"
+[profiles.overrides]
+\"corner.tl.swipe\" = \"find\"
+\"corner.tl.press\" = \"mute\"
+\"corner.br.swipe\" = \"find\"
+\"corner.br.diagonal\" = \"task_view\"
+",
+        )
+        .unwrap();
+        let o = &p.config.profiles[0].overrides;
+        assert_eq!(o.get("corner.tl.diagonal"), Some(&Action::Find));
+        assert_eq!(o.get("corner.br.diagonal"), Some(&Action::TaskView));
+        assert_eq!(o.len(), 2, "{o:?}");
+        assert!(p.bad_override_keys.is_empty(), "{:?}", p.bad_override_keys);
+        assert!(
+            p.warnings.iter().any(|w| w.contains("「押す」")),
+            "{:?}",
+            p.warnings
+        );
+    }
+
+    #[test]
+    fn every_action_kind_but_resize_is_offered_in_the_diagonal_slot() {
+        for k in ActionKind::ALL {
+            assert!(ActionKind::WITH_RESIZE.contains(&k), "{k:?}");
+        }
+        assert_eq!(ActionKind::WITH_RESIZE.len(), ActionKind::ALL.len() + 1);
+        assert!(!ActionKind::ALL.contains(&ActionKind::ResizeFromOpposite));
+    }
+
+    #[test]
+    fn corner_resize_is_diagonal_only() {
+        let mut cfg = Config::default();
+        cfg.corner.corners[1].horizontal = Action::ResizeFromOpposite;
+        cfg.corner.corners[1].diagonal = Action::ResizeFromOpposite;
+        cfg.corner.size_mm = f32::NAN;
+        cfg.normalize();
+        assert_eq!(cfg.corner.corners[1].horizontal, Action::None);
+        assert_eq!(cfg.corner.corners[1].diagonal, Action::ResizeFromOpposite);
+        assert_eq!(cfg.corner.size_mm, Corners::DEFAULT_SIZE_MM);
+    }
+
+    #[test]
     fn v1_file_migrates_to_v2() {
         let p = parse_text(V1_FIXTURE).unwrap();
         let c = &p.config;
@@ -2965,7 +3207,8 @@ items = [
         assert_eq!(*c.long_hold.actions.get(3), Action::TabSwitch);
         assert_eq!(c.finger_hold.combos[0].keys, "Alt+Tab");
         assert_eq!(c.thumb_hold.combos[0].hold, Finger::Thumb);
-        assert_eq!(c.corner.corners[0].press, Action::Find);
+        // The old corner press is gone: it is dropped, not carried over.
+        assert!(!c.corner.corners[0].any());
         assert_eq!(c.corner.corners.len(), 4);
         // brush_size is gone.
         assert_eq!(c.edge.left, EdgeTarget::None);
@@ -3755,13 +3998,13 @@ five = \"find\"
     }
 
     #[test]
-    fn corner_and_hold_overrides_are_dropped_with_a_note() {
+    fn hold_overrides_are_dropped_with_a_note_and_corner_ones_kept() {
         let p = parse_text(
             "schema_version = 2
 [[profiles]]
 exe_name = \"a.exe\"
 [profiles.overrides]
-\"corner.br.swipe\" = \"find\"
+\"corner.br.diagonal\" = \"find\"
 \"hold.long.3\" = \"find\"
 \"hold.thumb.index.swipe\" = \"find\"
 \"press.3.deep\" = \"find\"
@@ -3770,11 +4013,19 @@ exe_name = \"a.exe\"
         )
         .unwrap();
         let keys: Vec<_> = p.config.profiles[0].overrides.keys().cloned().collect();
-        // `hold.long.N` is live (the per-app long hold); the other corner / hold ids are not.
-        assert_eq!(keys, ["hold.long.3", "press.3.deep", "swipe.4.left"]);
-        assert_eq!(p.inert_overrides.len(), 2);
+        // Corner ids and `hold.long.N` are live; the other hold ids are not.
+        assert_eq!(
+            keys,
+            [
+                "corner.br.diagonal",
+                "hold.long.3",
+                "press.3.deep",
+                "swipe.4.left"
+            ]
+        );
+        assert_eq!(p.inert_overrides.len(), 1);
         assert!(p.unbindable_overrides.is_empty());
-        assert!(p.warnings.iter().any(|w| w.contains("コーナー・ホールド")));
+        assert!(p.warnings.iter().any(|w| w.contains("ホールドの項目")));
     }
 
     #[test]
@@ -3921,7 +4172,7 @@ command = 5
         tokens.sort();
         tokens.dedup();
         assert_eq!(tokens.len(), n, "ids are unique");
-        assert_eq!(n, 3 + 3 * 6 + 10 + 5 + 8 + 20);
+        assert_eq!(n, 3 + 3 * 6 + 10 + 5 + 12 + 20);
         for id in &all {
             assert_eq!(GestureId::parse(id.as_str()).as_ref(), Some(id));
             assert_eq!(id.to_string(), id.as_str());
@@ -3930,7 +4181,10 @@ command = 5
         assert_eq!(GestureId::parse(""), None);
         assert_eq!(GestureId::tap(4).as_str(), "tap.4");
         assert_eq!(GestureId::press(2, true).as_str(), "press.2.deep");
-        assert_eq!(GestureId::corner(3, true).as_str(), "corner.br.swipe");
+        assert_eq!(
+            GestureId::corner(3, CornerDir::Diagonal).as_str(),
+            "corner.br.diagonal"
+        );
         assert_eq!(
             GestureId::hold_combo(true, Finger::Little, HoldTrigger::Tap).as_str(),
             "hold.thumb.little.tap"
@@ -3952,8 +4206,8 @@ command = 5
                 assert_eq!(cfg.binding(id), Some(sentinel), "{id}");
             }
         }
-        // 7 (four) + 4 (five) + 10 (press) + 5 (long hold) + 8 (corners) + 20 (hold combos).
-        assert_eq!(bound, 54);
+        // 7 (four) + 4 (five) + 10 (press) + 5 (long hold) + 12 (corners) + 20 (hold combos).
+        assert_eq!(bound, 58);
         // Ids without a field refuse.
         for id in ["tap.3", "tap.5", "swipe.3.up", "swipe.5.left", "pinch.3.in"] {
             let id = GestureId::parse(id).unwrap();
@@ -3992,7 +4246,7 @@ command = 5
                 );
             }
         }
-        assert_eq!(sentinels, 54);
+        assert_eq!(sentinels, 58);
     }
 
     #[test]

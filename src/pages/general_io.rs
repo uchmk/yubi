@@ -497,6 +497,7 @@ fn setting_label(path: &str) -> String {
         "long_hold.actions.five" => "5本指の長押し",
         "finger_hold.combos" | "thumb_hold.combos" => "組み合わせ",
         "corner.corners" => "コーナーの操作",
+        "corner.size_mm" => "角の大きさ",
         "edge.left" => "左端",
         "edge.right" => "右端",
         "edge.top" => "上端",

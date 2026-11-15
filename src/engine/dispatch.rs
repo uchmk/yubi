@@ -96,6 +96,27 @@ pub fn press_label(fingers: usize, deep: bool) -> String {
     )
 }
 
+/// Name of a corner swipe for the note shown after it fires ("左上・斜め").
+pub fn corner_swipe_label(corner: usize, dir: config::CornerDir) -> String {
+    format!("{}・{}", corner_label(corner), dir.label())
+}
+
+fn corner_label(corner: usize) -> &'static str {
+    config::Corners::NAMES[corner % 4]
+}
+
+/// The window corner a swipe out of pad corner `corner` drags: the opposite one, so a swipe toward
+/// the middle of the pad grows the window.
+fn opposite_corner(corner: usize) -> crate::os::window::Corner {
+    use crate::os::window::Corner;
+    match corner % 4 {
+        0 => Corner::BottomRight,
+        1 => Corner::BottomLeft,
+        2 => Corner::TopRight,
+        _ => Corner::TopLeft,
+    }
+}
+
 pub fn plan_for(action: &config::Action) -> Plan {
     use config::Action as A;
     match action {
@@ -113,7 +134,8 @@ pub fn plan_for(action: &config::Action) -> Plan {
         A::BrightnessStep(n) => Plan::Brightness(*n),
         A::ToggleMute => Plan::ToggleMute,
         // The ring menu comes with M3c.
-        A::RingMenu | A::None => Plan::Nothing,
+        // The corner resize is a live gesture of its own (`Action::CornerResize*`), not a plan.
+        A::RingMenu | A::ResizeFromOpposite | A::None => Plan::Nothing,
     }
 }
 
@@ -131,6 +153,16 @@ pub enum WinCmd {
     End {
         snap: Option<SnapDir>,
     },
+    /// Resize the foreground window by dragging `corner` (the one opposite the pad corner).
+    BeginResize {
+        corner: crate::os::window::Corner,
+        cursor: (i32, i32),
+    },
+    Resize {
+        dx: i32,
+        dy: i32,
+    },
+    EndResize,
     /// Drop the move without snapping (device gone, config changed, ...).
     Cancel,
 }
@@ -150,10 +182,15 @@ pub struct Dispatcher {
     release_pending: bool,
     drag_px: SubPixel,
     win_px: SubPixel,
+    resize_px: SubPixel,
     win_tx: Option<Sender<WinCmd>>,
     win_join: Option<JoinHandle<()>>,
     /// A window move was accepted and not yet ended.
     win_active: bool,
+    /// A corner resize was accepted and not yet ended.
+    resize_active: bool,
+    /// The corner swipe whose action is about to trigger.
+    last_corner: Option<(usize, config::CornerDir)>,
     last_multi: Option<(usize, MultiKind)>,
     /// The press (finger count, deep) whose action is about to trigger.
     last_press: Option<(usize, bool)>,
@@ -507,9 +544,12 @@ impl Dispatcher {
             release_pending: false,
             drag_px: SubPixel::default(),
             win_px: SubPixel::default(),
+            resize_px: SubPixel::default(),
             win_tx,
             win_join: None,
             win_active: false,
+            resize_active: false,
+            last_corner: None,
             last_multi: None,
             last_press: None,
             sys: SystemOps::default(),
@@ -620,13 +660,15 @@ impl Dispatcher {
 
     /// Forget a half-done gesture (the executor lets go of buttons and keys on its own).
     pub fn cancel(&mut self) {
-        if self.win_active {
+        if self.win_active || self.resize_active {
             self.win(WinCmd::Cancel);
         }
         self.win_active = false;
+        self.resize_active = false;
         self.drag_open = false;
         self.drag_px.clear();
         self.win_px.clear();
+        self.resize_px.clear();
         self.suppression.set(Suppress::Off);
         self.ring.close(None);
         self.source_override = None;
@@ -655,6 +697,10 @@ impl Dispatcher {
                 self.last_press = Some((*fingers, *deep));
                 None
             }
+            Action::Debug(GestureEvent::Corner { corner, dir }) => {
+                self.last_corner = Some((*corner, *dir));
+                None
+            }
             Action::Debug(_) | Action::PressTick { .. } => None,
             // Ends always run, so a drag or window move that began is always closed.
             Action::DragEnd => {
@@ -676,6 +722,14 @@ impl Dispatcher {
                 self.win_px.clear();
                 // The worker reports what really happened (moved, snapped, no window, ...).
                 (!self.win(WinCmd::End { snap: *snap })).then(|| WORKER_NOTE.to_owned())
+            }
+            Action::CornerResizeEnd => {
+                if !self.resize_active {
+                    return None;
+                }
+                self.resize_active = false;
+                self.resize_px.clear();
+                (!self.win(WinCmd::EndResize)).then(|| WORKER_NOTE.to_owned())
             }
             // Letting go of the cursor and closing the ring always run.
             Action::Suppress(Suppress::Off) => self.suppression.set(Suppress::Off),
@@ -757,6 +811,29 @@ impl Dispatcher {
                 }
                 None
             }
+            Action::CornerResizeBegin { corner } => {
+                self.resize_px.clear();
+                let Some(cursor) = cursor() else {
+                    return Some(NO_CURSOR_NOTE.to_owned());
+                };
+                self.resize_active = self.win(WinCmd::BeginResize {
+                    corner: opposite_corner(*corner),
+                    cursor,
+                });
+                self.last_corner = None;
+                (!self.resize_active).then(|| WORKER_NOTE.to_owned())
+            }
+            Action::CornerResizeMove { dx_mm, dy_mm } => {
+                if self.resize_active {
+                    let (dx, dy) = self
+                        .resize_px
+                        .take(dx_mm * th.window_px_per_mm, dy_mm * th.window_px_per_mm);
+                    if dx != 0 || dy != 0 {
+                        self.win(WinCmd::Resize { dx, dy });
+                    }
+                }
+                None
+            }
             Action::Scroll { h, v } => {
                 // Sent as it comes; a refused wheel event is only worth a note, not a retry.
                 (!ex.wheel(*h, *v)).then(|| SEND_FAILED_NOTE.to_owned())
@@ -772,13 +849,15 @@ impl Dispatcher {
     ) -> Option<String> {
         let source = match (
             self.source_override.take(),
+            self.last_corner.take(),
             self.last_press.take(),
             self.last_multi.take(),
         ) {
-            (Some(s), _, _) => s,
-            (None, Some((n, deep)), _) => press_label(n, deep),
-            (None, None, Some((n, kind))) => multi_label(n, kind),
-            (None, None, None) => "ジェスチャー".to_owned(),
+            (Some(s), _, _, _) => s,
+            (None, Some((c, dir)), _, _) => corner_swipe_label(c, dir),
+            (None, None, Some((n, deep)), _) => press_label(n, deep),
+            (None, None, None, Some((n, kind))) => multi_label(n, kind),
+            (None, None, None, None) => "ジェスチャー".to_owned(),
         };
         self.run_plan(action, ex, &source)
     }
@@ -1039,6 +1118,7 @@ fn snap_label(d: SnapDir) -> &'static str {
 fn run_worker(rx: Receiver<WinCmd>, notify: impl Fn(String)) {
     use crate::os::window::{self, SnapDir as OsSnap, WindowMover};
     let mut mover: Option<WindowMover> = None;
+    let mut resize_corner = window::Corner::BottomRight;
     for cmd in rx {
         match cmd {
             WinCmd::Begin { cursor } => {
@@ -1082,6 +1162,33 @@ fn run_worker(rx: Receiver<WinCmd>, notify: impl Fn(String)) {
                             }
                         }
                     });
+                }
+            }
+            WinCmd::BeginResize { corner, cursor } => {
+                mover = None;
+                match window::foreground() {
+                    None => notify("サイズを変えられるウィンドウがありません".to_owned()),
+                    Some(h) if window::is_elevated_window(h) => notify(ELEVATED_NOTE.to_owned()),
+                    Some(h) => {
+                        mover = WindowMover::begin(h, cursor);
+                        resize_corner = corner;
+                        notify(if mover.is_some() {
+                            "ウィンドウのサイズ変更".to_owned()
+                        } else {
+                            "ウィンドウのサイズを変えられませんでした".to_owned()
+                        });
+                    }
+                }
+            }
+            WinCmd::Resize { dx, dy } => {
+                if let Some(m) = mover.as_mut() {
+                    m.resize_from(resize_corner, dx, dy);
+                }
+            }
+            WinCmd::EndResize => {
+                if let Some(m) = mover.take() {
+                    m.end();
+                    notify("ウィンドウのサイズ変更 終了".to_owned());
                 }
             }
             WinCmd::Cancel => {
@@ -1314,6 +1421,92 @@ mod tests {
             vec![SynthEvent::Down(LEFT), SynthEvent::Up(LEFT)],
             "no input was sent for the blocked session"
         );
+    }
+
+    #[test]
+    fn corner_resize_runs_begin_move_end_against_the_opposite_corner() {
+        use crate::os::window::Corner;
+        let (mut d, rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        d.handle(
+            &Action::CornerResizeBegin { corner: 0 },
+            &mut ex,
+            &th,
+            CURSOR,
+        );
+        d.handle(
+            &Action::CornerResizeMove {
+                dx_mm: 2.0,
+                dy_mm: -1.0,
+            },
+            &mut ex,
+            &th,
+            CURSOR,
+        );
+        d.handle(&Action::CornerResizeEnd, &mut ex, &th, CURSOR);
+        // A second End is a no-op.
+        d.handle(&Action::CornerResizeEnd, &mut ex, &th, CURSOR);
+        let cmds: Vec<_> = rx.try_iter().collect();
+        assert!(
+            matches!(
+                cmds.first(),
+                Some(WinCmd::BeginResize {
+                    corner: Corner::BottomRight,
+                    cursor: (100, 200)
+                })
+            ),
+            "{cmds:?}"
+        );
+        assert!(matches!(cmds.get(1), Some(WinCmd::Resize { dx, dy }) if *dx > 0 && *dy < 0));
+        assert!(matches!(cmds.get(2), Some(WinCmd::EndResize)));
+        assert_eq!(cmds.len(), 3);
+    }
+
+    #[test]
+    fn corner_resize_is_not_started_when_blocked_or_dry_but_always_ends() {
+        let th = Thresholds::default();
+        for dry in [false, true] {
+            let (mut d, rx) = setup();
+            let mut f = Fake::default();
+            let mut ex = Executor::new(&mut f);
+            d.handle(
+                &Action::CornerResizeBegin { corner: 3 },
+                &mut ex,
+                &th,
+                CURSOR,
+            );
+            assert!(matches!(rx.try_recv(), Ok(WinCmd::BeginResize { .. })));
+            // The app changes (or practice starts) mid-gesture: the resize is still closed.
+            if dry {
+                d.set_dry_run(true);
+            } else {
+                d.set_blocked(true);
+                // The block is latched at the start of the next touch session.
+                d.handle(&START, &mut ex, &th, CURSOR);
+            }
+            d.handle(
+                &Action::CornerResizeMove {
+                    dx_mm: 3.0,
+                    dy_mm: 3.0,
+                },
+                &mut ex,
+                &th,
+                CURSOR,
+            );
+            d.handle(&Action::CornerResizeEnd, &mut ex, &th, CURSOR);
+            assert!(matches!(rx.try_recv(), Ok(WinCmd::EndResize)), "dry={dry}");
+            assert!(rx.try_recv().is_err());
+            // A new one does not start.
+            d.handle(
+                &Action::CornerResizeBegin { corner: 3 },
+                &mut ex,
+                &th,
+                CURSOR,
+            );
+            assert!(rx.try_recv().is_err(), "dry={dry}");
+        }
     }
 
     #[test]

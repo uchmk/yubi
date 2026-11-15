@@ -46,13 +46,13 @@ impl GestureId {
         Self(format!("hold.long.{fingers}"))
     }
 
-    /// A press or swipe starting in a pad corner (0 = top-left, 1 = top-right, 2 = bottom-left,
-    /// 3 = bottom-right; reserved).
-    pub fn corner(index: usize, swipe: bool) -> Self {
+    /// A swipe starting in a pad corner (0 = top-left, 1 = top-right, 2 = bottom-left,
+    /// 3 = bottom-right) along `dir`.
+    pub fn corner(index: usize, dir: config::CornerDir) -> Self {
         Self(format!(
             "corner.{}.{}",
             CORNER_TOKENS[index % 4],
-            if swipe { "swipe" } else { "tap" }
+            dir.token()
         ))
     }
 
@@ -95,8 +95,9 @@ impl GestureId {
             out.push(Self::long_hold(n));
         }
         for i in 0..4 {
-            out.push(Self::corner(i, false));
-            out.push(Self::corner(i, true));
+            for dir in config::CornerDir::ALL {
+                out.push(Self::corner(i, dir));
+            }
         }
         for thumb in [false, true] {
             for f in config::Finger::ALL {
@@ -231,6 +232,11 @@ pub enum GestureEvent {
         fingers: usize,
         deep: bool,
     },
+    /// A corner swipe was recognised (sent right before its `Trigger` or resize).
+    Corner {
+        corner: usize,
+        dir: config::CornerDir,
+    },
 }
 
 /// Where a flick throws a window.
@@ -320,6 +326,17 @@ pub enum Action {
         side: EdgeSide,
         outs: Vec<config::EdgeOut>,
     },
+    /// A corner swipe resizes the foreground window from the corner opposite to pad corner
+    /// `corner` (0 = top-left ... 3 = bottom-right) until `CornerResizeEnd`.
+    CornerResizeBegin {
+        corner: usize,
+    },
+    /// Finger travel since the previous frame (millimetres, Y grows downward).
+    CornerResizeMove {
+        dx_mm: f32,
+        dy_mm: f32,
+    },
+    CornerResizeEnd,
     /// Show the ring menu at the cursor.
     RingOpen {
         labels: Vec<String>,
@@ -560,6 +577,38 @@ impl EdgeCfg {
     }
 }
 
+/// The corner swipes as latched at touchdown: the zone size and the 3 slots of each of the 4
+/// corners (`None` = off).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CornerGestureCfg {
+    pub size_mm: f32,
+    pub slots: [[Option<config::Action>; 3]; 4],
+}
+
+impl CornerGestureCfg {
+    pub fn from_config(cfg: &Config, exe: Option<&str>) -> Option<Self> {
+        if !cfg.corner.enabled {
+            return None;
+        }
+        let mut slots: [[Option<config::Action>; 3]; 4] = Default::default();
+        for (i, row) in slots.iter_mut().enumerate() {
+            for (k, dir) in config::CornerDir::ALL.into_iter().enumerate() {
+                let a = resolve(cfg, exe, &GestureId::corner(i, dir));
+                row[k] = (a != config::Action::None).then_some(a);
+            }
+        }
+        slots.iter().flatten().any(Option::is_some).then_some(Self {
+            size_mm: cfg.corner.size_mm,
+            slots,
+        })
+    }
+
+    pub fn slot(&self, corner: usize, dir: config::CornerDir) -> Option<&config::Action> {
+        let k = config::CornerDir::ALL.iter().position(|d| *d == dir)?;
+        self.slots.get(corner)?[k].as_ref()
+    }
+}
+
 /// The ring menu as latched at touchdown.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RingCfg {
@@ -602,6 +651,8 @@ pub struct GestureCfg {
     /// foreground app. `None` for an unbound count, for every count while the long hold is off,
     /// and for a count bound to the ring menu: the ring state machine owns that one (see `ring`).
     pub long_hold: [config::Action; 5],
+    /// `None` when corner swipes are off or no slot has an action.
+    pub corner: Option<CornerGestureCfg>,
     /// `None` when the ring is off (with no runnable item the default items are used).
     pub ring: Option<RingCfg>,
     /// Press bindings and thresholds, indexed by `count - 1`; `None` = that count does nothing
@@ -688,6 +739,7 @@ impl GestureCfg {
                     top: resolve_edge(cfg, exe, EdgeSide::Top.key()),
                 })
                 .filter(EdgeCfg::any),
+            corner: CornerGestureCfg::from_config(cfg, exe),
             // With no runnable item the built-in defaults are offered, so the ring always opens.
             ring: Some(ring_counts_for(cfg, exe))
                 .filter(|c| c.iter().any(|&on| on))
@@ -811,6 +863,33 @@ pub fn spread_of(points: &[Point], c: Point) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corner_overrides_apply_to_their_app_only() {
+        let mut cfg = Config::default();
+        cfg.corner.enabled = true;
+        cfg.corner.corners[0].horizontal = config::Action::Find;
+        let mut p = config::Profile {
+            exe_name: "code.exe".into(),
+            enabled: true,
+            ..config::Profile::default()
+        };
+        p.overrides
+            .insert("corner.tl.horizontal".into(), config::Action::TaskView);
+        p.overrides
+            .insert("corner.br.diagonal".into(), config::Action::ShowDesktop);
+        cfg.profiles.push(p);
+        let h = config::CornerDir::Horizontal;
+        let other = CornerGestureCfg::from_config(&cfg, Some("other.exe")).unwrap();
+        assert_eq!(other.slot(0, h), Some(&config::Action::Find));
+        assert_eq!(other.slot(3, config::CornerDir::Diagonal), None);
+        let code = CornerGestureCfg::from_config(&cfg, Some("code.exe")).unwrap();
+        assert_eq!(code.slot(0, h), Some(&config::Action::TaskView));
+        assert_eq!(
+            code.slot(3, config::CornerDir::Diagonal),
+            Some(&config::Action::ShowDesktop)
+        );
+    }
 
     #[test]
     fn ring_counts_come_from_the_long_hold_bindings() {

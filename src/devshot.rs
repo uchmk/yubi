@@ -32,6 +32,8 @@ pub enum Fixture {
     DemoSpeedOn,
     /// `DemoProfiles` with the cursor speed not managed.
     DemoSpeedOff,
+    /// Corner swipes on, a mix of set and off slots (one is the window resize).
+    CornerDemo,
 }
 
 impl Fixture {
@@ -40,6 +42,19 @@ impl Fixture {
         match self {
             Self::Keep => {}
             Self::NoProfiles => cfg.profiles.clear(),
+            Self::CornerDemo => {
+                cfg.gestures_enabled = true;
+                cfg.corner.enabled = true;
+                let c = &mut cfg.corner.corners;
+                c[0].horizontal = Action::Find;
+                c[0].diagonal = Action::ResizeFromOpposite;
+                c[1].vertical = Action::ShowDesktop;
+                c[1].diagonal = Action::TaskView;
+                c[2].horizontal = Action::DesktopPrev;
+                c[3].horizontal = Action::DesktopNext;
+                c[3].vertical = Action::Find;
+                c[3].diagonal = Action::ResizeFromOpposite;
+            }
             Self::DemoSpeedOn | Self::DemoSpeedOff => {
                 Self::DemoProfiles.apply(cfg);
                 let on = self == Self::DemoSpeedOn;
@@ -379,6 +394,30 @@ impl DevShot {
                         practice: false,
                         anim_t: (!n.ends_with("still")).then_some(2.0),
                         reduced: n.ends_with("still"),
+                    });
+                }
+            }
+            shots = list;
+        }
+        if std::env::var("YUBI_SHOT_CORNER").is_ok() {
+            let mut list = Vec::new();
+            // Tall enough to show the whole page without scrolling.
+            for (n, size) in [
+                ("wide", Vec2::new(WIDE.x, 1250.0)),
+                ("narrow", Vec2::new(NARROW.x, 1650.0)),
+            ] {
+                for (tn, theme) in [("dark", ThemeChoice::Black), ("light", ThemeChoice::Light)] {
+                    list.push(Shot {
+                        name: format!("corner-{n}-{tn}"),
+                        page: Page::Corner,
+                        theme,
+                        size,
+                        fixture: Fixture::CornerDemo,
+                        profile: None,
+                        fake: false,
+                        practice: false,
+                        anim_t: None,
+                        reduced: false,
                     });
                 }
             }

@@ -1,4 +1,5 @@
 pub mod apps;
+pub mod corner;
 pub mod diagnostics;
 pub mod features;
 pub mod general;

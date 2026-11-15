@@ -133,7 +133,12 @@ impl EdgeState {
     }
 
     /// Watch a fresh or candidate touch; propose once the slide is clearly along the edge.
-    pub fn step(&mut self, ctx: &Ctx, free: bool) -> Option<Proposal> {
+    pub fn step(
+        &mut self,
+        ctx: &Ctx,
+        free: bool,
+        corner: &super::corner::CornerState,
+    ) -> Option<Proposal> {
         let cfg = ctx.g.edge.as_ref()?;
         match self.phase {
             Phase::Fresh => {
@@ -175,6 +180,10 @@ impl EdgeState {
                 let (along, cross) = along_cross(side, p, start);
                 let dominant = along.abs() >= COMMIT_MM && along.abs() >= AXIS_RATIO * cross.abs();
                 if dominant {
+                    // A corner swipe that can still claim this touch goes first.
+                    if super::corner::would_claim(ctx, corner, free, start, t0) {
+                        return None;
+                    }
                     if free {
                         return Some(Proposal {
                             who: Owner::Edge,

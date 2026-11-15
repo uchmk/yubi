@@ -11,6 +11,7 @@
 
 use super::Frame;
 use super::arbitration::{Arbiter, Owner, Proposal};
+use super::gestures::corner::CornerState;
 use super::gestures::drag::{DragPhase, DragState};
 use super::gestures::edge::EdgeState;
 use super::gestures::multi::{MultiHit, MultiState};
@@ -65,6 +66,7 @@ pub struct Recognizer {
     window: WindowState,
     multi: MultiState,
     edge: EdgeState,
+    corner: CornerState,
     ring: RingState,
     press: PressState,
     /// Raw pressure of every active contact in the latest frame (median of the last three).
@@ -151,7 +153,7 @@ impl Recognizer {
     /// The fingers do nothing more until all are lifted. Empty when neither is in flight.
     pub fn abort_freeze(&mut self) -> Vec<Action> {
         let mut out = Vec::new();
-        if self.edge.is_committed() || self.ring.is_open() {
+        if self.edge.is_committed() || self.corner.is_committed() || self.ring.is_open() {
             self.cancel_touch(&mut out);
         }
         out
@@ -282,9 +284,11 @@ impl Recognizer {
         // A blocked app switches the edge sliders and the ring off like every other gesture.
         if self.env.app_blocked {
             self.g.edge = None;
+            self.g.corner = None;
             self.g.ring = None;
         }
         self.edge = EdgeState::default();
+        self.corner = CornerState::default();
         self.ring.reset();
         self.next_session += 1;
         self.latched = Some(self.env.clone());
@@ -311,6 +315,7 @@ impl Recognizer {
         self.drag.cancel(out);
         self.multi.finish();
         self.edge.release(out);
+        self.corner.release(out);
         self.ring.cancel(out);
         self.press.reset();
         self.scroll.cancel();
@@ -422,6 +427,7 @@ impl Recognizer {
         }
         self.drag.finish(&self.g, is_tap, s.drag_was_held, t, out);
         self.edge.release(out);
+        self.corner.release(out);
         self.ring.finish(&self.g, t, out);
         self.multi.finish();
         self.scroll.finish(self.g.scroll.as_ref(), &self.th, t);
@@ -472,7 +478,12 @@ impl Recognizer {
         if ctx.g.edge.is_some() {
             self.edge.drive(&ctx, out);
             let free = self.arb.is_free_for(Owner::Edge);
-            proposals.extend(self.edge.step(&ctx, free));
+            proposals.extend(self.edge.step(&ctx, free, &self.corner));
+        }
+        if ctx.g.corner.is_some() {
+            self.corner.drive(&ctx, out);
+            let free = self.arb.is_free_for(Owner::Corner);
+            proposals.extend(self.corner.step(&ctx, free));
         }
         if ctx.g.ring.is_some() {
             self.ring.drive(&ctx, out);
@@ -496,6 +507,7 @@ impl Recognizer {
         }
         match winner {
             Some(Owner::Edge) => self.edge.commit(&ctx, out),
+            Some(Owner::Corner) => self.corner.commit(&ctx, out),
             Some(Owner::Ring) => self.ring.commit(&ctx, out),
             Some(Owner::Drag) => self.drag.commit(&ctx, out),
             Some(Owner::Window) => self.window.commit(&ctx, out),

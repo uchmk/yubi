@@ -6,9 +6,10 @@
 
 use std::time::{Duration, Instant};
 
-use super::dispatch::press_label;
+use super::dispatch::{corner_swipe_label, press_label};
 use super::recognizer::{Action, GestureEvent};
 use super::types::GestureId;
+use crate::config;
 
 /// Entries the history keeps (newest first).
 pub const HISTORY_MAX: usize = 10;
@@ -122,6 +123,25 @@ impl Recorder {
                     kind.gesture_id(*fingers).as_str().to_owned(),
                 ));
                 None
+            }
+            Action::Debug(GestureEvent::Corner { corner, dir }) => {
+                self.pending = Some((
+                    corner_swipe_label(*corner, *dir),
+                    GestureId::corner(*corner, *dir).as_str().to_owned(),
+                ));
+                None
+            }
+            Action::CornerResizeBegin { .. } => {
+                let (gesture, token) = self
+                    .pending
+                    .take()
+                    .unwrap_or_else(|| ("ジェスチャー".to_owned(), "gesture".to_owned()));
+                Some(made(
+                    gesture,
+                    token,
+                    Some(config::Action::ResizeFromOpposite.label()),
+                    mode.outcome(),
+                ))
             }
             Action::Debug(GestureEvent::Press { fingers, deep }) => {
                 self.pending = Some((

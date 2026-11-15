@@ -34,6 +34,8 @@ pub enum Fixture {
     DemoSpeedOff,
     /// Corner swipes on, a mix of set and off slots (one is the window resize).
     CornerDemo,
+    /// `DemoProfiles` plus a 3-finger drag and a 3-finger long hold that opens the ring.
+    OverlapDemo,
     /// A ring with eight items, including an app launch with a long path.
     RingFull,
 }
@@ -56,6 +58,14 @@ impl Fixture {
                 c[3].horizontal = Action::DesktopNext;
                 c[3].vertical = Action::Find;
                 c[3].diagonal = Action::ResizeFromOpposite;
+            }
+            Self::OverlapDemo => {
+                Self::DemoProfiles.apply(cfg);
+                cfg.drag.enabled = true;
+                cfg.drag.fingers = 3;
+                cfg.long_hold.enabled = true;
+                cfg.ring.enabled = true;
+                *cfg.long_hold.actions.get_mut(3) = Action::RingMenu;
             }
             Self::RingFull => {
                 use crate::config::RingItem;
@@ -388,6 +398,31 @@ impl DevShot {
                     anim_t: None,
                     reduced: false,
                 });
+            }
+            shots = list;
+        }
+        if std::env::var_os("YUBI_SHOT_OVERLAP").is_some() {
+            // The overview's overlap entry and the notes on the drag and long hold pages.
+            let mut list = Vec::new();
+            for (n, size) in [("wide", WIDE), ("narrow", NARROW)] {
+                for (pn, page) in [
+                    ("overview", Page::Overview),
+                    ("drag", Page::Drag),
+                    ("longhold", Page::LongHold),
+                ] {
+                    list.push(Shot {
+                        name: format!("overlap-{n}-{pn}"),
+                        page,
+                        theme: ThemeChoice::Black,
+                        size,
+                        fixture: Fixture::OverlapDemo,
+                        profile: None,
+                        fake: false,
+                        practice: false,
+                        anim_t: None,
+                        reduced: false,
+                    });
+                }
             }
             shots = list;
         }

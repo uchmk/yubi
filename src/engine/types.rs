@@ -709,6 +709,23 @@ fn ring_counts_for(cfg: &Config, exe: Option<&str>) -> [bool; 3] {
 }
 
 impl GestureCfg {
+    /// How far a contact may travel before the hold candidate ends. The configured hold travel,
+    /// but never more than the drag start distance when the drag's own finger count is also a
+    /// long-hold count (ring or plain action): once a hand moves that much it is a drag, not a hold.
+    pub fn hold_travel_limit(&self, th: &Thresholds) -> f32 {
+        if self.drag && self.long_hold_count(self.drag_n) {
+            th.hold_travel_mm.min(th.drag_start_mm)
+        } else {
+            th.hold_travel_mm
+        }
+    }
+
+    /// A long hold with `n` fingers does something (opens the ring or runs an action).
+    pub fn long_hold_count(&self, n: usize) -> bool {
+        self.ring.as_ref().is_some_and(|r| r.opens_with(n))
+            || (1..=5).contains(&n) && self.long_hold[n - 1] != config::Action::None
+    }
+
     /// The settings for a touch session that began while `exe` was in the foreground. Every
     /// multi-finger binding goes through the resolver, so a per-app override applies.
     pub fn from_config(cfg: &Config, exe: Option<&str>) -> Self {
@@ -841,6 +858,24 @@ pub struct Ctx<'a> {
     pub max_travel: f32,
     /// Raw (median-filtered) pressure of every contact that reports one.
     pub pressures: &'a [f32],
+    /// Highest debounced finger count seen in this session.
+    pub peak: usize,
+}
+
+/// While fingers land, a drag of N fingers is still being assembled: a press or long hold of a
+/// lower count may only fire once this long after the touchdown (see `Ctx::is_drag_transient`).
+pub const LANDING_GRACE_US: u64 = 120_000;
+
+impl Ctx<'_> {
+    /// The `n`-finger reading is only a step of landing or lifting the drag's N fingers (the
+    /// session is within the landing grace, or already reached N): a press or hold of the lower
+    /// count `n` must not fire from it.
+    pub fn is_drag_transient(&self, n: usize) -> bool {
+        self.g.drag
+            && n < self.g.drag_n
+            && (self.peak >= self.g.drag_n
+                || self.now.saturating_sub(self.session_start_us) < LANDING_GRACE_US)
+    }
 }
 
 pub fn dist(a: Point, b: Point) -> f32 {

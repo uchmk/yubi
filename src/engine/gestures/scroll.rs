@@ -387,6 +387,7 @@ mod tests {
             dims: None,
             max_travel: 0.0,
             pressures: &[],
+            peak: 0,
         }
     }
 

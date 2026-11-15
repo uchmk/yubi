@@ -12,7 +12,7 @@ use crate::icons;
 use crate::nav::Page;
 use crate::win_gestures;
 
-use super::Cmd;
+use super::{Cmd, overview};
 use crate::theme::Tokens;
 use crate::widgets::{
     self, SliderSpec, accent_button, combo_sized, group, icon_button, section_header,
@@ -66,9 +66,21 @@ fn windows_conflict(
     cmd
 }
 
+/// A muted note when the drag and a long hold use the same finger count.
+fn overlap_note(ui: &mut Ui, t: &Tokens, cfg: &Config, on: bool) {
+    if let Some(o) = overview::drag_hold_overlap(cfg).filter(|_| on) {
+        group(ui, t, |g| {
+            g.wrapped_row(|ui| {
+                ui.label(RichText::new(o.note()).size(t.fs_small).color(t.text_muted));
+            });
+        });
+    }
+}
+
 pub fn drag(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win: &win_gestures::Values) -> Option<Cmd> {
     let on = feature_top(ui, t, cfg, Page::Drag);
     let cmd = windows_conflict(ui, t, win, cfg.drag.fingers, on);
+    overlap_note(ui, t, cfg, on);
     ui.add_enabled_ui(on, |ui| {
         section_header(ui, t, "動作");
         group(ui, t, |g| {
@@ -267,6 +279,7 @@ pub fn custom_press(
 /// what makes the ring open there; the ring page only shows which counts those are.
 pub fn long_hold(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
     let on = feature_top(ui, t, cfg, Page::LongHold);
+    overlap_note(ui, t, cfg, on);
     let mut cmd = None;
     ui.add_enabled_ui(on, |ui| {
         section_header(ui, t, "動作");

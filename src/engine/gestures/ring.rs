@@ -140,7 +140,10 @@ impl RingState {
         if self.phase != Phase::Idle {
             return None;
         }
-        if ctx.raw > cfg.max_fingers() || ctx.max_travel >= ctx.th.hold_travel_mm {
+        // Another gesture owns the session (a drag that began): the ring never opens in it, not
+        // even when the hand pauses later. Moving as far as a drag start ends the candidate too.
+        if ctx.raw > cfg.max_fingers() || ctx.max_travel >= ctx.g.hold_travel_limit(ctx.th) || !free
+        {
             self.phase = Phase::Dead;
             return None;
         }

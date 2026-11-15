@@ -1283,3 +1283,185 @@ fn a_two_finger_firm_press_beats_scroll_and_a_pan_still_scrolls() {
     assert!(triggers(&out).is_empty());
     assert!(wheel_sum(&out).2 > 5);
 }
+
+// ---- drag and long hold / ring on the same finger count ----
+
+/// The user's setup: 3-finger drag, ring menu on 3 and 5 fingers, a 1-finger deep press bound to
+/// tab switch, a 4-finger swipe up.
+fn overlap_cfg() -> Config {
+    let mut cfg = drag_cfg(3);
+    cfg.long_hold.enabled = true;
+    cfg.long_hold.actions.three = config::Action::RingMenu;
+    cfg.long_hold.actions.five = config::Action::RingMenu;
+    cfg.press.enabled = true;
+    cfg.press.fingers[0].enabled = true;
+    cfg.press.fingers[0].light = config::Action::None;
+    cfg.press.fingers[0].deep = config::Action::TabSwitch;
+    cfg.four.enabled = true;
+    cfg.four.swipe_up = config::Action::TaskView;
+    cfg
+}
+
+impl Seq {
+    /// Fingers land one after another (`gap_ms` apart); the first one lands with `first_p`,
+    /// the others with `rest_p`. Returns the final positions.
+    fn land(&mut self, p: &[(f32, f32)], gap_ms: u64, first_p: f32, rest_p: f32) {
+        for k in 1..=p.len() {
+            let pr: Vec<f32> = (0..k)
+                .map(|i| if i == 0 { first_p } else { rest_p })
+                .collect();
+            for _ in 0..(gap_ms * 1000 / STEP).max(1) {
+                self.push_p(&p[..k], &pr);
+            }
+        }
+    }
+
+    /// `ms` of rest with every contact at pressure `p`.
+    fn rest_p(&mut self, p: &[(f32, f32)], pr: f32, ms: u64) {
+        self.hold_p(p, pr, (ms * 1000 / STEP).max(1) as usize);
+    }
+
+    fn glide_p(&mut self, from: &[(f32, f32)], dx: f32, ms: u64, pr: f32) -> Pts {
+        let n = (ms * 1000 / STEP).max(1);
+        for i in 1..=n {
+            let f = i as f32 / n as f32;
+            self.push_p(&shifted(from, dx * f, 0.0), &vec![pr; from.len()]);
+        }
+        shifted(from, dx, 0.0)
+    }
+}
+
+fn ring_opened(out: &[(u64, Action)]) -> usize {
+    count(out, |a| matches!(a, Action::RingOpen { .. }))
+}
+
+/// 3 fingers land `gap_ms` apart (hard first finger), then `then` runs, then all lift.
+fn overlap_run(
+    cfg: &Config,
+    gap_ms: u64,
+    then: impl Fn(&mut Seq, &[(f32, f32)]),
+) -> Vec<(u64, Action)> {
+    let p = row(3, 60.0, 50.0);
+    let mut s = Seq::default();
+    s.land(&p, gap_ms, 0.15, 0.06);
+    then(&mut s, &p);
+    s.lift(0);
+    s.run(cfg)
+}
+
+#[test]
+fn overlap_resting_still_opens_the_ring() {
+    let out = overlap_run(&overlap_cfg(), 8, |s, p| s.rest_p(p, 0.06, 900));
+    assert_eq!(ring_opened(&out), 1);
+    assert_eq!(count(&out, |a| matches!(a, Action::DragBegin)), 0);
+}
+
+#[test]
+fn overlap_a_drift_below_the_drag_start_still_opens_the_ring() {
+    // Test a: 1.2 mm over 400 ms, then rest. Not a movement yet, so it is still a hold.
+    let out = overlap_run(&overlap_cfg(), 8, |s, p| {
+        let q = s.glide_p(p, 1.2, 400, 0.06);
+        s.rest_p(&q, 0.06, 900);
+    });
+    assert_eq!(ring_opened(&out), 1);
+    assert_eq!(count(&out, |a| matches!(a, Action::DragBegin)), 0);
+}
+
+#[test]
+fn overlap_a_drag_that_pauses_never_opens_the_ring() {
+    // Tests b, b2, c: the drag starts at 1.5 mm; resting for longer than the hold time after
+    // 2, 3 or 10 mm of movement must not open the ring (it used to spin the timer for 2 mm).
+    for dx in [2.0, 3.0, 10.0] {
+        let out = overlap_run(&overlap_cfg(), 8, |s, p| {
+            s.rest_p(p, 0.06, 50);
+            let q = s.glide_p(p, dx, 200, 0.06);
+            s.rest_p(&q, 0.06, 900);
+        });
+        assert_eq!(ring_opened(&out), 0, "dx {dx}");
+        assert_eq!(
+            count(&out, |a| matches!(a, Action::DragBegin)),
+            1,
+            "dx {dx}"
+        );
+    }
+}
+
+#[test]
+fn overlap_one_finger_drifting_past_the_drag_start_ends_the_hold() {
+    // The centroid stays under the drag start (no drag), but a finger moved 2.2 mm: that is
+    // movement, so no ring (before, only 3 mm ended the hold).
+    let out = overlap_run(&overlap_cfg(), 8, |s, p| {
+        let mut q = p.to_vec();
+        q[0].0 += 2.2;
+        s.rest_p(&q, 0.06, 900);
+    });
+    assert_eq!(ring_opened(&out), 0);
+    assert_eq!(count(&out, |a| matches!(a, Action::DragBegin)), 0);
+    // Without a drag on this count the old hold travel (3 mm) still applies.
+    let mut cfg = overlap_cfg();
+    cfg.drag.enabled = false;
+    let out = overlap_run(&cfg, 8, |s, p| {
+        let mut q = p.to_vec();
+        q[0].0 += 2.2;
+        s.rest_p(&q, 0.06, 900);
+    });
+    assert_eq!(ring_opened(&out), 1);
+}
+
+#[test]
+fn overlap_a_plain_long_hold_follows_the_same_rules() {
+    let mut cfg = overlap_cfg();
+    cfg.long_hold.actions.three = config::Action::Find;
+    let still = overlap_run(&cfg, 8, |s, p| s.rest_p(p, 0.06, 900));
+    assert_eq!(triggers(&still), vec![config::Action::Find]);
+    let moved = overlap_run(&cfg, 8, |s, p| {
+        let q = s.glide_p(p, 2.0, 200, 0.06);
+        s.rest_p(&q, 0.06, 900);
+    });
+    assert!(triggers(&moved).is_empty(), "{:?}", triggers(&moved));
+    assert_eq!(count(&moved, |a| matches!(a, Action::DragBegin)), 1);
+}
+
+#[test]
+fn overlap_landing_fingers_do_not_fire_the_one_finger_deep_press() {
+    // Test d: the hard first finger is alone for 66 ms or more while the others land.
+    for gap in [8, 44, 66, 88] {
+        let out = overlap_run(&overlap_cfg(), gap, |s, p| s.rest_p(p, 0.06, 200));
+        assert!(triggers(&out).is_empty(), "gap {gap}: {:?}", triggers(&out));
+    }
+}
+
+#[test]
+fn overlap_lifting_fingers_do_not_fire_the_one_finger_deep_press() {
+    let out = overlap_run(&overlap_cfg(), 8, |s, p| {
+        s.rest_p(p, 0.06, 100);
+        s.push_p(&p[..2], &[0.15, 0.06]);
+        s.rest_p(&p[..1], 0.15, 200);
+    });
+    assert!(triggers(&out).is_empty(), "{:?}", triggers(&out));
+}
+
+#[test]
+fn overlap_a_real_one_finger_deep_press_still_fires() {
+    let p = row(1, 60.0, 50.0);
+    let mut s = Seq::default();
+    s.rest_p(&p, 0.18, 300);
+    s.lift(0);
+    let out = s.run(&overlap_cfg());
+    assert_eq!(triggers(&out), vec![config::Action::TabSwitch]);
+}
+
+#[test]
+fn overlap_a_brief_fourth_contact_is_no_four_finger_swipe() {
+    // Test e: a drag that briefly reads 4 contacts, with and without the move before it.
+    let out = overlap_run(&overlap_cfg(), 8, |s, p| {
+        let q = s.glide_p(p, 8.0, 200, 0.06);
+        let mut f = q.clone();
+        f.push((q[2].0 + 10.0, q[2].1));
+        s.rest_p(&f, 0.06, 80);
+        s.rest_p(&q, 0.06, 100);
+        s.glide_p(&q, 5.0, 100, 0.06);
+    });
+    assert!(triggers(&out).is_empty(), "{:?}", triggers(&out));
+    assert_eq!(count(&out, |a| matches!(a, Action::DragBegin)), 1);
+}

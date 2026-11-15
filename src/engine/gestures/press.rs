@@ -28,7 +28,9 @@
 use super::super::arbitration::{Owner, Proposal};
 use std::collections::VecDeque;
 
-use super::super::types::{Action, Ctx, GestureCfg, GestureEvent, Point, dist, spread_of};
+use super::super::types::{
+    Action, Ctx, GestureCfg, GestureEvent, LANDING_GRACE_US, Point, dist, spread_of,
+};
 use crate::config;
 
 /// Hysteresis below the "on" threshold at which a press counts as let go (raw pressure).
@@ -141,6 +143,8 @@ pub struct PressState {
     /// Centroid when the light gate turned on (movement is measured from here).
     arm: Option<Point>,
     touched: bool,
+    /// A lower-count press is held back (drag fingers still landing) until this time.
+    hold_until: Option<u64>,
     /// Recent (time, centroid, spread) while the count is settled.
     trail: VecDeque<(u64, Point, f32)>,
 }
@@ -236,6 +240,16 @@ impl PressState {
                 }
                 if !free || travelling {
                     self.cancel();
+                    return None;
+                }
+                // The other fingers of a drag are still landing (or lifting): wait, do not fire.
+                if ctx.is_drag_transient(n) {
+                    if ctx.peak >= ctx.g.drag_n {
+                        // Lifting from the drag's count: this press is over for now.
+                        self.cancel();
+                    } else {
+                        self.hold_until = Some(ctx.session_start_us + LANDING_GRACE_US);
+                    }
                     return None;
                 }
                 if !cfg.deep_bound() {
@@ -385,7 +399,10 @@ impl PressState {
     /// The next time this machine needs a tick.
     pub fn deadline(&self, th: &super::super::types::Thresholds) -> Option<u64> {
         match self.phase {
-            Phase::Idle if self.arm.is_some() => self.light.due(th.press_persist_us),
+            Phase::Idle if self.arm.is_some() => self
+                .light
+                .due(th.press_persist_us)
+                .map(|d| d.max(self.hold_until.unwrap_or(0))),
             Phase::Latched { lifting: false, .. } => self.deep.due(th.press_persist_us),
             Phase::Rearm {
                 below_since: Some(s),

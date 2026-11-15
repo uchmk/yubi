@@ -346,10 +346,15 @@ impl Recognizer {
             && now >= due
             && let Some(s) = self.session.as_mut()
         {
-            let fired = s.max_travel < self.th.hold_travel_mm;
+            let fingers = self.tracker.stable;
+            // A lower count seen while the drag's fingers land or lift is no long hold.
+            let transient = self.g.drag
+                && fingers < self.g.drag_n
+                && (s.peak >= self.g.drag_n
+                    || now.saturating_sub(s.start_us) < super::types::LANDING_GRACE_US);
+            let fired = s.max_travel < self.g.hold_travel_limit(&self.th) && !transient;
             s.hold_fired = true;
             if fired {
-                let fingers = self.tracker.stable;
                 out.push(Action::Debug(GestureEvent::LongHold { fingers }));
                 // The ring-menu choice is not in this table: the ring state machine opens it.
                 // Only a count with a real action claims the session (an unbound one must not
@@ -455,6 +460,7 @@ impl Recognizer {
             dims: self.latched.as_ref().and_then(|e| e.dims_mm),
             max_travel: s.max_travel,
             pressures: &self.pressures,
+            peak: s.peak,
         };
         let mut proposals: Vec<Proposal> = Vec::new();
         let mut hit: Option<MultiHit> = None;

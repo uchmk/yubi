@@ -332,6 +332,65 @@ fn row_is_bound(row: &Row) -> bool {
             .any(|c| matches!(c, Cell::Set(s) if s != none))
 }
 
+/// The drag and a long hold use the same finger count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DragHoldOverlap {
+    pub fingers: u8,
+    /// The long hold of that count opens the ring (otherwise it runs a plain action).
+    pub ring: bool,
+}
+
+impl DragHoldOverlap {
+    /// The explanation shown on the overview.
+    pub fn reason(self) -> String {
+        let n = self.fingers;
+        if self.ring {
+            format!(
+                "{n}本指: ドラッグとロングホールド（リング）が同じ本数です。止めてから動かすとリングが先に開きます。どちらかの本数を変えてください。"
+            )
+        } else {
+            format!(
+                "{n}本指: ドラッグとロングホールドが同じ本数です。止めてから動かすとロングホールドが先に動きます。どちらかの本数を変えてください。"
+            )
+        }
+    }
+
+    /// The short note on the ドラッグ and ロングホールド pages.
+    pub fn note(self) -> String {
+        let n = self.fingers;
+        let what = if self.ring {
+            "ロングホールド（リング）"
+        } else {
+            "ロングホールド"
+        };
+        format!(
+            "{n}本指がドラッグと{what}で重なっています。止めてから動かすと先に長押しが動きます。本数を変えると避けられます。"
+        )
+    }
+}
+
+/// Whether the 3 to 5 finger drag shares its finger count with a long hold that is switched on.
+pub fn drag_hold_overlap(cfg: &Config) -> Option<DragHoldOverlap> {
+    if !cfg.drag.enabled {
+        return None;
+    }
+    let n = cfg.drag.fingers.clamp(3, 5);
+    let count = usize::from(n);
+    if cfg.ring_counts().contains(&count) {
+        return Some(DragHoldOverlap {
+            fingers: n,
+            ring: true,
+        });
+    }
+    let a = cfg.long_hold.actions.get(count);
+    (cfg.long_hold.enabled && *a != Action::None && *a != Action::RingMenu).then_some(
+        DragHoldOverlap {
+            fingers: n,
+            ring: false,
+        },
+    )
+}
+
 fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conflict> {
     let mut out = Vec::new();
     let bound: Vec<&Row> = rows.iter().filter(|r| row_is_bound(r)).collect();
@@ -445,6 +504,14 @@ fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conf
                 page: Page::Window,
             });
         }
+    }
+    if let Some(o) = drag_hold_overlap(cfg) {
+        out.push(Conflict {
+            kind: ConflictKind::Overlap,
+            rows: Vec::new(),
+            reason: o.reason(),
+            page: Page::LongHold,
+        });
     }
     if cfg.corner.enabled && cfg.window.enabled && cfg.window.corner_resize {
         let affected = keys(&|r| r.key.starts_with("corner.") && r.key.ends_with(".diagonal"));
@@ -931,6 +998,45 @@ mod tests {
                 .iter()
                 .all(|c| c.kind != ConflictKind::Overlap)
         );
+    }
+
+    #[test]
+    fn drag_and_long_hold_with_the_same_count_overlap() {
+        let mut cfg = base();
+        cfg.drag.enabled = true;
+        cfg.drag.fingers = 3;
+        assert_eq!(drag_hold_overlap(&cfg), None);
+        // The ring on 3 fingers needs the long hold and the ring on.
+        cfg.long_hold.actions.three = Action::RingMenu;
+        assert_eq!(drag_hold_overlap(&cfg), None);
+        cfg.long_hold.enabled = true;
+        cfg.ring.enabled = true;
+        let o = drag_hold_overlap(&cfg).expect("ring overlap");
+        assert_eq!((o.fingers, o.ring), (3, true));
+        assert!(
+            o.reason()
+                .contains("3本指: ドラッグとロングホールド（リング）")
+        );
+        assert!(
+            build(&cfg, &WIN_OFF)
+                .conflicts
+                .iter()
+                .any(|c| c.kind == ConflictKind::Overlap
+                    && c.reason.contains("リングが先に開きます"))
+        );
+        // Another count, or the drag off: no overlap.
+        cfg.drag.fingers = 4;
+        assert_eq!(drag_hold_overlap(&cfg), None);
+        cfg.drag.fingers = 3;
+        cfg.drag.enabled = false;
+        assert_eq!(drag_hold_overlap(&cfg), None);
+        // A plain action counts too; "none" does not.
+        cfg.drag.enabled = true;
+        cfg.long_hold.actions.three = Action::Find;
+        let o = drag_hold_overlap(&cfg).expect("plain overlap");
+        assert!(!o.ring);
+        cfg.long_hold.actions.three = Action::None;
+        assert_eq!(drag_hold_overlap(&cfg), None);
     }
 
     #[test]

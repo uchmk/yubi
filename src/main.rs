@@ -16,6 +16,7 @@ mod os;
 mod overlay;
 mod pages;
 mod pause_notice;
+mod practice_gestures;
 mod resident;
 mod search;
 mod theme;

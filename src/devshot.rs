@@ -140,7 +140,6 @@ impl DevShot {
             ("profiles", Page::Profiles),
             ("sensitivity", Page::Sensitivity),
             ("haptic", Page::Haptic),
-            ("monitor", Page::Monitor),
             ("practice", Page::Practice),
             ("diagnostics", Page::Diagnostics),
             ("general", Page::General),
@@ -179,7 +178,6 @@ impl DevShot {
             ("sensitivity", Page::Sensitivity),
             ("fingerhold", Page::FingerHold),
             ("diagnostics", Page::Diagnostics),
-            ("monitor", Page::Monitor),
             ("practice", Page::Practice),
             ("general", Page::General),
         ] {
@@ -209,16 +207,18 @@ impl DevShot {
         }
         // The practice page with a made-up state: three fingers down and a short history.
         for (n, size) in [("wide", WIDE), ("narrow", NARROW)] {
-            shots.push(Shot {
-                name: format!("practice-fake-{n}"),
-                page: Page::Practice,
-                theme: ThemeChoice::Black,
-                size,
-                fixture: Fixture::Keep,
-                profile: None,
-                fake: true,
-                practice: true,
-            });
+            for (mode, on) in [("on", true), ("off", false)] {
+                shots.push(Shot {
+                    name: format!("practice-fake-{mode}-{n}"),
+                    page: Page::Practice,
+                    theme: ThemeChoice::Black,
+                    size,
+                    fixture: Fixture::Keep,
+                    profile: None,
+                    fake: true,
+                    practice: on,
+                });
+            }
         }
         // Per-app pages with fixed data: list, empty list, two editors, the overview.
         for (size_name, size) in [("wide", WIDE), ("narrow", NARROW)] {

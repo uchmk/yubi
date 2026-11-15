@@ -28,4 +28,3 @@ pub const HAPTIC: char = '\u{E765}';
 pub const MONITOR: char = '\u{E7F4}';
 pub const DIAGNOSTICS: char = '\u{E9CE}';
 pub const LOG: char = '\u{E8A5}';
-pub const TEST: char = '\u{E768}';

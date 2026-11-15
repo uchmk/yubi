@@ -1,4 +1,4 @@
-//! 入力モニター (live contact view) and 診断 (device info, ranges, counters).
+//! 診断 (device info, ranges, counters).
 
 use std::time::Duration;
 
@@ -15,7 +15,6 @@ use crate::theme::Tokens;
 use crate::widgets::{self, group, section_header};
 
 /// Tallest the pad drawing may get, so the page stays usable in small windows.
-const PAD_MAX_HEIGHT: f32 = 360.0;
 const CONTACT_RADIUS: f32 = 14.0;
 const CONTACT_RADIUS_PRESSURE_GAIN: f32 = 16.0;
 const CONTACT_STROKE: f32 = 1.5;
@@ -57,18 +56,6 @@ impl Diagnostics {
             0
         } else {
             self.state.fps
-        }
-    }
-
-    pub fn monitor(&mut self, ui: &mut Ui, t: &Tokens) {
-        widgets::page_header(ui, t, Page::Monitor.label(), Page::Monitor.subtitle());
-        let Some(device) = self.state.device.clone() else {
-            empty_state(ui, t);
-            return;
-        };
-        self.pad(ui, t, &device, PAD_MAX_HEIGHT);
-        if self.rate() > 0 {
-            ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
     }
 

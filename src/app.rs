@@ -18,6 +18,7 @@ use crate::pages::{
     Cmd, apps, diagnostics::Diagnostics, features, general, general_io, home, overview, press,
     sensitivity,
 };
+use crate::practice_gestures;
 use crate::resident::{self, Resident};
 use crate::search::{self, Entry};
 use crate::theme::{self, Tokens};
@@ -76,6 +77,8 @@ pub struct App {
     icon_deadline: Option<Instant>,
     /// 練習モード (dry run): recognized gestures are shown, not run. Never saved.
     practice_on: bool,
+    /// Windows' own gestures are off while practising (see `practice_gestures`).
+    practice_win: practice_gestures::State,
     /// The pause generation last seen (`u64::MAX` before the first look, so the start is silent).
     seen_pause_gen: u64,
     /// The pause shortcut text last handed to the tray.
@@ -97,6 +100,19 @@ impl App {
         let mut general_state = general_io::GeneralState::new(ctx);
         general_state.load_notes = warnings;
         general_state.read_only = future_version.is_some();
+        // A crash during practice may have left Windows' gestures off: put them back first.
+        let practice_win = if crate::devshot::DevShot::from_env().is_none() {
+            let backup = config_path.with_file_name(practice_gestures::PRACTICE_BACKUP_FILE);
+            match practice_gestures::release(&backup) {
+                Ok(()) => practice_gestures::State::Off,
+                Err(e) => {
+                    eprintln!("yubi: cannot restore Windows gestures after practice: {e}");
+                    practice_gestures::State::RestoreFailed(e)
+                }
+            }
+        } else {
+            practice_gestures::State::Off
+        };
         Self {
             read_only: future_version.is_some(),
             page: Page::Home,
@@ -133,6 +149,7 @@ impl App {
             hide_frames: 0,
             icon_deadline: None,
             practice_on: false,
+            practice_win,
             seen_pause_gen: u64::MAX,
             applied_shortcut: None,
         }
@@ -210,6 +227,7 @@ impl App {
                         .pause_for(Duration::from_secs(u64::from(m) * 60));
                 }
                 resident::Event::EndSession => {
+                    let _ = self.release_practice_win();
                     // Logoff/shutdown: flush the config and release held keys now.
                     self.save_if_due(ctx, true);
                     self.engine.shutdown();
@@ -246,6 +264,57 @@ impl App {
         self.engine
             .dry_run
             .store(self.practice_on, Ordering::Relaxed);
+        if self.devshot.is_none() {
+            let paused = self.engine.pause.view().paused;
+            self.sync_practice_win(self.practice_on && !paused);
+        }
+    }
+
+    fn practice_backup_path(&self) -> PathBuf {
+        self.config_path
+            .with_file_name(practice_gestures::PRACTICE_BACKUP_FILE)
+    }
+
+    /// Switch Windows' gestures off or back on so they follow `want`.
+    fn sync_practice_win(&mut self, want: bool) {
+        let (practice, user) = (self.practice_backup_path(), self.backup_path());
+        let step = practice_gestures::next_step(
+            &self.practice_win,
+            want,
+            practice_gestures::windows_on,
+            || user.exists(),
+        );
+        use practice_gestures::Step;
+        let result = match step {
+            Step::Engage => practice_gestures::engage(&practice),
+            Step::Release | Step::Clear => practice_gestures::release(&practice),
+            _ => Ok(()),
+        };
+        let mut next = practice_gestures::settle(&self.practice_win, &step, &result);
+        // A failed or partly applied engage may have left a backup: put those values back now.
+        if matches!(step, Step::Engage)
+            && result.is_err()
+            && let Err(e) = practice_gestures::release(&practice)
+        {
+            next = practice_gestures::State::RestoreFailed(e);
+        }
+        if let practice_gestures::State::RestoreFailed(e) = &next
+            && next != self.practice_win
+        {
+            eprintln!("yubi: cannot restore Windows gestures after practice: {e}");
+        }
+        self.practice_win = next;
+    }
+
+    /// Put Windows' gestures back right now (exit, logoff, the permanent button, the retry
+    /// button). On failure the state shows it and the backup file stays for the next try.
+    fn release_practice_win(&mut self) -> Result<(), String> {
+        let r = practice_gestures::release(&self.practice_backup_path());
+        self.practice_win = match &r {
+            Ok(()) => practice_gestures::State::Off,
+            Err(e) => practice_gestures::State::RestoreFailed(e.clone()),
+        };
+        r
     }
 
     fn backup_path(&self) -> PathBuf {
@@ -318,12 +387,25 @@ impl App {
                 self.page = Page::Profiles;
             }
             Cmd::DisableWindowsGestures => {
+                // Practice may have switched them off already: put the real values back first,
+                // so the permanent backup records them and no later practice restore undoes this.
+                let released = self.release_practice_win();
+                if !practice_gestures::may_disable_permanently(&released) {
+                    let why = released.err().unwrap_or_default();
+                    self.win_message = Some(format!(
+                        "練習のために変えた Windows のジェスチャーを元に戻せないため、無効化は行いませんでした: {why}"
+                    ));
+                    return;
+                }
                 let r = win_gestures::disable(&self.backup_path());
                 self.report("無効に", r);
             }
             Cmd::RestoreWindowsGestures => {
                 let r = win_gestures::restore(&self.backup_path());
                 self.report("元に戻", r);
+            }
+            Cmd::RetryPracticeRestore => {
+                let _ = self.release_practice_win();
             }
             Cmd::TogglePause => self.engine.pause.toggle(),
             Cmd::OpenTouchpadSettings => {
@@ -548,8 +630,16 @@ impl App {
                 );
             }
             Page::Haptic => press::page(ui, t, cfg, self.diagnostics.state(), &mut self.press_ui),
-            Page::Monitor => self.diagnostics.monitor(ui, t),
-            Page::Practice => self.diagnostics.practice(ui, t, &mut self.practice_on),
+            Page::Practice => {
+                let status = if self.devshot.is_some() && self.practice_on {
+                    practice_gestures::Status::Active
+                } else {
+                    practice_gestures::status(&self.practice_win)
+                };
+                return self
+                    .diagnostics
+                    .practice(ui, t, &mut self.practice_on, status);
+            }
             Page::Diagnostics => self.diagnostics.info(ui, t, now),
             Page::General => {
                 let view = general::WinGestureView {
@@ -703,6 +793,9 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self) {
+        if let Err(e) = self.release_practice_win() {
+            eprintln!("yubi: cannot restore Windows gestures at exit: {e}");
+        }
         self.engine.shutdown();
         if let Some(r) = self.resident.as_mut() {
             r.shutdown();

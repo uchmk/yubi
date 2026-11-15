@@ -1,26 +1,33 @@
-//! ジェスチャーの練習: the live pad, what the recognizer decided, and a dry-run switch.
+//! 入力の確認: the live pad, what the recognizer decided, and a dry-run switch.
 
 use std::time::{Duration, Instant};
 
 use eframe::egui::{RichText, Ui};
 
+use super::Cmd;
 use super::diagnostics::{Diagnostics, empty_state};
 use crate::engine::MonitorState;
 use crate::engine::practice::{History, Judgement, Outcome, ago_label, idle_reason};
 use crate::input::{Contact, DeviceInfo, TouchFrame};
 use crate::nav::Page;
+use crate::practice_gestures::Status;
 use crate::theme::Tokens;
 use crate::widgets::{self, group, section_header};
 
-/// The page redraws this often, so the "n 秒前" labels and the live pad stay current.
-/// Shorter than the monitor's pad, so the 判定 panel below it stays in view.
-const PRACTICE_PAD_MAX_HEIGHT: f32 = 220.0;
+/// Low enough that 接触 and 判定 stay in view in the default window.
+const PAD_MAX_HEIGHT: f32 = 250.0;
 
 const REFRESH: Duration = Duration::from_millis(250);
 
 impl Diagnostics {
     /// `practice_on` is the dry-run switch; the app turns it off again when the page is left.
-    pub fn practice(&mut self, ui: &mut Ui, t: &Tokens, practice_on: &mut bool) {
+    pub fn practice(
+        &mut self,
+        ui: &mut Ui,
+        t: &Tokens,
+        practice_on: &mut bool,
+        win: Status<'_>,
+    ) -> Option<Cmd> {
         widgets::page_header(ui, t, Page::Practice.label(), Page::Practice.subtitle());
         ui.ctx().request_repaint_after(REFRESH);
 
@@ -33,13 +40,45 @@ impl Diagnostics {
                 practice_on,
             );
         });
+        let note = match win {
+            Status::Quiet => None,
+            Status::Active => Some((
+                "練習中は Windows のタッチパッド ジェスチャーを一時的にオフにしています".to_owned(),
+                t.text_muted,
+            )),
+            Status::Failed(e) => Some((
+                format!(
+                    "Windows のジェスチャーをオフにできませんでした。練習中は Windows 側の操作が重なって動くことがあります（{e}）"
+                ),
+                t.text_muted,
+            )),
+            Status::RestoreFailed(e) => Some((
+                format!("Windows のジェスチャーを元に戻せませんでした（{e}）"),
+                t.text,
+            )),
+        };
+        let mut cmd = None;
+        if let Some((text, color)) = note {
+            group(ui, t, |g| {
+                g.wrapped_row(|ui| {
+                    ui.label(RichText::new(text).size(t.fs_small).color(color));
+                });
+                if matches!(win, Status::RestoreFailed(_)) {
+                    g.wrapped_row(|ui| {
+                        if widgets::button(ui, t, "もう一度元に戻す").clicked() {
+                            cmd = Some(Cmd::RetryPracticeRestore);
+                        }
+                    });
+                }
+            });
+        }
 
         let Some(device) = self.state.device.clone() else {
             empty_state(ui, t);
-            return;
+            return cmd;
         };
         ui.add_space(t.space_md);
-        self.pad(ui, t, &device, PRACTICE_PAD_MAX_HEIGHT);
+        self.pad(ui, t, &device, PAD_MAX_HEIGHT);
 
         section_header(ui, t, "接触");
         let frame = self.state.frame.as_ref();
@@ -103,6 +142,7 @@ impl Diagnostics {
                 g.list_row(&title, &ago_label(j.at.elapsed()));
             }
         });
+        cmd
     }
 
     /// Replace the live state with a fixed one (devshots only); `None` goes back to the engine.

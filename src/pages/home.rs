@@ -61,9 +61,8 @@ fn left_column(ui: &mut Ui, t: &Tokens, cfg: &Config) -> Option<Cmd> {
     group(ui, t, |g| {
         g.wrapped_row(|ui| {
             let labels = [
-                Page::Monitor.label(),
+                Page::Practice.label(),
                 "リングメニューを編集",
-                "入力テスト",
                 "設定フォルダーを開く",
                 "ログを書き出す",
             ];
@@ -71,18 +70,15 @@ fn left_column(ui: &mut Ui, t: &Tokens, cfg: &Config) -> Option<Cmd> {
             {
                 ui.spacing_mut().item_spacing = Vec2::splat(t.space_sm);
                 if tile(ui, t, w, icons::MONITOR, labels[0], true).clicked() {
-                    cmd = Some(Cmd::Goto(Page::Monitor));
+                    cmd = Some(Cmd::Goto(Page::Practice));
                 }
                 if tile(ui, t, w, icons::RING, labels[1], true).clicked() {
                     cmd = Some(Cmd::Goto(Page::Ring));
                 }
-                if tile(ui, t, w, icons::TEST, labels[2], true).clicked() {
-                    cmd = Some(Cmd::Goto(Page::Monitor));
-                }
-                if tile(ui, t, w, icons::FOLDER, labels[3], true).clicked() {
+                if tile(ui, t, w, icons::FOLDER, labels[2], true).clicked() {
                     cmd = Some(Cmd::OpenConfigFolder);
                 }
-                tile(ui, t, w, icons::LOG, labels[4], false).on_hover_text("未実装");
+                tile(ui, t, w, icons::LOG, labels[3], false).on_hover_text("未実装");
             }
         });
     });

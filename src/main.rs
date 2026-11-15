@@ -9,6 +9,7 @@ mod engine;
 mod fonts;
 mod haptic;
 mod hook;
+mod howto;
 mod icons;
 mod input;
 mod nav;

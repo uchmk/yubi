@@ -16,6 +16,8 @@ const SETTLE_FRAMES: u32 = 20;
 
 const WIDE: Vec2 = Vec2::new(1200.0, 800.0);
 const NARROW: Vec2 = Vec2::new(700.0, 520.0);
+/// The window's minimum inner size.
+const MINIMUM: Vec2 = Vec2::new(640.0, 420.0);
 
 /// The per-app data a shot runs with, so the pages show the same thing on every machine.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -109,6 +111,10 @@ pub struct Shot {
     pub fake: bool,
     /// Switch 練習モード on.
     pub practice: bool,
+    /// Pin the how-to animations to this time (seconds); `None` lets them run.
+    pub anim_t: Option<f32>,
+    /// Behave as if Windows' animation effects were off.
+    pub reduced: bool,
 }
 
 pub struct DevShot {
@@ -155,6 +161,8 @@ impl DevShot {
                 profile: None,
                 fake: false,
                 practice: false,
+                anim_t: None,
+                reduced: false,
             })
             .collect();
         for &(n, page) in &[("home", Page::Home), ("haptic", Page::Haptic)] {
@@ -167,6 +175,8 @@ impl DevShot {
                 profile: None,
                 fake: false,
                 practice: false,
+                anim_t: None,
+                reduced: false,
             });
         }
         for &(n, page) in &[
@@ -190,6 +200,8 @@ impl DevShot {
                 profile: None,
                 fake: false,
                 practice: false,
+                anim_t: None,
+                reduced: false,
             });
         }
         // The 感度 page tall enough to show the cursor and scroll sections without scrolling.
@@ -203,6 +215,8 @@ impl DevShot {
                 profile: None,
                 fake: false,
                 practice: false,
+                anim_t: None,
+                reduced: false,
             });
         }
         // The practice page with a made-up state: three fingers down and a short history.
@@ -217,6 +231,8 @@ impl DevShot {
                     profile: None,
                     fake: true,
                     practice: on,
+                    anim_t: None,
+                    reduced: false,
                 });
             }
         }
@@ -267,6 +283,8 @@ impl DevShot {
                     profile,
                     fake: false,
                     practice: false,
+                    anim_t: None,
+                    reduced: false,
                 });
             }
         }
@@ -295,7 +313,73 @@ impl DevShot {
                     profile: None,
                     fake: false,
                     practice: false,
+                    anim_t: None,
+                    reduced: false,
                 });
+            }
+            shots = list;
+        }
+        if std::env::var_os("YUBI_SHOT_ANIM").is_some() {
+            // Only the how-to illustrations, at fixed times, in both themes and sizes.
+            let mut list = Vec::new();
+            for (size_name, size) in [("wide", WIDE), ("narrow", NARROW), ("min", MINIMUM)] {
+                for (n, page, fixture, profile, times) in [
+                    (
+                        "edge",
+                        Page::Edge,
+                        Fixture::DemoProfiles,
+                        None,
+                        &[0.15, 0.5, 2.0][..],
+                    ),
+                    (
+                        "ring",
+                        Page::Ring,
+                        Fixture::Keep,
+                        None,
+                        &[0.2, 0.8, 2.0, 3.0][..],
+                    ),
+                    (
+                        "apps",
+                        Page::Profiles,
+                        Fixture::NoProfiles,
+                        None,
+                        &[0.0][..],
+                    ),
+                ] {
+                    for (i, &t) in times.iter().enumerate() {
+                        list.push(Shot {
+                            name: format!("anim-{n}-{size_name}-{i}"),
+                            page,
+                            theme: ThemeChoice::Black,
+                            size,
+                            fixture,
+                            profile,
+                            fake: false,
+                            practice: false,
+                            anim_t: Some(t),
+                            reduced: false,
+                        });
+                    }
+                }
+                for (n, page, theme) in [
+                    ("edge-light", Page::Edge, ThemeChoice::Light),
+                    ("ring-light", Page::Ring, ThemeChoice::Light),
+                    ("edge-still", Page::Edge, ThemeChoice::Black),
+                    ("ring-still", Page::Ring, ThemeChoice::Black),
+                ] {
+                    list.push(Shot {
+                        name: format!("anim-{n}-{size_name}"),
+                        page,
+                        theme,
+                        size,
+                        fixture: Fixture::DemoProfiles,
+                        profile: None,
+                        fake: false,
+                        practice: false,
+                        anim_t: (!n.ends_with("still")).then_some(2.0),
+                        reduced: n.ends_with("still"),
+                    });
+                }
             }
             shots = list;
         }

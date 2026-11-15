@@ -10,6 +10,7 @@ use crate::config::{
     Scroll,
 };
 use crate::engine::resolve::{basename, profile_matches};
+use crate::howto;
 use crate::icons;
 use crate::nav::Page;
 use crate::theme::Tokens;
@@ -251,32 +252,37 @@ fn list(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState) {
         if cfg.profiles.is_empty() {
             g.wrapped_row(|ui| {
                 ui.vertical(|ui| {
-                    for (line, strong) in [
-                        ("アプリはまだ登録されていません。", true),
-                        (
-                            "アプリごとの設定は、そのアプリが前面にある間だけ、全体の設定を差し替える仕組みです。",
-                            false,
-                        ),
-                        (
-                            "追加するには、下の「アプリを追加」に実行ファイル名（例: code.exe）を入力して「追加」を押すか、「実行中のアプリから選ぶ」で選びます。",
-                            false,
-                        ),
-                        (
-                            "差し替えられるもの: 各ジェスチャーの動作、エッジスライダーの対象、カーソルの速度、2 本指スクロールの速さ、そのアプリでの yubi の停止。",
-                            false,
-                        ),
-                        (
-                            "例: code.exe を追加して、左端のエッジスライダーを「スクロール」にすると、VS Code の前面にいるときだけ左端でスクロールできます。",
-                            false,
-                        ),
-                    ] {
-                        let text = RichText::new(line);
-                        ui.label(if strong {
-                            text.color(t.text)
-                        } else {
-                            text.size(t.fs_small).color(t.text_muted)
-                        });
-                    }
+                    howto::two_col(
+                        ui,
+                        t,
+                        howto::strip_width(3, howto::CARD_W_MAX),
+                        |ui| {
+                            howto::steps(
+                                ui,
+                                t,
+                                &howto::app_step_kinds(),
+                                &[
+                                    "アプリを追加",
+                                    "変えたい項目を選ぶ",
+                                    "そのアプリの中だけで有効",
+                                ],
+                                None,
+                            );
+                        },
+                        |ui| {
+                            howto::summary(
+                                ui,
+                                t,
+                                "アプリはまだ登録されていません",
+                                &[
+                                    "アプリごとの設定は、そのアプリが前面にある間だけ、全体の設定を差し替えます。".to_owned(),
+                                    "下の「アプリを追加」に実行ファイル名（例: code.exe）を入力して「追加」を押すか、「実行中のアプリから選ぶ」で選びます。".to_owned(),
+                                    "差し替えられるもの: 各ジェスチャーの動作、エッジスライダーの対象、カーソルの速度、2 本指スクロールの速さ、そのアプリでの yubi の停止。".to_owned(),
+                                    "例: code.exe の左端を「スクロール」にすると、VS Code の前面にいるときだけ左端でスクロールできます。".to_owned(),
+                                ],
+                            );
+                        },
+                    );
                 });
             });
         }

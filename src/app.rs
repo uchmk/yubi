@@ -682,6 +682,7 @@ impl eframe::App for App {
         if let Some(shot) = self.devshot.as_ref().and_then(|d| d.current()) {
             // Keep `saved` in step so the capture run never writes the config file.
             let (fake, practice) = (shot.fake, shot.practice);
+            crate::howto::force(shot.anim_t, shot.reduced);
             self.page = shot.page;
             shot.fixture.apply(&mut self.cfg);
             if shot.page == Page::Profiles {

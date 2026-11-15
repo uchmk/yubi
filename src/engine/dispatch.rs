@@ -125,6 +125,8 @@ pub struct Dispatcher {
     blocked: bool,
     /// Latest per-app result from the foreground poll; takes effect at the next touch start.
     live_blocked: bool,
+    /// Practice mode: gestures are recognized but nothing new is run (ends still run).
+    dry_run: bool,
     /// The recognizer has a drag open (begun, not yet ended).
     drag_open: bool,
     /// The left button was already (re)tried this touch session.
@@ -170,6 +172,7 @@ impl Dispatcher {
         Self {
             blocked: false,
             live_blocked: false,
+            dry_run: false,
             drag_open: false,
             press_tried: false,
             release_pending: false,
@@ -187,6 +190,17 @@ impl Dispatcher {
     /// the app is decided once per touch session.
     pub fn set_blocked(&mut self, blocked: bool) {
         self.live_blocked = blocked;
+    }
+
+    /// Practice mode on or off. Starting nothing new is all it does: whatever already began
+    /// (a drag, a window move) still ends cleanly.
+    pub fn set_dry_run(&mut self, on: bool) {
+        self.dry_run = on;
+    }
+
+    /// The per-app filter decision of the current touch session.
+    pub fn is_blocked(&self) -> bool {
+        self.blocked
     }
 
     /// False when the worker is missing or has died.
@@ -270,7 +284,7 @@ impl Dispatcher {
                 // The worker reports what really happened (moved, snapped, no window, ...).
                 (!self.win(WinCmd::End { snap: *snap })).then(|| WORKER_NOTE.to_owned())
             }
-            _ if self.blocked => None,
+            _ if self.blocked || self.dry_run => None,
             Action::DragBegin => {
                 self.drag_open = true;
                 self.press_tried = true;
@@ -777,6 +791,54 @@ mod tests {
             f.log,
             vec![SynthEvent::Down(LEFT), SynthEvent::Up(LEFT)],
             "no input was sent for the blocked session"
+        );
+    }
+
+    #[test]
+    fn practice_mode_runs_nothing_new_but_still_closes_what_began() {
+        let (mut d, rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        let mv = Action::DragMove {
+            dx_mm: 1.0,
+            dy_mm: 0.0,
+        };
+        d.set_dry_run(true);
+        d.handle(&START, &mut ex, &th, CURSOR);
+        d.handle(&Action::DragBegin, &mut ex, &th, CURSOR);
+        d.handle(&mv, &mut ex, &th, CURSOR);
+        d.handle(&Action::WindowMoveBegin, &mut ex, &th, CURSOR);
+        let note = d.handle(
+            &Action::Trigger(config::Action::ShowDesktop),
+            &mut ex,
+            &th,
+            CURSOR,
+        );
+        assert!(note.is_none());
+        assert!(ex.held().is_empty());
+        assert!(rx.try_recv().is_err());
+        // Practice mode switched on in the middle of a drag: the end still lets go.
+        d.set_dry_run(false);
+        d.handle(&Action::DragBegin, &mut ex, &th, CURSOR);
+        d.set_dry_run(true);
+        d.handle(&mv, &mut ex, &th, CURSOR);
+        d.handle(&Action::DragEnd, &mut ex, &th, CURSOR);
+        assert!(ex.held().is_empty());
+        drop(ex);
+        assert_eq!(f.log, vec![SynthEvent::Down(LEFT), SynthEvent::Up(LEFT)]);
+        // Off again: triggers run.
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        d.set_dry_run(false);
+        assert!(
+            d.handle(
+                &Action::Trigger(config::Action::ShowDesktop),
+                &mut ex,
+                &th,
+                CURSOR
+            )
+            .is_some()
         );
     }
 

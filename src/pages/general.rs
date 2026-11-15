@@ -2,13 +2,15 @@
 
 use std::path::Path;
 
-use eframe::egui::{RichText, Ui};
+use eframe::egui::{self, Id, Key, Modifiers, RichText, Ui};
 
 use super::Cmd;
 use super::general_io::{GeneralState, HapticStatus, Note, Preview, READ_ONLY_REASON};
 use crate::config::{Config, ThemeChoice};
+use crate::engine::pause::{PauseView, remaining_label};
 use crate::icons;
 use crate::nav::Page;
+use crate::resident::ShortcutStatus;
 use crate::theme::Tokens;
 use crate::widgets::{self, accent_button, button, group, section_header};
 use crate::win_gestures::{self, LABELS, Values};
@@ -23,6 +25,13 @@ pub struct WinGestureView<'a> {
     pub message: Option<&'a str>,
 }
 
+/// What the 一時停止 section shows.
+#[derive(Clone, Copy)]
+pub struct PauseInfo {
+    pub shortcut: ShortcutStatus,
+    pub pause: PauseView,
+}
+
 pub fn general(
     ui: &mut Ui,
     t: &Tokens,
@@ -30,6 +39,7 @@ pub fn general(
     config_path: &Path,
     win: &WinGestureView<'_>,
     st: &mut GeneralState,
+    pause: PauseInfo,
 ) -> Option<Cmd> {
     let mut cmd = None;
     st.poll(cfg);
@@ -92,6 +102,9 @@ pub fn general(
             cfg.general.start_with_windows = before;
         }
     });
+    section_header(ui, t, "一時停止");
+    let ctx = ui.ctx().clone();
+    group(ui, t, |g| pause_rows(g, t, &ctx, cfg, pause, &mut cmd));
     section_header(ui, t, "Windows のジェスチャーとの競合");
     group(ui, t, |g| {
         for (i, label) in LABELS.iter().enumerate() {
@@ -149,6 +162,209 @@ pub fn general(
         });
     });
     cmd
+}
+
+/// Egui temp-data flag: the shortcut field is waiting for a key press.
+fn capture_id() -> Id {
+    Id::unique("pause-shortcut-capture")
+}
+
+fn pause_rows(
+    g: &mut widgets::Group<'_>,
+    t: &Tokens,
+    ctx: &egui::Context,
+    cfg: &mut Config,
+    info: PauseInfo,
+    cmd: &mut Option<Cmd>,
+) {
+    let PauseInfo { shortcut, pause } = info;
+    g.row(None, "yubi の状態", &pause_state_text(pause), |ui| {
+        let label = if pause.paused {
+            "再開"
+        } else {
+            "一時停止"
+        };
+        if button(ui, t, label).clicked() {
+            *cmd = Some(Cmd::TogglePause);
+        }
+    });
+    let id = capture_id();
+    let mut capturing = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let mut hint = None;
+    if capturing {
+        match capture_result(ctx) {
+            Capture::Waiting => {}
+            Capture::NeedsModifier => hint = Some("Ctrl か Alt と一緒に押してください"),
+            Capture::Cancel => capturing = false,
+            Capture::Got(text) => {
+                cfg.general.pause_shortcut = text;
+                capturing = false;
+            }
+        }
+        ctx.request_repaint();
+    }
+    let current = if cfg.general.pause_shortcut.is_empty() {
+        "未設定".to_owned()
+    } else {
+        cfg.general.pause_shortcut.clone()
+    };
+    g.row(
+        None,
+        "一時停止のショートカット",
+        "どのアプリの上でも、yubi の一時停止と再開を切り替えます。トレイのアイコンからも操作できます。",
+        |ui| {
+            if capturing {
+                if button(ui, t, "キャンセル").clicked() {
+                    capturing = false;
+                }
+                ui.label(
+                    RichText::new(hint.unwrap_or("キーを押してください…"))
+                        .size(t.fs_small)
+                        .color(t.text_muted),
+                );
+            } else {
+                if button(ui, t, "変更").clicked() {
+                    capturing = true;
+                }
+                ui.label(RichText::new(&current).color(t.text));
+            }
+        },
+    );
+    ctx.data_mut(|d| d.insert_temp(id, capturing));
+    g.wrapped_row(|ui| {
+        ui.add_enabled_ui(!cfg.general.pause_shortcut.is_empty(), |ui| {
+            if button(ui, t, "クリア").clicked() {
+                cfg.general.pause_shortcut.clear();
+            }
+        });
+        ui.add_enabled_ui(
+            cfg.general.pause_shortcut != crate::config::DEFAULT_PAUSE_SHORTCUT,
+            |ui| {
+                if button(ui, t, "既定に戻す").clicked() {
+                    cfg.general.pause_shortcut = crate::config::DEFAULT_PAUSE_SHORTCUT.to_owned();
+                }
+            },
+        );
+        ui.label(
+            RichText::new(shortcut_note(&cfg.general.pause_shortcut, shortcut))
+                .size(t.fs_small)
+                .color(if shortcut == ShortcutStatus::Conflict {
+                    t.text
+                } else {
+                    t.text_muted
+                }),
+        );
+    });
+    g.toggle_row(
+        None,
+        "全画面のアプリの間は自動で一時停止",
+        "ゲームなど、全画面で動くアプリが前面にある間は、自動で一時停止します。既定はオフです。",
+        &mut cfg.general.pause_in_fullscreen,
+    );
+}
+
+/// "動作中", "一時停止中" or "一時停止中（あと 12 分）".
+fn pause_state_text(pause: PauseView) -> String {
+    match (pause.paused, pause.remaining) {
+        (false, _) => "動作中".to_owned(),
+        (true, Some(left)) => format!("一時停止中（{}）", remaining_label(left)),
+        (true, None) if pause.manual => "一時停止中".to_owned(),
+        (true, None) => "一時停止中（全画面のアプリが前面にあります）".to_owned(),
+    }
+}
+
+/// What to tell the user about the shortcut's registration.
+fn shortcut_note(text: &str, status: ShortcutStatus) -> &'static str {
+    match status {
+        ShortcutStatus::Active => "登録しました。",
+        ShortcutStatus::Conflict => {
+            "ほかのアプリがこの組み合わせを使っているため、登録できません。別の組み合わせにしてください。"
+        }
+        ShortcutStatus::Invalid => "Ctrl か Alt を含む組み合わせにしてください。",
+        ShortcutStatus::Off if text.is_empty() => "ショートカットは設定されていません。",
+        ShortcutStatus::Off => "タスクトレイが使えないため、ショートカットは登録されていません。",
+    }
+}
+
+enum Capture {
+    Waiting,
+    /// A key came without Ctrl or Alt.
+    NeedsModifier,
+    Cancel,
+    Got(String),
+}
+
+/// The first key press of this frame, as a capture result.
+fn capture_result(ctx: &egui::Context) -> Capture {
+    ctx.input(|i| {
+        for ev in &i.events {
+            if let egui::Event::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                modifiers,
+                ..
+            } = ev
+            {
+                if *key == Key::Escape && !modifiers.ctrl && !modifiers.alt && !modifiers.shift {
+                    return Capture::Cancel;
+                }
+                return match shortcut_from_key(*key, *modifiers) {
+                    Some(text) => Capture::Got(text),
+                    None => Capture::NeedsModifier,
+                };
+            }
+        }
+        Capture::Waiting
+    })
+}
+
+/// The config text of a pressed key with its modifiers (`Ctrl+Alt+Y`). `None` unless Ctrl or Alt
+/// is held (a shortcut without one would take ordinary typing from every app) and the key is one
+/// yubi can send.
+pub fn shortcut_from_key(key: Key, mods: Modifiers) -> Option<String> {
+    use std::str::FromStr;
+    if !(mods.ctrl || mods.alt) {
+        return None;
+    }
+    let name = match key.name() {
+        n if n.len() == 1 && n.chars().all(|c| c.is_ascii_alphanumeric()) => n.to_owned(),
+        n if n.len() >= 2 && n.starts_with('F') && n[1..].chars().all(|c| c.is_ascii_digit()) => {
+            n.to_owned()
+        }
+        _ => match key {
+            Key::ArrowLeft => "Left",
+            Key::ArrowRight => "Right",
+            Key::ArrowUp => "Up",
+            Key::ArrowDown => "Down",
+            Key::Space => "Space",
+            Key::Tab => "Tab",
+            Key::Enter => "Enter",
+            Key::Backspace => "Backspace",
+            Key::Delete => "Delete",
+            Key::Insert => "Insert",
+            Key::Home => "Home",
+            Key::End => "End",
+            Key::PageUp => "PageUp",
+            Key::PageDown => "PageDown",
+            _ => return None,
+        }
+        .to_owned(),
+    };
+    let mut parts = Vec::new();
+    if mods.ctrl {
+        parts.push("Ctrl");
+    }
+    if mods.alt {
+        parts.push("Alt");
+    }
+    if mods.shift {
+        parts.push("Shift");
+    }
+    parts.push(&name);
+    let text = parts.join("+");
+    crate::os::keys::KeyCombo::from_str(&text).ok()?;
+    Some(text)
 }
 
 fn note_row(g: &mut widgets::Group<'_>, t: &Tokens, note: &Note) {
@@ -320,4 +536,78 @@ fn status_row(
         ui.label(RichText::new(label).color(t.text_muted));
     });
     pressed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mods(ctrl: bool, alt: bool, shift: bool) -> Modifiers {
+        Modifiers {
+            ctrl,
+            alt,
+            shift,
+            ..Modifiers::NONE
+        }
+    }
+
+    #[test]
+    fn captured_keys_become_config_text() {
+        assert_eq!(
+            shortcut_from_key(Key::Y, mods(true, true, false)).as_deref(),
+            Some("Ctrl+Alt+Y")
+        );
+        assert_eq!(
+            shortcut_from_key(Key::F5, mods(false, true, true)).as_deref(),
+            Some("Alt+Shift+F5")
+        );
+        assert_eq!(
+            shortcut_from_key(Key::Num7, mods(true, false, false)).as_deref(),
+            Some("Ctrl+7")
+        );
+        assert_eq!(
+            shortcut_from_key(Key::ArrowLeft, mods(true, false, false)).as_deref(),
+            Some("Ctrl+Left")
+        );
+    }
+
+    #[test]
+    fn a_shortcut_needs_ctrl_or_alt_and_a_known_key() {
+        assert_eq!(shortcut_from_key(Key::Y, mods(false, false, false)), None);
+        assert_eq!(shortcut_from_key(Key::Y, mods(false, false, true)), None);
+        assert_eq!(
+            shortcut_from_key(Key::Escape, mods(true, false, false)),
+            None
+        );
+    }
+
+    #[test]
+    fn the_pause_state_reads_naturally() {
+        use std::time::Duration;
+        let view = |paused, manual, remaining| PauseView {
+            paused,
+            manual,
+            remaining,
+        };
+        assert_eq!(pause_state_text(view(false, false, None)), "動作中");
+        assert_eq!(pause_state_text(view(true, true, None)), "一時停止中");
+        assert_eq!(
+            pause_state_text(view(true, true, Some(Duration::from_secs(61)))),
+            "一時停止中（あと 2 分）"
+        );
+        assert!(pause_state_text(view(true, false, None)).contains("全画面"));
+    }
+
+    #[test]
+    fn every_status_has_a_note() {
+        for s in [
+            ShortcutStatus::Off,
+            ShortcutStatus::Active,
+            ShortcutStatus::Conflict,
+            ShortcutStatus::Invalid,
+        ] {
+            assert!(!shortcut_note("Ctrl+Alt+Y", s).is_empty());
+        }
+        assert!(shortcut_note("", ShortcutStatus::Off).contains("設定されていません"));
+    }
 }

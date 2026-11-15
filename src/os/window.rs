@@ -689,6 +689,23 @@ pub fn is_elevated_window(hwnd: Hwnd) -> bool {
     }
 }
 
+/// Is a full-screen exclusive (Direct3D) app in front? Windows answers this for the shell's own
+/// notification logic (`SHQueryUserNotificationState`, `QUNS_RUNNING_D3D_FULL_SCREEN` only).
+/// Whether borderless full-screen games report this is up to Windows (not checked on hardware).
+pub fn fullscreen_exclusive() -> bool {
+    // SAFETY: plain query with no arguments.
+    unsafe {
+        windows::Win32::UI::Shell::SHQueryUserNotificationState()
+            .is_ok_and(counts_as_fullscreen_exclusive)
+    }
+}
+
+fn counts_as_fullscreen_exclusive(
+    state: windows::Win32::UI::Shell::QUERY_USER_NOTIFICATION_STATE,
+) -> bool {
+    state == windows::Win32::UI::Shell::QUNS_RUNNING_D3D_FULL_SCREEN
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,5 +799,21 @@ mod tests {
             let _ = is_elevated_window(h);
         }
         let _ = top_level_at((10, 10));
+    }
+
+    #[test]
+    fn only_exclusive_full_screen_counts() {
+        use windows::Win32::UI::Shell::*;
+        assert!(counts_as_fullscreen_exclusive(QUNS_RUNNING_D3D_FULL_SCREEN));
+        for other in [
+            QUNS_NOT_PRESENT,
+            QUNS_BUSY,
+            QUNS_PRESENTATION_MODE,
+            QUNS_ACCEPTS_NOTIFICATIONS,
+            QUNS_QUIET_TIME,
+            QUNS_APP,
+        ] {
+            assert!(!counts_as_fullscreen_exclusive(other));
+        }
     }
 }

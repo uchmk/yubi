@@ -5,6 +5,7 @@ pub mod general;
 pub mod general_io;
 pub mod home;
 pub mod overview;
+pub mod practice;
 pub mod sensitivity;
 
 use crate::nav::Page;
@@ -18,4 +19,5 @@ pub enum Cmd {
     OpenConfigFolder,
     DisableWindowsGestures,
     RestoreWindowsGestures,
+    TogglePause,
 }

@@ -17,10 +17,36 @@ use eframe::egui;
 /// What the tray menu asked for; the app applies it on its next frame.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
-    ToggleGestures,
+    /// The tray item or the global shortcut: pause when running, resume when paused.
+    TogglePause,
+    /// Pause now and resume by itself after this many minutes.
+    PauseForMinutes(u32),
     Quit,
     /// Logoff or shutdown: save, stop the engine, then `ack_end_session`.
     EndSession,
+}
+
+/// Whether the pause shortcut is registered with Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutStatus {
+    /// No shortcut is set (or the tray is not running, so none can be).
+    Off,
+    Active,
+    /// Another app holds this combination.
+    Conflict,
+    /// The text is not a usable shortcut (it needs a modifier and a key).
+    Invalid,
+}
+
+impl ShortcutStatus {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Active,
+            2 => Self::Conflict,
+            3 => Self::Invalid,
+            _ => Self::Off,
+        }
+    }
 }
 
 /// `--background`: start with the window hidden (tray only). The value after `--record` is skipped.
@@ -66,6 +92,10 @@ impl Resident {
             ctx,
             tx,
             paused: Default::default(),
+            pause_on: Default::default(),
+            toast: Mutex::new(None),
+            shortcut: Mutex::new(String::new()),
+            shortcut_status: Default::default(),
             hwnd: Default::default(),
             icon_ok: Default::default(),
             balloon: Mutex::new(None),
@@ -104,11 +134,35 @@ impl Resident {
         self.rx.try_iter().collect()
     }
 
-    /// Keep the tooltip and menu text in step with `gestures_enabled`.
-    pub fn set_paused(&self, paused: bool) {
-        if self.shared.paused.swap(paused, Ordering::Relaxed) != paused {
+    /// Keep the icon, tooltip and menu text in step: `pause_on` is the runtime pause (menu text),
+    /// `paused` is anything that stops gestures (pause or the master switch; icon and tooltip).
+    pub fn set_paused(&self, pause_on: bool, paused: bool) {
+        let a = self.shared.paused.swap(paused, Ordering::Relaxed) != paused;
+        let b = self.shared.pause_on.swap(pause_on, Ordering::Relaxed) != pause_on;
+        if a || b {
             tray::refresh();
         }
+    }
+
+    /// Show a short notification (a balloon, which Windows 11 shows as a toast).
+    pub fn toast(&self, text: &str) {
+        if let Ok(mut t) = self.shared.toast.lock() {
+            *t = Some(text.to_owned());
+        }
+        tray::toast();
+    }
+
+    /// Register this key combo as the global pause shortcut (empty = none). The result shows up
+    /// in `shortcut_status` shortly after.
+    pub fn set_pause_shortcut(&self, combo: &str) {
+        if let Ok(mut s) = self.shared.shortcut.lock() {
+            *s = combo.to_owned();
+        }
+        tray::apply_shortcut_later();
+    }
+
+    pub fn shortcut_status(&self) -> ShortcutStatus {
+        ShortcutStatus::from_u8(self.shared.shortcut_status.load(Ordering::SeqCst))
     }
 
     /// The window was just hidden: the first time ever, tell the user where yubi went.

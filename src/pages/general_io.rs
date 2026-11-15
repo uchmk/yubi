@@ -461,6 +461,8 @@ fn setting_label(path: &str) -> String {
         "gestures_enabled" => "ジェスチャーを有効にする",
         "general.theme" => "テーマ",
         "general.start_with_windows" => "Windows の起動時に開始",
+        "general.pause_shortcut" => "一時停止のショートカット",
+        "general.pause_in_fullscreen" => "全画面のアプリの間は自動で一時停止",
         "drag.enabled"
         | "five.enabled"
         | "press.enabled"

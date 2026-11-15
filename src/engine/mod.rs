@@ -8,6 +8,8 @@ pub mod arbitration;
 pub mod dispatch;
 pub mod executor;
 pub mod gestures;
+pub mod pause;
+pub mod practice;
 pub mod recognizer;
 pub mod replay;
 pub mod resolve;
@@ -33,6 +35,7 @@ use crate::config::Config;
 use crate::input::{self, Contact, DeviceInfo, FpsCounter, InputEvent, InputHandle, TouchFrame};
 use dispatch::Dispatcher;
 use executor::Executor;
+use pause::PauseCtl;
 use recognizer::{Action, GestureEvent, Recognizer};
 
 #[cfg(windows)]
@@ -134,6 +137,10 @@ pub struct MonitorState {
     pub peak_contacts: usize,
     pub finger_count: usize,
     pub last_event: Option<GestureEvent>,
+    /// What the recognizer recognized lately and what became of it (practice page).
+    pub practice: practice::History,
+    /// yubi is paused (shortcut, tray, timer or a full-screen app): input passes through.
+    pub paused: bool,
     /// What yubi last did for real (drag, window move, trigger), or why it did not.
     pub last_action: Option<String>,
     /// Executable name of the foreground window.
@@ -154,6 +161,10 @@ pub struct Engine {
     pub config: Arc<SharedConfig>,
     /// The UI sets this every frame from the window focus.
     pub focused: Arc<AtomicBool>,
+    /// Practice mode: recognized gestures are shown, not run. The UI owns the switch.
+    pub dry_run: Arc<AtomicBool>,
+    /// The runtime pause switch (shared with the tray and the shortcut).
+    pub pause: Arc<PauseCtl>,
     #[allow(dead_code)]
     pub counters: Arc<input::InputCounters>,
     stop: Arc<AtomicBool>,
@@ -179,6 +190,8 @@ impl Engine {
         let config = Arc::new(SharedConfig::new(cfg));
         let state = Arc::new(Mutex::new(MonitorState::default()));
         let focused = Arc::new(AtomicBool::new(true));
+        let dry_run = Arc::new(AtomicBool::new(false));
+        let pause = Arc::new(PauseCtl::default());
         let stop = Arc::new(AtomicBool::new(false));
         let interrupts: session::Interrupts = Arc::default();
         let session = session::SessionWatch::start(interrupts.clone(), {
@@ -197,6 +210,10 @@ impl Engine {
             state: state.clone(),
             config: config.clone(),
             focused: focused.clone(),
+            dry_run: dry_run.clone(),
+            pause: pause.clone(),
+            paused: false,
+            practice: practice::Recorder::default(),
             counters: counters.clone(),
             stop: stop.clone(),
             interrupts,
@@ -231,6 +248,8 @@ impl Engine {
             state,
             config,
             focused,
+            dry_run,
+            pause,
             counters,
             stop,
             join,
@@ -267,6 +286,11 @@ struct Worker {
     state: Arc<Mutex<MonitorState>>,
     config: Arc<SharedConfig>,
     focused: Arc<AtomicBool>,
+    dry_run: Arc<AtomicBool>,
+    pause: Arc<PauseCtl>,
+    /// The pause state the worker last acted on.
+    paused: bool,
+    practice: practice::Recorder,
     counters: Arc<input::InputCounters>,
     stop: Arc<AtomicBool>,
     interrupts: session::Interrupts,
@@ -302,6 +326,7 @@ impl Worker {
         while !self.stop.load(Ordering::SeqCst) {
             self.sync_config();
             self.sync_interrupts();
+            self.sync_pause();
             let wait = self.recognizer.next_deadline().map_or(MAX_WAIT, |d| {
                 Duration::from_micros(d.saturating_sub(input::now_us())).min(MAX_WAIT)
             });
@@ -310,7 +335,7 @@ impl Worker {
                 Err(RecvTimeoutError::Timeout) => self.flush_recorder(),
                 Err(RecvTimeoutError::Disconnected) => break,
             }
-            if self.enabled {
+            if self.running() {
                 let actions = self.recognizer.tick(input::now_us());
                 self.apply(actions);
             }
@@ -378,6 +403,27 @@ impl Worker {
         self.with_state(|s| s.gestures_enabled = enabled);
     }
 
+    /// Gestures are on in the config and yubi is not paused.
+    fn running(&self) -> bool {
+        self.enabled && !self.paused
+    }
+
+    /// Follow the pause switch. Pausing in the middle of a gesture ends it cleanly: every held
+    /// key and button is let go and the recognizer forgets the touch, so nothing stays down.
+    fn sync_pause(&mut self) {
+        self.pause.tick();
+        let paused = self.pause.paused();
+        if paused == self.paused {
+            return;
+        }
+        self.paused = paused;
+        if paused {
+            self.release_everything();
+        }
+        self.with_state(|s| s.paused = paused);
+        (self.wake)();
+    }
+
     fn sync_interrupts(&mut self) {
         let n = session::count(&self.interrupts);
         if n != self.seen_interrupts {
@@ -427,7 +473,7 @@ impl Worker {
         let background = !self.focused.load(Ordering::Relaxed);
         let (partial, dropped) = (self.counters.partial_frames(), self.counters.contacts());
 
-        let actions = if self.enabled {
+        let actions = if self.running() {
             // The app is decided once per touch session: look it up right before the first
             // contact of a session reaches the recognizer, which latches it.
             if touch_began(self.prev_contacts, active_contacts(&frame)) {
@@ -471,6 +517,9 @@ impl Worker {
             return;
         }
         self.last_fg_poll = Some(Instant::now());
+        self.pause.set_fullscreen(
+            self.cfg.general.pause_in_fullscreen && crate::os::window::fullscreen_exclusive(),
+        );
         let exe = crate::os::window::foreground().and_then(crate::os::process::exe_name_of);
         let blocked = resolve::app_blocked(&self.cfg.profiles, exe.as_deref());
         self.dispatch.set_blocked(blocked);
@@ -503,6 +552,17 @@ impl Worker {
                 (self.wake)();
             }
             let th = *self.recognizer.thresholds();
+            // Practice mode and the history see the action first, in the mode it will run in.
+            let dry_run = self.dry_run.load(Ordering::Relaxed);
+            self.dispatch.set_dry_run(dry_run);
+            let mode = practice::Mode {
+                dry_run,
+                blocked: self.dispatch.is_blocked(),
+            };
+            if let Some(j) = self.practice.observe(&a, mode, Instant::now()) {
+                self.with_state(|s| s.practice.push(j));
+                (self.wake)();
+            }
             let note =
                 self.dispatch
                     .handle(&a, &mut self.executor, &th, crate::os::window::cursor_pos);

@@ -63,6 +63,12 @@ pub struct App {
     hide_frames: u8,
     /// `--background` without an icon after this time: show the window instead of staying invisible.
     icon_deadline: Option<Instant>,
+    /// 練習モード (dry run): recognized gestures are shown, not run. Never saved.
+    practice_on: bool,
+    /// The pause generation last seen (`u64::MAX` before the first look, so the start is silent).
+    seen_pause_gen: u64,
+    /// The pause shortcut text last handed to the tray.
+    applied_shortcut: Option<String>,
 }
 
 impl App {
@@ -109,6 +115,9 @@ impl App {
             quitting: false,
             hide_frames: 0,
             icon_deadline: None,
+            practice_on: false,
+            seen_pause_gen: u64::MAX,
+            applied_shortcut: None,
         }
     }
 
@@ -129,7 +138,28 @@ impl App {
         let Some(r) = &self.resident else {
             return;
         };
-        r.set_paused(!self.cfg.gestures_enabled);
+        let pause = self.engine.pause.view();
+        r.set_paused(pause.paused, pause.paused || !self.cfg.gestures_enabled);
+        if self.applied_shortcut.as_deref() != Some(self.cfg.general.pause_shortcut.as_str()) {
+            r.set_pause_shortcut(&self.cfg.general.pause_shortcut);
+            self.applied_shortcut = Some(self.cfg.general.pause_shortcut.clone());
+        }
+        let generation = self.engine.pause.generation();
+        if generation != self.seen_pause_gen {
+            if self.seen_pause_gen != u64::MAX {
+                r.toast(if pause.paused {
+                    "yubi を一時停止しました"
+                } else {
+                    "yubi を再開しました"
+                });
+            }
+            self.seen_pause_gen = generation;
+        }
+        // A timed resume and the full-screen check happen in the engine, which does not wake the
+        // UI: look again soon so the tray and the toast follow.
+        if pause.remaining.is_some() || self.cfg.general.pause_in_fullscreen {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
         if self.hide_frames > 0 {
             self.hide_frames -= 1;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -157,8 +187,11 @@ impl App {
         let mut ack = false;
         for ev in events {
             match ev {
-                resident::Event::ToggleGestures => {
-                    self.cfg.gestures_enabled = !self.cfg.gestures_enabled;
+                resident::Event::TogglePause => self.engine.pause.toggle(),
+                resident::Event::PauseForMinutes(m) => {
+                    self.engine
+                        .pause
+                        .pause_for(Duration::from_secs(u64::from(m) * 60));
                 }
                 resident::Event::EndSession => {
                     // Logoff/shutdown: flush the config and release held keys now.
@@ -186,6 +219,17 @@ impl App {
         let focused = ctx.input(|i| i.focused);
         self.engine.focused.store(focused, Ordering::Relaxed);
         self.diagnostics.update(self.engine.snapshot());
+    }
+
+    /// The dry-run switch follows the page and the window focus, and goes to the engine.
+    fn sync_practice(&mut self, ctx: &egui::Context) {
+        let focused = ctx.input(|i| i.focused);
+        if self.devshot.is_none() && (self.page != Page::Practice || !focused) {
+            self.practice_on = false;
+        }
+        self.engine
+            .dry_run
+            .store(self.practice_on, Ordering::Relaxed);
     }
 
     fn backup_path(&self) -> PathBuf {
@@ -259,6 +303,7 @@ impl App {
                 let r = win_gestures::restore(&self.backup_path());
                 self.report("元に戻", r);
             }
+            Cmd::TogglePause => self.engine.pause.toggle(),
             Cmd::OpenConfigFolder => {
                 if let Some(dir) = self.config_path.parent() {
                     let _ = std::fs::create_dir_all(dir);
@@ -433,6 +478,13 @@ impl App {
     }
 
     fn content(&mut self, ui: &mut Ui, t: &Tokens, now: f64) -> Option<Cmd> {
+        let shortcut = if self.devshot.is_some() {
+            resident::ShortcutStatus::Active
+        } else {
+            self.resident
+                .as_ref()
+                .map_or(resident::ShortcutStatus::Off, Resident::shortcut_status)
+        };
         let cfg = &mut self.cfg;
         match self.page {
             Page::Home => return home::home(ui, t, cfg, self.diagnostics.connected()),
@@ -454,6 +506,7 @@ impl App {
             Page::Sensitivity => sensitivity::sensitivity(ui, t, cfg),
             Page::Haptic => features::haptic(ui, t, cfg),
             Page::Monitor => self.diagnostics.monitor(ui, t),
+            Page::Practice => self.diagnostics.practice(ui, t, &mut self.practice_on),
             Page::Diagnostics => self.diagnostics.info(ui, t, now),
             Page::General => {
                 let view = general::WinGestureView {
@@ -474,6 +527,10 @@ impl App {
                     &self.config_path,
                     &view,
                     &mut self.general_state,
+                    general::PauseInfo {
+                        shortcut,
+                        pause: self.engine.pause.view(),
+                    },
                 );
             }
         }
@@ -485,16 +542,21 @@ impl eframe::App for App {
     /// Runs every frame, and also while the window is hidden (when `ui` does not).
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.resident_tick(ctx);
+        self.sync_practice(ctx);
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         if let Some(shot) = self.devshot.as_ref().and_then(|d| d.current()) {
             // Keep `saved` in step so the capture run never writes the config file.
+            let (fake, practice) = (shot.fake, shot.practice);
             self.page = shot.page;
             shot.fixture.apply(&mut self.cfg);
             if shot.page == Page::Profiles {
                 self.apps.selected = shot.profile;
             }
+            self.practice_on = practice;
+            self.diagnostics
+                .force(fake.then(crate::pages::practice::fake_state));
             self.cfg.general.theme = shot.theme;
             self.saved.general.theme = shot.theme;
         }

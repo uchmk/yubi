@@ -2,7 +2,7 @@
 //! `TaskbarCreated` is only broadcast to top-level windows) with a message loop.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
@@ -14,6 +14,10 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
     GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     QueryFullProcessImageNameW,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
+    UnregisterHotKey,
 };
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -29,6 +33,10 @@ const WM_TRAY: u32 = WM_APP + 1;
 pub const WM_SHOW_MAIN: u32 = WM_APP + 2;
 const WM_REFRESH: u32 = WM_APP + 3;
 const WM_BALLOON: u32 = WM_APP + 4;
+const WM_TOAST: u32 = WM_APP + 5;
+const WM_SET_SHORTCUT: u32 = WM_APP + 6;
+/// Id of the pause shortcut among this window's hot keys.
+const HOTKEY_PAUSE: i32 = 1;
 /// Retry timer for `NIM_ADD` (Explorer may not be up yet at sign-in): 1 s, up to 30 tries.
 const RETRY_TIMER: usize = 1;
 const RETRY_MAX: u32 = 30;
@@ -37,6 +45,10 @@ static RETRIES: AtomicU32 = AtomicU32::new(0);
 const ID_OPEN: usize = 1;
 const ID_TOGGLE: usize = 2;
 const ID_QUIT: usize = 3;
+const ID_PAUSE_15: usize = 4;
+const ID_PAUSE_60: usize = 5;
+/// The timed pauses of the tray menu, in minutes.
+const PAUSE_MINUTES: [(usize, u32); 2] = [(ID_PAUSE_15, 15), (ID_PAUSE_60, 60)];
 
 /// Window class winit gives the main window. Matched by class, not title: `GetWindowText` on a
 /// window of another thread of this process sends a message and could deadlock.
@@ -47,7 +59,15 @@ const END_SESSION_WAIT: Duration = Duration::from_secs(2);
 pub struct Shared {
     pub ctx: egui::Context,
     pub tx: Sender<Event>,
+    /// Nothing is recognized right now (pause or master switch): icon and tooltip.
     pub paused: AtomicBool,
+    /// The runtime pause is on: menu text.
+    pub pause_on: AtomicBool,
+    pub toast: Mutex<Option<String>>,
+    /// The wanted pause shortcut (a key combo string, empty = none).
+    pub shortcut: Mutex<String>,
+    /// A `ShortcutStatus` as a number.
+    pub shortcut_status: AtomicU8,
     pub hwnd: AtomicIsize,
     /// The notification-area icon is in place.
     pub icon_ok: AtomicBool,
@@ -60,8 +80,8 @@ pub struct Shared {
 
 static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
-/// The one icon of the process (an `HICON` as isize), created on first use.
-static ICON: AtomicIsize = AtomicIsize::new(0);
+/// The two icons of the process (`HICON` as isize: running, paused), each created on first use.
+static ICONS: [AtomicIsize; 2] = [AtomicIsize::new(0), AtomicIsize::new(0)];
 
 pub fn install(shared: Arc<Shared>) {
     let _ = SHARED.set(shared);
@@ -90,6 +110,15 @@ pub fn refresh() {
 
 pub fn balloon() {
     post(WM_BALLOON);
+}
+
+pub fn toast() {
+    post(WM_TOAST);
+}
+
+/// Ask the tray thread to (re)register the shortcut stored in `Shared`.
+pub fn apply_shortcut_later() {
+    post(WM_SET_SHORTCUT);
 }
 
 pub fn close() {
@@ -205,9 +234,12 @@ unsafe fn create_window() -> Option<HWND> {
     }
 }
 
+fn is_paused() -> bool {
+    shared().is_some_and(|s| s.paused.load(Ordering::Relaxed))
+}
+
 fn tip() -> &'static str {
-    let paused = shared().is_some_and(|s| s.paused.load(Ordering::Relaxed));
-    if paused {
+    if is_paused() {
         "yubi（一時停止中）"
     } else {
         "yubi（動作中）"
@@ -236,7 +268,7 @@ unsafe fn add_icon(hwnd: HWND) -> bool {
     let mut nid = base(hwnd);
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
-    nid.hIcon = icon();
+    nid.hIcon = icon(is_paused());
     fill(&mut nid.szTip, tip());
     let ok = unsafe { Shell_NotifyIconW(NIM_ADD, &nid).as_bool() };
     if let Some(s) = shared() {
@@ -247,7 +279,8 @@ unsafe fn add_icon(hwnd: HWND) -> bool {
 
 unsafe fn update_tip(hwnd: HWND) {
     let mut nid = base(hwnd);
-    nid.uFlags = NIF_TIP;
+    nid.uFlags = NIF_TIP | NIF_ICON;
+    nid.hIcon = icon(is_paused());
     fill(&mut nid.szTip, tip());
     unsafe {
         let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
@@ -272,27 +305,105 @@ unsafe fn show_balloon(hwnd: HWND) {
     }
 }
 
-fn icon() -> HICON {
-    let cur = ICON.load(Ordering::SeqCst);
+/// Show the queued toast text as a silent balloon (Windows 11 presents it as a toast).
+unsafe fn show_toast(hwnd: HWND) {
+    let Some(text) = shared().and_then(|s| s.toast.lock().ok()?.take()) else {
+        return;
+    };
+    let mut nid = base(hwnd);
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
+    fill(&mut nid.szInfoTitle, "yubi");
+    fill(&mut nid.szInfo, &text);
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
+/// Modifier flags and virtual key of a shortcut text; `None` unless it has Ctrl or Alt and a key
+/// (a bare or Shift-only key would be taken from every app, like the capture field requires).
+fn hotkey_parts(text: &str) -> Option<(HOT_KEY_MODIFIERS, u32)> {
+    use crate::os::keys::{KeyCombo, VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT};
+    let combo: KeyCombo = text.parse().ok()?;
+    if !combo
+        .modifiers
+        .iter()
+        .any(|m| *m == VK_CONTROL || *m == VK_MENU)
+    {
+        return None;
+    }
+    let mut mods = MOD_NOREPEAT;
+    for m in &combo.modifiers {
+        mods |= match *m {
+            VK_CONTROL => MOD_CONTROL,
+            VK_MENU => MOD_ALT,
+            VK_SHIFT => MOD_SHIFT,
+            VK_LWIN => MOD_WIN,
+            _ => return None,
+        };
+    }
+    Some((mods, u32::from(combo.key.0)))
+}
+
+/// (Re)register the pause shortcut and publish how that went.
+unsafe fn apply_shortcut(hwnd: HWND) {
+    let Some(s) = shared() else {
+        return;
+    };
+    let text = s.shortcut.lock().map(|t| t.clone()).unwrap_or_default();
+    unsafe {
+        let _ = UnregisterHotKey(Some(hwnd), HOTKEY_PAUSE);
+    }
+    let status = if text.trim().is_empty() {
+        0
+    } else if let Some((mods, vk)) = hotkey_parts(&text) {
+        // Fails when another app already owns the combination.
+        if unsafe { RegisterHotKey(Some(hwnd), HOTKEY_PAUSE, mods, vk).is_ok() } {
+            1
+        } else {
+            2
+        }
+    } else {
+        3
+    };
+    s.shortcut_status.store(status, Ordering::SeqCst);
+    s.ctx.request_repaint();
+}
+
+fn icon(paused: bool) -> HICON {
+    let slot = &ICONS[usize::from(paused)];
+    let cur = slot.load(Ordering::SeqCst);
     if cur != 0 {
         return HICON(cur as *mut _);
     }
-    let h = make_icon();
-    ICON.store(h.0 as isize, Ordering::SeqCst);
+    let h = make_icon(paused);
+    slot.store(h.0 as isize, Ordering::SeqCst);
     h
 }
 
 fn destroy_icon() {
-    let cur = ICON.swap(0, Ordering::SeqCst);
-    if cur != 0 {
-        unsafe {
-            let _ = DestroyIcon(HICON(cur as *mut _));
+    for slot in &ICONS {
+        let cur = slot.swap(0, Ordering::SeqCst);
+        if cur != 0 {
+            unsafe {
+                let _ = DestroyIcon(HICON(cur as *mut _));
+            }
         }
     }
 }
 
-/// A generated 32x32 icon: a blue disc with a white ring (a fingertip), anti-aliased.
-fn make_icon() -> HICON {
+/// Disc colour (B, G, R) of the icon: blue while running, grey while paused.
+fn disc_bgr(paused: bool) -> (f32, f32, f32) {
+    if paused {
+        (128.0, 128.0, 128.0)
+    } else {
+        (212.0, 120.0, 0.0)
+    }
+}
+
+/// A generated 32x32 icon: a blue (grey when paused) disc with a white ring (a fingertip),
+/// anti-aliased.
+fn make_icon(paused: bool) -> HICON {
     const N: i32 = 32;
     let mut px = vec![0u8; (N * N * 4) as usize];
     let c = (N as f32 - 1.0) / 2.0;
@@ -302,9 +413,10 @@ fn make_icon() -> HICON {
             let disc = (15.5 - d + 0.5).clamp(0.0, 1.0);
             let ring = (9.5 - d + 0.5).clamp(0.0, 1.0) - (6.5 - d + 0.5).clamp(0.0, 1.0);
             // White over blue (BGRA, straight alpha).
-            let b = 212.0 * (1.0 - ring) + 255.0 * ring;
-            let g = 120.0 * (1.0 - ring) + 255.0 * ring;
-            let r = 255.0 * ring;
+            let (db, dg, dr) = disc_bgr(paused);
+            let b = db * (1.0 - ring) + 255.0 * ring;
+            let g = dg * (1.0 - ring) + 255.0 * ring;
+            let r = dr * (1.0 - ring) + 255.0 * ring;
             let i = ((y * N + x) * 4) as usize;
             px[i] = b as u8;
             px[i + 1] = g as u8;
@@ -392,16 +504,18 @@ unsafe fn context_menu(hwnd: HWND) {
         let Ok(menu) = CreatePopupMenu() else {
             return;
         };
-        let paused = shared().is_some_and(|s| s.paused.load(Ordering::Relaxed));
-        let toggle = HSTRING::from(if paused {
-            "ジェスチャーを再開"
-        } else {
-            "ジェスチャーを一時停止"
-        });
+        let paused = shared().is_some_and(|s| s.pause_on.load(Ordering::Relaxed));
+        let toggle = HSTRING::from(if paused { "再開" } else { "一時停止" });
         let open = HSTRING::from("設定を開く");
         let quit = HSTRING::from("終了");
         let _ = AppendMenuW(menu, MF_STRING, ID_OPEN, &open);
         let _ = AppendMenuW(menu, MF_STRING, ID_TOGGLE, &toggle);
+        if !paused {
+            for (id, minutes) in PAUSE_MINUTES {
+                let text = HSTRING::from(format!("一時停止（{minutes} 分後に再開）"));
+                let _ = AppendMenuW(menu, MF_STRING, id, &text);
+            }
+        }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, ID_QUIT, &quit);
         let mut pt = POINT::default();
@@ -421,9 +535,13 @@ unsafe fn context_menu(hwnd: HWND) {
         let _ = DestroyMenu(menu);
         match cmd.0 as usize {
             ID_OPEN => show_main(),
-            ID_TOGGLE => send(Event::ToggleGestures),
+            ID_TOGGLE => send(Event::TogglePause),
             ID_QUIT => send(Event::Quit),
-            _ => {}
+            id => {
+                if let Some((_, minutes)) = PAUSE_MINUTES.iter().find(|(i, _)| *i == id) {
+                    send(Event::PauseForMinutes(*minutes));
+                }
+            }
         }
     }
 }
@@ -444,6 +562,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         },
         WM_REFRESH => unsafe { update_tip(hwnd) },
         WM_BALLOON => unsafe { show_balloon(hwnd) },
+        WM_TOAST => unsafe { show_toast(hwnd) },
+        WM_SET_SHORTCUT => unsafe { apply_shortcut(hwnd) },
+        WM_HOTKEY if wparam.0 == HOTKEY_PAUSE as usize => send(Event::TogglePause),
         WM_QUERYENDSESSION => return LRESULT(1),
         WM_ENDSESSION => {
             if wparam.0 != 0 {
@@ -452,6 +573,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             return LRESULT(0);
         }
         WM_DESTROY => {
+            unsafe {
+                let _ = UnregisterHotKey(Some(hwnd), HOTKEY_PAUSE);
+            }
             if let Some(s) = shared() {
                 s.hwnd.store(0, Ordering::SeqCst);
             }
@@ -492,5 +616,39 @@ pub fn ack_end_session() {
             *d = true;
         }
         cv.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shortcut_text_maps_to_modifiers_and_key() {
+        let (mods, vk) = hotkey_parts("Ctrl+Alt+Y").unwrap();
+        assert_eq!(mods, MOD_NOREPEAT | MOD_CONTROL | MOD_ALT);
+        assert_eq!(vk, u32::from(b'Y'));
+        let (mods, vk) = hotkey_parts("Ctrl+Win+Shift+F5").unwrap();
+        assert_eq!(mods, MOD_NOREPEAT | MOD_CONTROL | MOD_WIN | MOD_SHIFT);
+        assert_eq!(vk, 0x74);
+    }
+
+    #[test]
+    fn a_bare_key_or_nonsense_is_not_a_shortcut() {
+        assert!(hotkey_parts("Y").is_none());
+        assert!(hotkey_parts("F5").is_none());
+        assert!(hotkey_parts("Shift+Y").is_none());
+        assert!(hotkey_parts("Win+Shift+F5").is_none());
+        assert!(hotkey_parts("").is_none());
+        assert!(hotkey_parts("Ctrl+Alt+").is_none());
+        assert!(hotkey_parts("Ctrl+NoSuchKey").is_none());
+    }
+
+    #[test]
+    fn the_paused_icon_is_grey_and_the_running_one_blue() {
+        let (b, g, r) = disc_bgr(true);
+        assert!(b == g && g == r);
+        let (b, _, r) = disc_bgr(false);
+        assert!(b > r);
     }
 }

@@ -193,6 +193,12 @@ const ROWS: &[Entry] = &[
     e(Page::Haptic, "軽い押し込み", "しきい値"),
     e(Page::Haptic, "深い押し込み", "しきい値"),
     e(Page::Haptic, "触覚の強さ", "触覚フィードバック"),
+    e(
+        Page::Practice,
+        "練習モード",
+        "ジェスチャーを実行せずに確かめる",
+    ),
+    e(Page::Practice, "最近の判定", "認識されたジェスチャーの履歴"),
     e(Page::Diagnostics, "レポートレート", "1秒あたりのフレーム数"),
     e(Page::General, "テーマ", "黒・システムに合わせる・ライト"),
     e(

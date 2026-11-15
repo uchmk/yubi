@@ -22,6 +22,7 @@ pub enum Page {
     Sensitivity,
     Haptic,
     Monitor,
+    Practice,
     Diagnostics,
     General,
 }
@@ -58,7 +59,12 @@ pub const NAV: [Node; 8] = [
     Node::Item(Page::Sensitivity),
     Node::Group {
         label: "デバイス",
-        pages: &[Page::Haptic, Page::Monitor, Page::Diagnostics],
+        pages: &[
+            Page::Haptic,
+            Page::Monitor,
+            Page::Practice,
+            Page::Diagnostics,
+        ],
     },
     Node::Item(Page::General),
 ];
@@ -110,6 +116,7 @@ impl Page {
             Self::Sensitivity => "感度",
             Self::Haptic => "押し込みと触覚",
             Self::Monitor => "入力モニター",
+            Self::Practice => "ジェスチャーの練習",
             Self::Diagnostics => "診断",
             Self::General => "全般",
         }
@@ -137,6 +144,7 @@ impl Page {
             Self::Sensitivity => "ドラッグの速さ、タップやスワイプの判定の厳しさを調整します。",
             Self::Haptic => "押し込みの深さのしきい値と、触覚フィードバックの強さです。",
             Self::Monitor => "トラックパッド上の接触をリアルタイムで表示します。",
+            Self::Practice => "認識されたジェスチャーと実行される操作を、実行せずに確かめます。",
             Self::Diagnostics => "デバイス情報、値の範囲、レポートレートを確認します。",
             Self::General => "テーマ、起動、設定フォルダー、バージョン情報です。",
         }
@@ -161,6 +169,7 @@ impl Page {
             Self::Sensitivity => icons::SENSITIVITY,
             Self::Haptic => icons::HAPTIC,
             Self::Monitor => icons::MONITOR,
+            Self::Practice => icons::TEST,
             Self::Diagnostics => icons::DIAGNOSTICS,
             Self::General => icons::SETTINGS,
         }
@@ -202,7 +211,7 @@ mod tests {
     #[test]
     fn every_page_is_in_the_nav() {
         let pages = all_pages();
-        assert_eq!(pages.len(), 19);
+        assert_eq!(pages.len(), 20);
         assert!(pages.contains(&Page::Home) && pages.contains(&Page::General));
     }
 }

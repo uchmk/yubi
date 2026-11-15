@@ -93,6 +93,10 @@ pub struct Shot {
     pub fixture: Fixture,
     /// The profile whose editor is open (per-app page only).
     pub profile: Option<usize>,
+    /// Show a made-up pad state (fingers and judgements) instead of the engine's.
+    pub fake: bool,
+    /// Switch 練習モード on.
+    pub practice: bool,
 }
 
 pub struct DevShot {
@@ -125,6 +129,7 @@ impl DevShot {
             ("sensitivity", Page::Sensitivity),
             ("haptic", Page::Haptic),
             ("monitor", Page::Monitor),
+            ("practice", Page::Practice),
             ("diagnostics", Page::Diagnostics),
             ("general", Page::General),
         ];
@@ -137,6 +142,8 @@ impl DevShot {
                 size: WIDE,
                 fixture: Fixture::Keep,
                 profile: None,
+                fake: false,
+                practice: false,
             })
             .collect();
         for &(n, page) in &[("home", Page::Home), ("haptic", Page::Haptic)] {
@@ -147,6 +154,8 @@ impl DevShot {
                 size: WIDE,
                 fixture: Fixture::Keep,
                 profile: None,
+                fake: false,
+                practice: false,
             });
         }
         for &(n, page) in &[
@@ -158,6 +167,7 @@ impl DevShot {
             ("fingerhold", Page::FingerHold),
             ("diagnostics", Page::Diagnostics),
             ("monitor", Page::Monitor),
+            ("practice", Page::Practice),
             ("general", Page::General),
         ] {
             shots.push(Shot {
@@ -167,6 +177,21 @@ impl DevShot {
                 size: NARROW,
                 fixture: Fixture::Keep,
                 profile: None,
+                fake: false,
+                practice: false,
+            });
+        }
+        // The practice page with a made-up state: three fingers down and a short history.
+        for (n, size) in [("wide", WIDE), ("narrow", NARROW)] {
+            shots.push(Shot {
+                name: format!("practice-fake-{n}"),
+                page: Page::Practice,
+                theme: ThemeChoice::Black,
+                size,
+                fixture: Fixture::Keep,
+                profile: None,
+                fake: true,
+                practice: true,
             });
         }
         // Per-app pages with fixed data: list, empty list, two editors, the overview.
@@ -196,6 +221,8 @@ impl DevShot {
                     size,
                     fixture,
                     profile,
+                    fake: false,
+                    practice: false,
                 });
             }
         }

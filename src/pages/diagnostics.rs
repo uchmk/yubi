@@ -29,12 +29,16 @@ const STALE_US: u64 = 1_000_000;
 #[derive(Default)]
 pub struct Diagnostics {
     /// Copy of the engine's latest state, refreshed once per UI frame.
-    state: MonitorState,
+    pub(super) state: MonitorState,
+    /// A fixed state for screenshots; the engine's is ignored while it is set.
+    pub(super) fake: Option<MonitorState>,
 }
 
 impl Diagnostics {
     pub fn update(&mut self, state: MonitorState) {
-        self.state = state;
+        if self.fake.is_none() {
+            self.state = state;
+        }
     }
 
     /// True once a trackpad was seen and not removed since.
@@ -57,7 +61,7 @@ impl Diagnostics {
             empty_state(ui, t);
             return;
         };
-        self.pad(ui, t, &device);
+        self.pad(ui, t, &device, PAD_MAX_HEIGHT);
         if self.rate() > 0 {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
@@ -188,9 +192,9 @@ impl Diagnostics {
         });
     }
 
-    fn pad(&self, ui: &mut Ui, t: &Tokens, device: &DeviceInfo) {
+    pub(super) fn pad(&self, ui: &mut Ui, t: &Tokens, device: &DeviceInfo, max_height: f32) {
         let aspect = device.aspect();
-        let width = ui.available_width().min(PAD_MAX_HEIGHT * aspect).max(1.0);
+        let width = ui.available_width().min(max_height * aspect).max(1.0);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(width, width / aspect), Sense::hover());
         let pressed = self.state.frame.as_ref().is_some_and(|f| f.button);
         let painter = ui.painter_at(rect.expand(t.space_xs));
@@ -280,7 +284,7 @@ fn event_label(e: GestureEvent) -> String {
     }
 }
 
-fn empty_state(ui: &mut Ui, t: &Tokens) {
+pub(super) fn empty_state(ui: &mut Ui, t: &Tokens) {
     ui.add_space(t.space_xl);
     ui.vertical_centered(|ui| {
         ui.label(RichText::new("トラックパッドが見つかりません").size(t.fs_section));

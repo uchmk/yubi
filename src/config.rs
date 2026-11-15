@@ -87,12 +87,30 @@ impl ThemeChoice {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct General {
     pub theme: ThemeChoice,
     /// Placeholder: stored but not applied yet.
     pub start_with_windows: bool,
+    /// Global shortcut that pauses and resumes yubi (a key combo such as `Ctrl+Alt+Y`; empty = none).
+    pub pause_shortcut: String,
+    /// Pause yubi by itself while a full-screen exclusive app is in front.
+    pub pause_in_fullscreen: bool,
+}
+
+/// The pause shortcut a fresh config starts with.
+pub const DEFAULT_PAUSE_SHORTCUT: &str = "Ctrl+Alt+Y";
+
+impl Default for General {
+    fn default() -> Self {
+        Self {
+            theme: ThemeChoice::default(),
+            start_with_windows: false,
+            pause_shortcut: DEFAULT_PAUSE_SHORTCUT.to_owned(),
+            pause_in_fullscreen: false,
+        }
+    }
 }
 
 /// What a gesture does. Stored in TOML as a short string (`"task_view"`, `"keys:Alt+Tab"`,

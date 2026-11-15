@@ -6,6 +6,7 @@ mod devshot;
 mod engine;
 mod fonts;
 mod haptic;
+mod hook;
 mod icons;
 mod input;
 mod nav;

@@ -1,9 +1,10 @@
 //! The 感度 page: how far, how fast and how long a finger must move for each gesture.
 
-use eframe::egui::{self, Ui};
+use eframe::egui::{self, Align, Layout, RichText, Ui};
 
-use crate::config::{Config, SensRange, Sensitivity};
+use crate::config::{Config, Cursor, SensRange, Sensitivity};
 use crate::nav::Page;
+use crate::os::touchpad;
 use crate::theme::Tokens;
 use crate::widgets::{self, Group, Num, SliderSpec, group, section_header, slider_with_value};
 
@@ -90,6 +91,9 @@ pub fn sensitivity(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
         );
     });
 
+    section_header(ui, t, "カーソル");
+    group(ui, t, |g| cursor_group(g, t, &mut cfg.cursor));
+
     section_header(ui, t, "詳細");
     // A shot can open the section to check its layout.
     let open = std::env::var_os("YUBI_SENS_OPEN").is_some();
@@ -99,6 +103,69 @@ pub fn sensitivity(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
         .show(ui, |ui| {
             detail(ui, t, s, &d);
         });
+}
+
+/// The touchpad cursor speed: Windows' own setting, kept by yubi while it runs.
+fn cursor_group(g: &mut Group<'_>, t: &Tokens, cur: &mut Cursor) {
+    let support = touchpad::support();
+    let usable = support.is_ok();
+    let desc = match &support {
+        Ok(()) => {
+            "オンのあいだ、yubi がタッチパッドのカーソルの速度を保ちます。終了すると元の速さに戻します。"
+        }
+        Err(e) => e.reason(),
+    };
+    let mut on = cur.speed.is_some() && usable;
+    g.row(
+        None,
+        "yubi でカーソルの速度を管理する",
+        desc,
+        |ui| {
+            ui.add_enabled_ui(usable, |ui| {
+                widgets::toggle(ui, t, &mut on);
+            });
+        },
+    );
+    if usable && on != cur.speed.is_some() {
+        cur.speed = on.then(|| {
+            Cursor::clamp_speed(touchpad::cursor_speed().unwrap_or(touchpad::SPEED_DEFAULT))
+        });
+    }
+    let (lo, hi) = Cursor::RANGE;
+    let spec = SliderSpec::int(u16::from(lo), u16::from(hi), 1, "");
+    let mut speed = cur.speed.unwrap_or(touchpad::SPEED_DEFAULT);
+    g.row(
+        None,
+        "カーソルの速度",
+        "タッチパッドでカーソルを動かす速さです。マウスの速度とは別の設定です。",
+        |ui| {
+            ui.add_enabled_ui(usable && cur.speed.is_some(), |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new(speed.to_string()).size(t.fs_body));
+                    ui.add_space(t.space_sm);
+                    ui.label(RichText::new("速い").size(t.fs_small).color(t.text_muted));
+                    let mut v = f64::from(speed);
+                    if widgets::slider(ui, t, &mut v, spec) {
+                        speed = u8::from_f64(v);
+                    }
+                    ui.label(RichText::new("遅い").size(t.fs_small).color(t.text_muted));
+                });
+            });
+        },
+    );
+    if cur.speed.is_some() && cur.speed != Some(speed) {
+        cur.speed = Some(speed);
+    }
+    g.wrapped_row(|ui| {
+        ui.label(
+            RichText::new(format!(
+                "アプリごとの速さは「{}」のページで設定します。",
+                Page::Profiles.label()
+            ))
+            .size(t.fs_small)
+            .color(t.text_muted),
+        );
+    });
 }
 
 fn detail(ui: &mut Ui, t: &Tokens, s: &mut Sensitivity, d: &Sensitivity) {

@@ -50,6 +50,7 @@ pub struct Config {
     pub sensitivity: Sensitivity,
     pub profiles: Vec<Profile>,
     pub ring: Ring,
+    pub cursor: Cursor,
 }
 
 impl Default for Config {
@@ -72,6 +73,7 @@ impl Default for Config {
             sensitivity: Sensitivity::default(),
             profiles: Vec::new(),
             ring: Ring::default(),
+            cursor: Cursor::default(),
         }
     }
 }
@@ -381,6 +383,22 @@ fn lenient_count<'de, D: Deserializer<'de>>(d: D, what: &str, default: u8) -> Re
                 ));
             });
             default
+        }
+    })
+}
+
+/// A cursor speed as written: `None` when absent or not an integer (then Windows' value is left
+/// alone, with a note); a number out of range saturates and `Config::normalize` clamps it.
+fn cursor_speed<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u8>, D::Error> {
+    Ok(match CountWire::deserialize(d)? {
+        CountWire::Int(n) => Some(n.clamp(0, i64::from(u8::MAX)) as u8),
+        CountWire::Other(_) => {
+            scan_note(|s| {
+                s.bad.push(
+                    "カーソルの速度の値が整数ではないため、Windows の設定のままにします".to_owned(),
+                );
+            });
+            None
         }
     })
 }
@@ -1143,6 +1161,30 @@ pub struct Profile {
     pub overrides: BTreeMap<String, Action>,
     /// Per-edge targets that replace the global ones (`edge.left`, `edge.right`, `edge.top`).
     pub edge_overrides: BTreeMap<String, EdgeTarget>,
+    /// Touchpad cursor speed in this app; `None` uses the global one (`[cursor] speed`).
+    #[serde(deserialize_with = "cursor_speed")]
+    pub cursor_speed: Option<u8>,
+}
+
+/// Windows' touchpad cursor speed, which yubi can manage (see `os::touchpad`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Cursor {
+    /// Speed yubi keeps while it runs; `None` leaves Windows' setting alone.
+    #[serde(deserialize_with = "cursor_speed")]
+    pub speed: Option<u8>,
+}
+
+impl Cursor {
+    /// The lowest and highest speed Windows accepts.
+    pub const RANGE: (u8, u8) = (
+        crate::os::touchpad::SPEED_MIN,
+        crate::os::touchpad::SPEED_MAX,
+    );
+
+    pub fn clamp_speed(v: u8) -> u8 {
+        v.clamp(Self::RANGE.0, Self::RANGE.1)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1542,7 +1584,9 @@ impl Config {
         }
         for p in &mut self.profiles {
             p.edge_overrides.values_mut().for_each(clamp_edge);
+            p.cursor_speed = p.cursor_speed.map(Cursor::clamp_speed);
         }
+        self.cursor.speed = self.cursor.speed.map(Cursor::clamp_speed);
         let p = &mut self.press;
         (p.light_threshold, p.deep_threshold) =
             clamp_pair(p.light_threshold, p.deep_threshold, DEFAULT_ONE);
@@ -1852,6 +1896,18 @@ fn clamp_report(raw: &Config, norm: &Config, raw_nums: &[(&'static str, f64)]) -
                     a.to_string(),
                 );
             }
+        }
+    }
+    if let (Some(b), Some(a)) = (raw.cursor.speed, norm.cursor.speed) {
+        note("カーソルの速度", b.to_string(), a.to_string());
+    }
+    for (rp, np) in raw.profiles.iter().zip(&norm.profiles) {
+        if let (Some(b), Some(a)) = (rp.cursor_speed, np.cursor_speed) {
+            note(
+                &format!("「{}」のカーソルの速度", rp.exe_name.trim()),
+                b.to_string(),
+                a.to_string(),
+            );
         }
     }
     if raw.press.fingers.len() != norm.press.fingers.len() {
@@ -3460,5 +3516,59 @@ light = \"Find\"
         assert!(!cfg.press.count_active(2));
         cfg.press.enabled = false;
         assert!(!cfg.press.count_active(1));
+    }
+
+    #[test]
+    fn cursor_speed_defaults_to_off_and_round_trips() {
+        let c = Config::default();
+        assert_eq!(c.cursor.speed, None);
+        let text = toml::to_string(&c).unwrap();
+        assert!(!text.contains("speed"), "{text}");
+        let mut c = Config::default();
+        c.cursor.speed = Some(12);
+        c.profiles.push(Profile {
+            exe_name: "a.exe".into(),
+            cursor_speed: Some(3),
+            ..Profile::default()
+        });
+        let back = parse_text(&toml::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back.config.cursor.speed, Some(12));
+        assert_eq!(back.config.profiles[0].cursor_speed, Some(3));
+        assert_eq!(back.config.schema_version, 2);
+    }
+
+    #[test]
+    fn cursor_speed_out_of_range_is_clamped_and_reported() {
+        let p = parse_text(
+            "schema_version = 2
+[cursor]
+speed = 99
+[[profiles]]
+exe_name = \"a.exe\"
+cursor_speed = 0
+[[profiles]]
+exe_name = \"b.exe\"
+cursor_speed = \"fast\"
+",
+        )
+        .unwrap();
+        assert_eq!(p.config.cursor.speed, Some(20));
+        assert_eq!(p.config.profiles[0].cursor_speed, Some(1));
+        assert_eq!(p.config.profiles[1].cursor_speed, None);
+        assert!(
+            p.warnings.iter().any(|w| w.contains("99 は範囲外")),
+            "{:?}",
+            p.warnings
+        );
+        assert!(
+            p.warnings.iter().any(|w| w.contains("0 は範囲外")),
+            "{:?}",
+            p.warnings
+        );
+        assert!(
+            p.warnings.iter().any(|w| w.contains("整数ではない")),
+            "{:?}",
+            p.warnings
+        );
     }
 }

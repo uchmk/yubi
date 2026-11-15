@@ -6,6 +6,7 @@ pub mod file_dialog;
 pub mod keys;
 pub mod process;
 pub mod running;
+pub mod touchpad;
 pub mod volume;
 pub mod window;
 

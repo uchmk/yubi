@@ -4,7 +4,7 @@
 //! gestures; the match is the exe basename, case-insensitive and exact (no globs).
 
 use super::types::GestureId;
-use crate::config::{Action, Config, EdgeTarget, Profile};
+use crate::config::{Action, Config, Cursor, EdgeTarget, Profile};
 
 /// The exe basename of `exe` as profiles compare it: trimmed, and without any directory part.
 pub fn basename(exe: &str) -> &str {
@@ -40,6 +40,17 @@ pub fn resolve(cfg: &Config, exe: Option<&str>, id: &GestureId) -> Action {
         return a.clone();
     }
     cfg.binding(id).unwrap_or_default()
+}
+
+/// The touchpad cursor speed yubi wants while `exe` is in the foreground: the profile's own speed,
+/// else the global one. `None` leaves Windows alone: the feature is off (no global speed; per-app
+/// speeds only apply while yubi manages the cursor).
+pub fn effective_cursor_speed(cfg: &Config, exe: Option<&str>) -> Option<u8> {
+    let global = cfg.cursor.speed?;
+    let own = matching_profile(&cfg.profiles, exe)
+        .filter(|p| p.enabled)
+        .and_then(|p| p.cursor_speed);
+    Some(Cursor::clamp_speed(own.unwrap_or(global)))
 }
 
 /// The target of an edge slider (`key` is `edge.left`, `edge.right` or `edge.top`) for `exe`.
@@ -142,6 +153,40 @@ mod tests {
         assert!(!app_blocked(&list, Some("a.exe")));
         assert!(matching_profile(&list, Some("")).is_none());
         assert!(matching_profile(&list, Some("  ")).is_none());
+    }
+
+    #[test]
+    fn cursor_speed_global_profile_blocked_and_off() {
+        let mut p = profile("Game.exe", true);
+        p.cursor_speed = Some(4);
+        let mut quiet = profile("quiet.exe", true);
+        quiet.cursor_speed = None;
+        let mut blocked = profile("off.exe", false);
+        blocked.cursor_speed = Some(2);
+        let mut cfg = Config {
+            profiles: vec![p, quiet, blocked],
+            ..Config::default()
+        };
+        // Feature off: nothing is applied, whatever the profiles say.
+        assert_eq!(effective_cursor_speed(&cfg, Some("game.exe")), None);
+        cfg.cursor.speed = Some(12);
+        assert_eq!(effective_cursor_speed(&cfg, None), Some(12));
+        assert_eq!(effective_cursor_speed(&cfg, Some("other.exe")), Some(12));
+        assert_eq!(effective_cursor_speed(&cfg, Some("quiet.exe")), Some(12));
+        // The profile wins, by case-insensitive basename.
+        assert_eq!(effective_cursor_speed(&cfg, Some("GAME.EXE")), Some(4));
+        assert_eq!(
+            effective_cursor_speed(&cfg, Some(r"C:\g\game.exe")),
+            Some(4)
+        );
+        assert_eq!(effective_cursor_speed(&cfg, Some("game.exe.bak")), Some(12));
+        // A blocked app does not get its own speed.
+        assert_eq!(effective_cursor_speed(&cfg, Some("off.exe")), Some(12));
+        // Out-of-range values from a hand-built config are clamped.
+        cfg.cursor.speed = Some(99);
+        assert_eq!(effective_cursor_speed(&cfg, None), Some(20));
+        cfg.profiles[0].cursor_speed = Some(0);
+        assert_eq!(effective_cursor_speed(&cfg, Some("game.exe")), Some(1));
     }
 
     #[test]

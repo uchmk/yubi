@@ -412,7 +412,7 @@ pub fn slider_with_value<N: Num>(ui: &mut Ui, t: &Tokens, value: &mut N, spec: S
     changed
 }
 
-fn slider(ui: &mut Ui, t: &Tokens, value: &mut f64, spec: SliderSpec) -> bool {
+pub fn slider(ui: &mut Ui, t: &Tokens, value: &mut f64, spec: SliderSpec) -> bool {
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(t.slider_w, t.control_h), Sense::click_and_drag());
     let knob_r = t.slider_knob / 2.0;

@@ -189,6 +189,16 @@ const ROWS: &[Entry] = &[
         "端の刻み",
         "エッジスライダーの1ステップの距離",
     ),
+    e(
+        Page::Sensitivity,
+        "カーソルの速度",
+        "タッチパッドのカーソルの速さ。アプリごとにも切り替え",
+    ),
+    e(
+        Page::Sensitivity,
+        "yubi でカーソルの速度を管理する",
+        "Windows のタッチパッドの速度を yubi が保つ",
+    ),
     e(Page::Sensitivity, "既定に戻す", "感度の値を初期値にします"),
     e(Page::Haptic, "押し込みの強さ", "ライブ表示と測定"),
     e(

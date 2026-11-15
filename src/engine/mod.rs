@@ -5,6 +5,7 @@
 //! button when the situation changes (see `Worker::release_everything`).
 
 pub mod arbitration;
+pub mod cursor;
 pub mod dispatch;
 pub mod executor;
 pub mod gestures;
@@ -231,6 +232,13 @@ impl Engine {
                 }
             }),
             last_fg_poll: None,
+            fg_exe: None,
+            cursor: cursor::CursorSpeed::new(
+                cursor::Os,
+                crate::config::default_path()
+                    .parent()
+                    .map(|d| d.join("cursor-original.txt")),
+            ),
             prev_contacts: 0,
             last_release_retry: None,
             haptics: None,
@@ -302,6 +310,10 @@ struct Worker {
     dispatch: Dispatcher,
     /// When the foreground app was last looked up (it is polled, not hooked).
     last_fg_poll: Option<Instant>,
+    /// Foreground exe name as of the last poll.
+    fg_exe: Option<String>,
+    /// The touchpad cursor speed, switched per app (see `cursor`).
+    cursor: cursor::CursorSpeed<cursor::Os>,
     /// Contacts in the previous frame (a touch begins when this is 0 and the next frame is not).
     prev_contacts: usize,
     last_release_retry: Option<Instant>,
@@ -328,6 +340,7 @@ impl Worker {
                 }
             }
         }
+        self.cursor.recover();
         while !self.stop.load(Ordering::SeqCst) {
             self.sync_config();
             self.sync_interrupts();
@@ -361,6 +374,7 @@ impl Worker {
             self.retry_release();
         }
         self.release_everything();
+        self.cursor.restore();
         // A refused up must not leave a button down system-wide after yubi exits: keep retrying
         // for a short, bounded time (the foreground may change back from an elevated window).
         let deadline = Instant::now() + SHUTDOWN_RELEASE_WAIT;
@@ -422,6 +436,7 @@ impl Worker {
             self.release_everything();
         }
         self.enabled = self.cfg.gestures_enabled;
+        self.sync_cursor();
         let enabled = self.enabled;
         self.with_state(|s| s.gestures_enabled = enabled);
     }
@@ -549,6 +564,8 @@ impl Worker {
         self.dispatch.set_blocked(blocked);
         // A live gesture keeps the app it latched at touchdown; the next touch uses this one.
         self.recognizer.set_foreground(exe.as_deref(), blocked);
+        self.fg_exe = exe.clone();
+        self.sync_cursor();
         let changed = self
             .state
             .lock()
@@ -560,6 +577,14 @@ impl Worker {
             });
             (self.wake)();
         }
+    }
+
+    /// Switch the touchpad cursor speed to what the config says for the foreground app. The
+    /// Windows call is a quick in-process one (well under a millisecond) and runs on this thread,
+    /// never the UI's; `sync` writes only when the value changes.
+    fn sync_cursor(&mut self) {
+        let want = resolve::effective_cursor_speed(&self.cfg, self.fg_exe.as_deref());
+        self.cursor.sync(want);
     }
 
     fn apply(&mut self, actions: Vec<Action>) {

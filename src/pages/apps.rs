@@ -77,6 +77,7 @@ impl Choice {
         }
     }
 
+    #[cfg(test)]
     fn options() -> Vec<Self> {
         std::iter::once(Self::Inherit)
             .chain(ActionKind::ALL.into_iter().map(Self::Kind))
@@ -496,7 +497,6 @@ fn detail(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState, i: usiz
         section_header(ui, t, "スクロール");
         group(ui, t, |g| scroll_speed_row(g, t, p, scroll_on));
 
-        let options = Choice::options();
         type Pick<'a> = Box<dyn Fn(&Info) -> bool + 'a>;
         let on_page = |page: Page, five: Option<bool>| -> Pick<'static> {
             Box::new(move |x: &Info| {
@@ -522,15 +522,24 @@ fn detail(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState, i: usiz
                     }
                     g.row(None, &info.name, &desc, |ui| {
                         let mut choice = Choice::of(p.overrides.get(&info.id));
-                        if combo_sized(
+                        if let Some(pick) = widgets::kind_picker(
                             ui,
                             t,
                             t.combo_w,
                             ("profile-action", i, &info.id),
-                            &mut choice,
-                            &options,
-                            Choice::label,
+                            choice.label(),
+                            match choice {
+                                Choice::Inherit => None,
+                                Choice::Kind(k) => Some(k),
+                            },
+                            Some(Choice::Inherit.label()),
+                            &ActionKind::ALL,
+                            ActionKind::label,
                         ) {
+                            choice = match pick {
+                                widgets::Pick::Inherit => Choice::Inherit,
+                                widgets::Pick::Kind(k) => Choice::Kind(k),
+                            };
                             apply_choice(p, &info.id, choice);
                         }
                         match p.overrides.get_mut(&info.id) {

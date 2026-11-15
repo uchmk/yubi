@@ -631,12 +631,11 @@ fn panel(ui: &mut Ui, t: &Tokens, cfg: &mut Config, tr: CornerTrigger, view: &mu
         }
         if *action != Action::None {
             g.row(None, "割り当てる操作", "", |ui| {
-                let mut kind = action.kind();
-                if widgets::combo(
+                if let Some(kind) = widgets::kind_combo(
                     ui,
                     t,
                     ("corner-kind", corner, slot.token()),
-                    &mut kind,
+                    action.kind(),
                     kinds_of(slot),
                     kind_label,
                 ) {

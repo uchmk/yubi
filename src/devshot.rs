@@ -13,6 +13,8 @@ use crate::nav::Page;
 
 /// Frames to wait after changing page/theme/size before capturing (layout and animations settle).
 const SETTLE_FRAMES: u32 = 20;
+/// The picker popup fades in by wall-clock time, so its shots wait longer.
+const PICKER_SETTLE_FRAMES: u32 = 90;
 
 const WIDE: Vec2 = Vec2::new(1200.0, 800.0);
 const NARROW: Vec2 = Vec2::new(700.0, 520.0);
@@ -46,6 +48,8 @@ pub enum Fixture {
     RingFull,
     /// The ジェスチャー page on tab `0` (4 fingers) or `1` (5 fingers), with some actions set.
     GestureTab(u8),
+    /// The first action picker on the page is open: 0 unfiltered, 1 filtered, 2 nothing matches.
+    Picker(u8),
 }
 
 impl Fixture {
@@ -67,8 +71,14 @@ impl Fixture {
 
     /// Set the fixture's data (idempotent: called every frame).
     pub fn apply(self, cfg: &mut Config) {
+        crate::widgets::set_picker_preview(match self {
+            Self::Picker(0) => Some(""),
+            Self::Picker(1) => Some("デスク"),
+            Self::Picker(_) => Some("zzz"),
+            _ => None,
+        });
         match self {
-            Self::Keep => {}
+            Self::Keep | Self::Picker(_) => {}
             Self::NoProfiles => cfg.profiles.clear(),
             Self::CornerDemo => {
                 cfg.gestures_enabled = true;
@@ -575,6 +585,33 @@ impl DevShot {
             }
             shots = list;
         }
+        if std::env::var_os("YUBI_SHOT_PICKER").is_some() {
+            let mut list = Vec::new();
+            // `YUBI_SHOT_PICKER=wide|narrow` limits the window size; anything else takes both.
+            let only = std::env::var("YUBI_SHOT_PICKER").unwrap_or_default();
+            for (n, size) in [("wide", WIDE), ("narrow", NARROW)] {
+                if (only == "wide" || only == "narrow") && only != n {
+                    continue;
+                }
+                for (tn, theme) in [("dark", ThemeChoice::Black), ("light", ThemeChoice::Light)] {
+                    for (fn_, stage) in [("open", 0u8), ("filtered", 1), ("none", 2)] {
+                        list.push(Shot {
+                            name: format!("picker-{fn_}-{n}-{tn}"),
+                            page: Page::Gesture,
+                            theme,
+                            size,
+                            fixture: Fixture::Picker(stage),
+                            profile: None,
+                            fake: false,
+                            practice: false,
+                            anim_t: None,
+                            reduced: false,
+                        });
+                    }
+                }
+            }
+            shots = list;
+        }
         if std::env::var("YUBI_SHOT_CORNER").is_ok() {
             let mut list = Vec::new();
             // Tall enough to show the whole page without scrolling.
@@ -783,7 +820,12 @@ impl DevShot {
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(shot.size));
         }
         self.frames += 1;
-        if self.frames == SETTLE_FRAMES && !self.requested {
+        let settle = if matches!(shot.fixture, Fixture::Picker(_)) {
+            PICKER_SETTLE_FRAMES
+        } else {
+            SETTLE_FRAMES
+        };
+        if self.frames == settle && !self.requested {
             self.requested = true;
             let tx = self.tx.clone();
             let repaint = ctx.clone();

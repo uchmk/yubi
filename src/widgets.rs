@@ -9,7 +9,7 @@ use eframe::egui::{
     RichText, Role, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, text::LayoutJob,
 };
 
-use crate::config::{Action, ActionKind};
+use crate::config::{Action, ActionGroup, ActionKind};
 use crate::fonts;
 use crate::icons;
 use crate::theme::Tokens;
@@ -521,10 +521,32 @@ pub fn combo_menu(
     selected: &str,
     menu: impl FnOnce(&mut Ui),
 ) {
+    combo_menu_with(
+        ui,
+        t,
+        width,
+        id,
+        selected,
+        egui::PopupCloseBehavior::CloseOnClick,
+        menu,
+    );
+}
+
+/// [`combo_menu`] with its own rule for when a click closes the menu.
+fn combo_menu_with(
+    ui: &mut Ui,
+    t: &Tokens,
+    width: f32,
+    id: impl Hash + Debug,
+    selected: &str,
+    close: egui::PopupCloseBehavior,
+    menu: impl FnOnce(&mut Ui),
+) {
     let size = t.fs_small;
     let stroke = t.stroke_thin;
     egui::ComboBox::from_id_salt(id)
         .width(width)
+        .close_behavior(close)
         .selected_text(selected)
         .icon(move |ui, rect, visuals, _open| {
             let c = rect.center();
@@ -543,6 +565,392 @@ pub fn combo_menu(
             }
         })
         .show_ui(ui, menu);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Action picker: a grouped, filterable list of action kinds
+
+/// A list of at least this many entries gets a filter box.
+const PICKER_FILTER_MIN: usize = 10;
+/// The tallest the list of a picker grows before it scrolls.
+const PICKER_MAX_H: f32 = 340.0;
+/// The widest the picker's popup needs for its longest label.
+const PICKER_MIN_W: f32 = 260.0;
+
+/// What a pick of an action picker chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    /// 「全体と同じ」: only offered where there is something to inherit.
+    Inherit,
+    Kind(ActionKind),
+}
+
+/// One heading of the picker with the kinds under it; the section without a group (「なし」) is
+/// listed first and has no heading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerSection {
+    pub group: Option<ActionGroup>,
+    pub kinds: Vec<ActionKind>,
+}
+
+/// Lower-cased, with katakana turned into hiragana, so a query matches however it was typed.
+fn normalize_query(s: &str) -> String {
+    s.trim()
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            '\u{30A1}'..='\u{30F6}' => char::from_u32(c as u32 - 0x60).unwrap_or(c),
+            _ => c,
+        })
+        .collect()
+}
+
+/// Whether `label` contains `filter` (an empty filter matches everything).
+pub fn label_matches(label: &str, filter: &str) -> bool {
+    let q = normalize_query(filter);
+    q.is_empty() || normalize_query(label).contains(&q)
+}
+
+/// The kinds a picker shows, in its order: the kinds without a group first, then one section per
+/// group in [`ActionGroup::ALL`] order (kinds keep their order in `kinds`). Kinds whose label does
+/// not match `filter` are left out, and so are the sections that end up empty.
+pub fn picker_sections(
+    kinds: &[ActionKind],
+    label: fn(ActionKind) -> &'static str,
+    filter: &str,
+) -> Vec<PickerSection> {
+    let section = |group: Option<ActionGroup>| PickerSection {
+        group,
+        kinds: kinds
+            .iter()
+            .filter(|k| k.group() == group)
+            .filter(|k| label_matches(label(**k), filter))
+            .copied()
+            .collect(),
+    };
+    std::iter::once(None)
+        .chain(ActionGroup::ALL.into_iter().map(Some))
+        .map(section)
+        .filter(|s| !s.kinds.is_empty())
+        .collect()
+}
+
+/// What the picker's keyboard moves through, top to bottom.
+fn picker_flat(inherit: Option<&str>, sections: &[PickerSection], filter: &str) -> Vec<Pick> {
+    let mut v = Vec::new();
+    if inherit.is_some_and(|l| label_matches(l, filter)) {
+        v.push(Pick::Inherit);
+    }
+    v.extend(
+        sections
+            .iter()
+            .flat_map(|s| s.kinds.iter().map(|k| Pick::Kind(*k))),
+    );
+    v
+}
+
+/// Where the picker stands while its popup is open.
+#[derive(Clone, Default)]
+struct PickerState {
+    filter: String,
+    highlight: usize,
+    /// The arrow keys were used (so the highlight shows even without a filter).
+    moved: bool,
+    /// The first frame has passed (the filter box got the focus).
+    seen: bool,
+    /// The tallest the list has been since the popup opened: the popup keeps at least this height,
+    /// as egui's popup scroll area only grows back from what it held last frame.
+    list_h: f32,
+}
+
+/// Dev screenshots: the first picker drawn opens with this filter text.
+struct Preview {
+    filter: Option<String>,
+    epoch: u32,
+    claimed: Option<egui::Id>,
+}
+
+static PREVIEW: std::sync::Mutex<Preview> = std::sync::Mutex::new(Preview {
+    filter: None,
+    epoch: 0,
+    claimed: None,
+});
+
+/// Open the first picker drawn with `filter` typed in (`None`: no preview). For dev screenshots.
+pub fn set_picker_preview(filter: Option<&str>) {
+    let mut p = PREVIEW.lock().unwrap_or_else(|e| e.into_inner());
+    if p.filter.as_deref() != filter {
+        p.filter = filter.map(str::to_owned);
+        p.epoch += 1;
+        p.claimed = None;
+    }
+}
+
+/// [`kind_picker`] for a plain list of kinds. Returns the kind picked this frame.
+pub fn kind_combo(
+    ui: &mut Ui,
+    t: &Tokens,
+    id: impl Hash + Debug,
+    current: ActionKind,
+    kinds: &[ActionKind],
+    label: fn(ActionKind) -> &'static str,
+) -> Option<ActionKind> {
+    match kind_picker(
+        ui,
+        t,
+        t.combo_w,
+        id,
+        label(current),
+        Some(current),
+        None,
+        kinds,
+        label,
+    ) {
+        Some(Pick::Kind(k)) => Some(k),
+        _ => None,
+    }
+}
+
+/// The grouped, filterable chooser of an action kind. `selected_text` is on the closed box and
+/// `current` is marked in the list; `inherit` adds a first entry (「全体と同じ」) with that label.
+#[allow(clippy::too_many_arguments)]
+pub fn kind_picker(
+    ui: &mut Ui,
+    t: &Tokens,
+    width: f32,
+    id: impl Hash + Debug,
+    selected_text: &str,
+    current: Option<ActionKind>,
+    inherit: Option<&'static str>,
+    kinds: &[ActionKind],
+    label: fn(ActionKind) -> &'static str,
+) -> Option<Pick> {
+    let button_id = ui.make_persistent_id(egui::IdSalt::new(&id));
+    let popup_id = button_id.with("popup");
+    let state_id = button_id.with("picker-state");
+    let ctx = ui.ctx().clone();
+    if !egui::ComboBox::is_open(&ctx, button_id) {
+        ctx.data_mut(|d| d.remove::<PickerState>(state_id));
+    }
+    preview_open(&ctx, button_id, popup_id, state_id);
+
+    let mut picked = None;
+    // The popup scrolls the list itself (under the filter box), so its own limit stays out of the way.
+    let combo_height = std::mem::replace(&mut ui.spacing_mut().combo_height, f32::INFINITY);
+    combo_menu_with(
+        ui,
+        t,
+        width,
+        &id,
+        selected_text,
+        egui::PopupCloseBehavior::CloseOnClickOutside,
+        |ui| {
+            let mut st: PickerState = ui.data(|d| d.get_temp(state_id)).unwrap_or_default();
+            picked = picker_menu(ui, t, &mut st, current, inherit, kinds, label);
+            if picked.is_some() {
+                ui.data_mut(|d| d.remove::<PickerState>(state_id));
+                ui.close();
+            } else {
+                ui.data_mut(|d| d.insert_temp(state_id, st));
+            }
+        },
+    );
+    ui.spacing_mut().combo_height = combo_height;
+    picked
+}
+
+/// Dev screenshots: the claimed picker opens (once per preview) with the preview's filter.
+fn preview_open(ctx: &egui::Context, button_id: egui::Id, popup_id: egui::Id, state_id: egui::Id) {
+    let mut p = PREVIEW.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(filter) = p.filter.clone() else {
+        return;
+    };
+    match p.claimed {
+        None => p.claimed = Some(button_id),
+        Some(c) if c != button_id => return,
+        _ => {}
+    }
+    let epoch_id = state_id.with("epoch");
+    if ctx.data(|d| d.get_temp::<u32>(epoch_id)) != Some(p.epoch) {
+        ctx.data_mut(|d| {
+            d.clear();
+            d.insert_temp(epoch_id, p.epoch);
+            d.insert_temp(
+                state_id,
+                PickerState {
+                    filter,
+                    ..PickerState::default()
+                },
+            );
+        });
+        // Dev shots reuse one popup id: forget its remembered size so each starts as a fresh open.
+        ctx.memory_mut(|m| m.reset_areas());
+        egui::Popup::open_id(ctx, popup_id);
+    }
+}
+
+/// The contents of the picker popup. Returns the pick, if one was made.
+fn picker_menu(
+    ui: &mut Ui,
+    t: &Tokens,
+    st: &mut PickerState,
+    current: Option<ActionKind>,
+    inherit: Option<&'static str>,
+    kinds: &[ActionKind],
+    label: fn(ActionKind) -> &'static str,
+) -> Option<Pick> {
+    // The popup's scroll area is only as tall as what it held last frame; after a short list (no
+    // match) the next one must be free to be taller than that.
+    let mut room = ui.max_rect();
+    room.max.y = room.min.y + PICKER_MAX_H + 4.0 * t.control_h;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(room), |ui| {
+        picker_body(ui, t, st, current, inherit, kinds, label)
+    })
+    .inner
+}
+
+fn picker_body(
+    ui: &mut Ui,
+    t: &Tokens,
+    st: &mut PickerState,
+    current: Option<ActionKind>,
+    inherit: Option<&'static str>,
+    kinds: &[ActionKind],
+    label: fn(ActionKind) -> &'static str,
+) -> Option<Pick> {
+    ui.set_min_width(PICKER_MIN_W);
+    let with_filter = kinds.len() + usize::from(inherit.is_some()) >= PICKER_FILTER_MIN;
+    let mut sections = picker_sections(kinds, label, &st.filter);
+    let mut flat = picker_flat(inherit, &sections, &st.filter);
+    let mut picked = None;
+
+    if with_filter {
+        // Keys first, so the text box never sees them.
+        let (down, up, enter) = ui.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            )
+        });
+        if down && !flat.is_empty() {
+            st.highlight = (st.highlight + 1).min(flat.len() - 1);
+            st.moved = true;
+        }
+        if up {
+            st.highlight = st.highlight.saturating_sub(1);
+            st.moved = true;
+        }
+        if enter {
+            picked = flat.get(st.highlight).copied();
+        }
+        let r = ui.add(
+            egui::TextEdit::singleline(&mut st.filter)
+                .hint_text("絞り込み")
+                .desired_width(f32::INFINITY),
+        );
+        if !st.seen {
+            r.request_focus();
+            st.seen = true;
+        }
+        if r.changed() {
+            st.highlight = 0;
+            sections = picker_sections(kinds, label, &st.filter);
+            flat = picker_flat(inherit, &sections, &st.filter);
+        }
+        ui.add_space(t.space_xs);
+    }
+    st.highlight = st.highlight.min(flat.len().saturating_sub(1));
+    let show_highlight = !st.filter.trim().is_empty() || st.moved;
+
+    if flat.is_empty() {
+        ui.set_min_height(st.list_h);
+        ui.add_space(t.space_sm);
+        ui.label(
+            RichText::new("該当なし")
+                .size(t.fs_small)
+                .color(t.text_muted),
+        );
+        ui.add_space(t.space_sm);
+        return picked;
+    }
+
+    let mut index = 0usize;
+    let scroll_to = st.moved;
+    let list = egui::ScrollArea::vertical()
+        .max_height(PICKER_MAX_H)
+        .min_scrolled_height(st.list_h)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.set_min_height(st.list_h);
+            ui.spacing_mut().item_spacing.y = 1.0;
+            if let Some(text) = inherit
+                && flat.first() == Some(&Pick::Inherit)
+            {
+                let hl = show_highlight && st.highlight == index;
+                if picker_item(ui, t, text, current.is_none(), hl, hl && scroll_to) {
+                    picked = Some(Pick::Inherit);
+                }
+                index += 1;
+            }
+            for (n, s) in sections.iter().enumerate() {
+                if let Some(g) = s.group {
+                    ui.add_space(if n == 0 { t.space_xs } else { t.space_md });
+                    ui.label(
+                        RichText::new(g.label())
+                            .size(t.fs_small)
+                            .color(t.text_muted),
+                    );
+                    ui.add_space(t.space_xs);
+                }
+                for &k in &s.kinds {
+                    let hl = show_highlight && st.highlight == index;
+                    if picker_item(ui, t, label(k), current == Some(k), hl, hl && scroll_to) {
+                        picked = Some(Pick::Kind(k));
+                    }
+                    index += 1;
+                }
+            }
+        });
+    st.list_h = st.list_h.max(list.content_size.y.min(PICKER_MAX_H));
+    picked
+}
+
+/// One row of the picker: the current one has a bar and a soft fill, the highlighted one (keys, or
+/// the first match) a lighter fill. Returns whether it was clicked.
+fn picker_item(
+    ui: &mut Ui,
+    t: &Tokens,
+    text: &str,
+    current: bool,
+    highlighted: bool,
+    scroll: bool,
+) -> bool {
+    let h = t.fs_body + 2.0 * t.space_sm;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::click());
+    if scroll {
+        ui.scroll_to_rect(rect, None);
+    }
+    let radius = t.radius_sm;
+    if current {
+        ui.painter().rect_filled(rect, radius, t.accent_soft);
+        let bar = Rect::from_center_size(
+            Pos2::new(rect.left() + t.stroke_focus, rect.center().y),
+            Vec2::new(t.stroke_focus + 1.0, h * 0.5),
+        );
+        ui.painter().rect_filled(bar, t.stroke_focus, t.accent);
+    } else if highlighted || resp.hovered() {
+        ui.painter().rect_filled(rect, radius, t.control_hover);
+    }
+    ui.painter().text(
+        Pos2::new(rect.left() + t.space_md, rect.center().y),
+        Align2::LEFT_CENTER,
+        text,
+        egui::FontId::proportional(t.fs_body),
+        t.text,
+    );
+    resp.widget_info(|| WidgetInfo::selected(Role::MenuItem, true, current, text));
+    resp.on_hover_cursor(CursorIcon::PointingHand).clicked()
 }
 
 /// Action combo box plus a key-string field when "キー入力" is chosen.
@@ -598,8 +1006,7 @@ pub fn action_picker_head_with(
     kinds: &[ActionKind],
     label: fn(ActionKind) -> &'static str,
 ) {
-    let mut kind = action.kind();
-    if combo(ui, t, id, &mut kind, kinds, label) {
+    if let Some(kind) = kind_combo(ui, t, id, action.kind(), kinds, label) {
         action.set_kind(kind);
     }
     action_fields(ui, t, action);
@@ -980,4 +1387,129 @@ pub fn device_status(ui: &mut Ui, t: &Tokens, collapsed: bool, connected: bool) 
         t.font(t.fs_small),
         t.text_muted,
     );
+}
+
+#[cfg(test)]
+mod picker_tests {
+    use super::*;
+
+    /// Run the picker popup headless and return its height after `frames` frames.
+    fn popup_height(ctx: &egui::Context, t: &Tokens, popup_id: egui::Id, frames: usize) -> f32 {
+        let mut h = 0.0;
+        for _ in 0..frames {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    Vec2::new(700.0, 520.0),
+                )),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                kind_combo(
+                    ui,
+                    t,
+                    "k",
+                    ActionKind::TaskView,
+                    &ActionKind::ALL,
+                    ActionKind::label,
+                );
+            });
+            out.textures_delta.clear();
+            h = ctx
+                .memory(|m| m.area_rect(popup_id))
+                .map_or(0.0, |r| r.height());
+        }
+        h
+    }
+
+    #[test]
+    fn popup_regrows_after_the_filter_is_cleared() {
+        let ctx = egui::Context::default();
+        let t = Tokens::dark();
+        let mut button = None;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            button = Some(ui.make_persistent_id(egui::IdSalt::new("k")));
+        });
+        out.textures_delta.clear();
+        let button = button.unwrap();
+        let (popup_id, state_id) = (button.with("popup"), button.with("picker-state"));
+        egui::Popup::open_id(&ctx, popup_id);
+        let full = popup_height(&ctx, &t, popup_id, 6);
+        let set = |f: &str| {
+            ctx.data_mut(|d| {
+                let mut st: PickerState = d.get_temp(state_id).unwrap_or_default();
+                st.filter = f.to_owned();
+                st.seen = true;
+                d.insert_temp(state_id, st);
+            })
+        };
+        set("zzz");
+        let none = popup_height(&ctx, &t, popup_id, 6);
+        set("");
+        let back = popup_height(&ctx, &t, popup_id, 6);
+        assert!(none > 40.0, "no-match popup collapsed: {none}");
+        assert!(
+            (back - full).abs() < 2.0,
+            "popup left clipped after clearing the filter: {back} vs {full}"
+        );
+    }
+
+    #[test]
+    fn unfiltered_sections_hold_every_kind_once_in_group_order() {
+        let s = picker_sections(&ActionKind::WITH_RESIZE, ActionKind::label, "");
+        assert_eq!(s[0].group, None);
+        assert_eq!(s[0].kinds, vec![ActionKind::None]);
+        let groups: Vec<_> = s.iter().filter_map(|s| s.group).collect();
+        assert_eq!(groups, ActionGroup::ALL.to_vec());
+        let mut all: Vec<_> = s.iter().flat_map(|s| s.kinds.clone()).collect();
+        assert_eq!(all.len(), ActionKind::WITH_RESIZE.len());
+        all.sort_by_key(|k| format!("{k:?}"));
+        all.dedup();
+        assert_eq!(all.len(), ActionKind::WITH_RESIZE.len());
+    }
+
+    #[test]
+    fn the_kinds_subset_is_kept() {
+        let kinds = [ActionKind::None, ActionKind::Find, ActionKind::TaskView];
+        let s = picker_sections(&kinds, ActionKind::label, "");
+        let flat: Vec<_> = s.iter().flat_map(|s| s.kinds.clone()).collect();
+        assert_eq!(
+            flat,
+            vec![ActionKind::None, ActionKind::TaskView, ActionKind::Find]
+        );
+    }
+
+    #[test]
+    fn filtering_hides_empty_groups_and_ignores_case_and_kana_type() {
+        let s = picker_sections(&ActionKind::ALL, ActionKind::label, "デスク");
+        assert!(s.iter().all(|s| s.group != Some(ActionGroup::Basic)));
+        let flat: Vec<_> = s.iter().flat_map(|s| s.kinds.clone()).collect();
+        assert!(flat.contains(&ActionKind::ShowDesktop));
+        assert!(flat.contains(&ActionKind::DesktopNext));
+        assert!(!flat.contains(&ActionKind::Find));
+        // Hiragana matches katakana labels, and ASCII ignores case.
+        assert_eq!(
+            picker_sections(&ActionKind::ALL, ActionKind::label, "ですく"),
+            s
+        );
+        let alt = picker_sections(&ActionKind::ALL, ActionKind::label, "ALT+tab");
+        assert_eq!(alt.len(), 1);
+        assert_eq!(alt[0].kinds, vec![ActionKind::AppSwitch]);
+    }
+
+    #[test]
+    fn no_match_gives_no_sections() {
+        assert!(picker_sections(&ActionKind::ALL, ActionKind::label, "zzz").is_empty());
+        assert!(label_matches("なし", "  "));
+    }
+
+    #[test]
+    fn flat_order_puts_the_inherit_entry_first() {
+        let s = picker_sections(&ActionKind::ALL, ActionKind::label, "");
+        let flat = picker_flat(Some("全体と同じ"), &s, "");
+        assert_eq!(flat[0], Pick::Inherit);
+        assert_eq!(flat[1], Pick::Kind(ActionKind::None));
+        let none = picker_flat(Some("全体と同じ"), &[], "zzz");
+        assert!(none.is_empty());
+    }
 }

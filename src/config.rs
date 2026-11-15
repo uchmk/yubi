@@ -253,6 +253,59 @@ impl ActionKind {
     }
 }
 
+/// The headings the action picker puts the kinds under (「なし」 stays outside any of them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ActionGroup {
+    Basic,
+    Window,
+    Desktop,
+    Level,
+    KeysApps,
+    Menu,
+}
+
+impl ActionGroup {
+    /// In the order the picker shows them.
+    pub const ALL: [Self; 6] = [
+        Self::Basic,
+        Self::Window,
+        Self::Desktop,
+        Self::Level,
+        Self::KeysApps,
+        Self::Menu,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Basic => "基本",
+            Self::Window => "ウィンドウ",
+            Self::Desktop => "デスクトップ",
+            Self::Level => "音量・明るさ",
+            Self::KeysApps => "キー・アプリ",
+            Self::Menu => "メニュー",
+        }
+    }
+}
+
+impl ActionKind {
+    /// The picker group of this kind; `None` for 「なし」, which is listed first on its own.
+    pub fn group(self) -> Option<ActionGroup> {
+        Some(match self {
+            Self::None => return None,
+            Self::MiddleClick | Self::RightClick => ActionGroup::Basic,
+            Self::TaskView
+            | Self::ShowDesktop
+            | Self::AppSwitch
+            | Self::TabSwitch
+            | Self::ResizeFromOpposite => ActionGroup::Window,
+            Self::DesktopPrev | Self::DesktopNext => ActionGroup::Desktop,
+            Self::VolumeStep | Self::BrightnessStep | Self::ToggleMute => ActionGroup::Level,
+            Self::Find | Self::Keys | Self::Launch => ActionGroup::KeysApps,
+            Self::RingMenu => ActionGroup::Menu,
+        })
+    }
+}
+
 /// What parsing one action token found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenParse {
@@ -3397,6 +3450,24 @@ swipe = \"find\"
         assert_eq!(cfg.corner.corners[0].tap, Action::None);
         assert_eq!(cfg.corner.corners[0].press, Action::None);
         assert_eq!(cfg.corner.corners[0].hold, Action::None);
+    }
+
+    #[test]
+    fn every_action_kind_is_in_exactly_one_group() {
+        for k in ActionKind::WITH_RESIZE {
+            match k.group() {
+                None => assert_eq!(k, ActionKind::None),
+                Some(g) => assert!(ActionGroup::ALL.contains(&g), "{k:?}"),
+            }
+        }
+        // Every group has a kind, and the groups are listed in their own order.
+        for g in ActionGroup::ALL {
+            assert!(
+                ActionKind::WITH_RESIZE.iter().any(|k| k.group() == Some(g)),
+                "{g:?}"
+            );
+        }
+        assert!(ActionGroup::ALL.windows(2).all(|w| w[0] < w[1]));
     }
 
     #[test]

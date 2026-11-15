@@ -12,6 +12,7 @@ mod icons;
 mod input;
 mod nav;
 mod os;
+mod overlay;
 mod pages;
 mod resident;
 mod search;

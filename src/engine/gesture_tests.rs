@@ -597,6 +597,53 @@ fn four_pinch_in_and_out() {
 }
 
 #[test]
+fn four_pinch_zoom_streams_until_lift() {
+    let mut cfg = Config::default();
+    cfg.four.pinch_out = config::Action::WindowZoom;
+    cfg.four.pinch_in = config::Action::Find;
+    let run = |scale: f32| {
+        let mut s = Seq::default();
+        s.still(&ring_n(4, 1.0), 100);
+        for i in 1..=30u64 {
+            let k = 1.0 + (scale - 1.0) * i as f32 / 30.0;
+            s.frames.push(frame(s.t, &ring_n(4, k)));
+            s.t += STEP;
+        }
+        s.lift(0);
+        s.run(&cfg)
+    };
+    let out = run(1.8);
+    let kinds: Vec<&Action> = real(&out);
+    let begin = kinds
+        .iter()
+        .position(|a| matches!(a, Action::WindowZoomBegin));
+    let end = kinds
+        .iter()
+        .position(|a| matches!(a, Action::WindowZoomEnd));
+    let (Some(b), Some(e)) = (begin, end) else {
+        panic!("zoom did not begin and end: {kinds:?}");
+    };
+    assert!(b < e);
+    assert_eq!(count(&out, |a| matches!(a, Action::WindowZoomBegin)), 1);
+    assert_eq!(count(&out, |a| matches!(a, Action::WindowZoomEnd)), 1);
+    assert!(triggers(&out).is_empty());
+    let ratios: Vec<f32> = out
+        .iter()
+        .filter_map(|(_, a)| match a {
+            Action::WindowZoom { ratio } => Some(*ratio),
+            _ => None,
+        })
+        .collect();
+    assert!(ratios.len() > 3, "{ratios:?}");
+    assert!(ratios.windows(2).all(|w| w[1] >= w[0] - 1e-3));
+    assert!(*ratios.last().unwrap() > 1.2);
+    // Other pinch actions stay one-shot and never stream.
+    let out = run(0.6);
+    assert_eq!(triggers(&out), vec![config::Action::Find]);
+    assert_eq!(count(&out, |a| matches!(a, Action::WindowZoomBegin)), 0);
+}
+
+#[test]
 fn four_tap_fires_when_bound() {
     let mut cfg = Config::default();
     cfg.four.tap = config::Action::Find;

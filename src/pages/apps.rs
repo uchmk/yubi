@@ -533,7 +533,11 @@ fn detail(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState, i: usiz
                                 Choice::Kind(k) => Some(k),
                             },
                             Some(Choice::Inherit.label()),
-                            &ActionKind::ALL,
+                            if info.id.starts_with("pinch.") {
+                                &ActionKind::PINCH
+                            } else {
+                                &ActionKind::ALL
+                            },
                             ActionKind::label,
                         ) {
                             choice = match pick {
@@ -552,6 +556,9 @@ fn detail(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState, i: usiz
                             }
                             Some(Action::VolumeStep(n) | Action::BrightnessStep(n)) => {
                                 step_field(ui, n)
+                            }
+                            Some(a @ Action::WindowArrange(_)) => {
+                                widgets::action_fields(ui, t, &("profile-arrange", i, &info.id), a);
                             }
                             _ => {}
                         }

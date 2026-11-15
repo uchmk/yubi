@@ -464,12 +464,19 @@ pub fn gesture(
                     ("five-out", &mut cfg.five.pinch_out),
                 )
             };
-            g.action_row("ピンチイン", &format!("{n}本指で指を寄せたとき"), a.0, a.1);
-            g.action_row(
+            g.action_row_of(
+                "ピンチイン",
+                &format!("{n}本指で指を寄せたとき"),
+                a.0,
+                a.1,
+                &ActionKind::PINCH,
+            );
+            g.action_row_of(
                 "ピンチアウト",
                 &format!("{n}本指で指を広げたとき"),
                 b.0,
                 b.1,
+                &ActionKind::PINCH,
             );
         });
     });

@@ -54,6 +54,12 @@ pub enum Fixture {
     /// 0 none, 1 only the three-finger touch-and-move drag, 2 only a four-finger tap-then-move
     /// window move, 3 all three rows, 4 only a five-finger window resize.
     DragTab { tab: u8, rows: u8 },
+    /// The ジェスチャー page (4 fingers) with the pinch slot's picker open on 「ウィンドウ」.
+    WinActPicker,
+    /// The ジェスチャー page (4 fingers) with the window actions set and their choice shown.
+    WinActRows,
+    /// The corner page with 「ウィンドウを並べる」 in the selected tap slot of corner 0.
+    WinActCorner,
 }
 
 impl Fixture {
@@ -75,12 +81,21 @@ impl Fixture {
 
     /// Set the fixture's data (idempotent: called every frame).
     pub fn apply(self, cfg: &mut Config) {
-        crate::widgets::set_picker_preview(match self {
-            Self::Picker(0) => Some(""),
-            Self::Picker(1) => Some("デスク"),
-            Self::Picker(_) => Some("zzz"),
-            _ => None,
-        });
+        crate::widgets::set_picker_preview(
+            match self {
+                Self::Picker(0) => Some(""),
+                Self::Picker(1) => Some("デスク"),
+                Self::Picker(_) => Some("zzz"),
+                Self::WinActPicker => Some("ウィンドウ"),
+                _ => None,
+            },
+            matches!(self, Self::WinActPicker).then_some(crate::config::ActionKind::WindowZoom),
+        );
+        self.apply_data(cfg);
+    }
+
+    /// The data of the fixture alone (the picker preview is left as it is).
+    fn apply_data(self, cfg: &mut Config) {
         match self {
             Self::Keep | Self::Picker(_) => {}
             Self::NoProfiles => cfg.profiles.clear(),
@@ -133,6 +148,26 @@ impl Fixture {
                 cfg.five.swipe_up = Action::TaskView;
                 cfg.five.pinch_in = Action::ShowDesktop;
                 crate::pages::features::force_gesture_tab(usize::from(tab));
+            }
+            Self::WinActPicker => {
+                Self::GestureTab(0).apply_data(cfg);
+            }
+            Self::WinActRows => {
+                Self::GestureTab(0).apply_data(cfg);
+                cfg.four.swipe_left = Action::WindowArrange(crate::config::WindowPreset::LeftHalf);
+                cfg.four.swipe_right =
+                    Action::WindowArrange(crate::config::WindowPreset::NextMonitor);
+                cfg.four.pinch_in = Action::WindowZoom;
+                cfg.four.pinch_out = Action::WindowZoom;
+            }
+            Self::WinActCorner => {
+                Self::corner_all(cfg);
+                cfg.corner.corners[0].tap =
+                    Action::WindowArrange(crate::config::WindowPreset::CenterTwoThirds);
+                crate::pages::corner::force_view(
+                    crate::config::CornerTrigger::Tap,
+                    Some((0, crate::config::CornerSlot::Tap)),
+                );
             }
             Self::DragTab { tab, rows } => {
                 use crate::config::{DragAction, DragRow, DragStart};
@@ -633,6 +668,45 @@ impl DevShot {
             }
             shots = list;
         }
+        if std::env::var_os("YUBI_SHOT_WINACT").is_some() {
+            let mut list = Vec::new();
+            for (n, page, fixture, size) in [
+                (
+                    "pinch-picker",
+                    Page::Gesture,
+                    Fixture::WinActPicker,
+                    Vec2::new(WIDE.x, 1000.0),
+                ),
+                (
+                    "gesture-rows",
+                    Page::Gesture,
+                    Fixture::WinActRows,
+                    Vec2::new(WIDE.x, 1000.0),
+                ),
+                (
+                    "corner-arrange",
+                    Page::Corner,
+                    Fixture::WinActCorner,
+                    Vec2::new(WIDE.x, 1250.0),
+                ),
+            ] {
+                for (tn, theme) in [("dark", ThemeChoice::Black), ("light", ThemeChoice::Light)] {
+                    list.push(Shot {
+                        name: format!("winact-{n}-{tn}"),
+                        page,
+                        theme,
+                        size,
+                        fixture,
+                        profile: None,
+                        fake: false,
+                        practice: false,
+                        anim_t: None,
+                        reduced: false,
+                    });
+                }
+            }
+            shots = list;
+        }
         if std::env::var_os("YUBI_SHOT_PICKER").is_some() {
             let mut list = Vec::new();
             // `YUBI_SHOT_PICKER=wide|narrow` limits the window size; anything else takes both.
@@ -966,7 +1040,7 @@ impl DevShot {
             }
         }
         self.frames += 1;
-        let settle = if matches!(shot.fixture, Fixture::Picker(_)) {
+        let settle = if matches!(shot.fixture, Fixture::Picker(_) | Fixture::WinActPicker) {
             PICKER_SETTLE_FRAMES
         } else {
             SETTLE_FRAMES

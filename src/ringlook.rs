@@ -18,6 +18,8 @@ const PREV: char = '\u{E72B}';
 const NEXT: char = '\u{E72A}';
 const APP_SWITCH: char = '\u{E8F9}';
 const TAB_SWITCH: char = '\u{E8A1}';
+const WINDOW_ARRANGE: char = '\u{E740}';
+const WINDOW_ZOOM: char = '\u{E8A3}';
 /// A plain application window, for a launch item whose own icon is not (yet) known.
 const APP: char = '\u{ECAA}';
 
@@ -30,6 +32,8 @@ pub fn glyph_of(action: &Action) -> Option<char> {
         Action::DesktopNext => NEXT,
         Action::AppSwitch => APP_SWITCH,
         Action::TabSwitch => TAB_SWITCH,
+        Action::WindowArrange(_) => WINDOW_ARRANGE,
+        Action::WindowZoom => WINDOW_ZOOM,
         Action::Find => SEARCH,
         Action::MiddleClick | Action::RightClick => MOUSE,
         Action::Keys(_) => KEYBOARD,

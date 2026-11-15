@@ -243,6 +243,18 @@ impl Recorder {
                     mode.outcome(),
                 ))
             }
+            Action::WindowZoomBegin => {
+                let (gesture, token) = self
+                    .pending
+                    .take()
+                    .unwrap_or_else(|| ("ジェスチャー".to_owned(), "gesture".to_owned()));
+                Some(made(
+                    gesture,
+                    token,
+                    Some(config::Action::WindowZoom.label()),
+                    mode.outcome(),
+                ))
+            }
             Action::Debug(GestureEvent::Press { fingers, deep }) => {
                 self.pending = Some((
                     press_label(*fingers, *deep),

@@ -66,6 +66,8 @@ pub enum Plan {
         path: String,
         args: String,
     },
+    /// Put the foreground window in place (「ウィンドウを並べる」).
+    Arrange(config::WindowPreset),
     /// Not implemented yet (ring menu) or "none".
     Nothing,
     /// The action cannot run; the text is for the diagnostics page.
@@ -148,6 +150,9 @@ pub fn plan_for(action: &config::Action) -> Plan {
                 }
             }
         }
+        A::WindowArrange(p) => Plan::Arrange(*p),
+        // The pinch zoom is a live gesture of its own (`Action::WindowZoom*`), not a plan.
+        A::WindowZoom => Plan::Invalid("ピンチ専用の動作です".to_owned()),
         // The ring menu comes with M3c.
         // The corner resize is a live gesture of its own (`Action::CornerResize*`), not a plan.
         A::RingMenu | A::ResizeFromOpposite | A::None => Plan::Nothing,
@@ -155,7 +160,7 @@ pub fn plan_for(action: &config::Action) -> Plan {
 }
 
 /// Commands for the window-ops worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WinCmd {
     /// Pick the window under `cursor` and start moving it.
     Begin {
@@ -186,6 +191,17 @@ pub enum WinCmd {
         dx: i32,
         dy: i32,
     },
+    /// Pick the window under `cursor` and scale it with a pinch.
+    BeginZoom {
+        cursor: (i32, i32),
+    },
+    /// Scale the window to `ratio` times its size at the start of the pinch.
+    Zoom {
+        ratio: f32,
+    },
+    EndZoom,
+    /// Put the foreground window in place.
+    Arrange(config::WindowPreset),
     /// Drop the move without snapping (device gone, config changed, ...).
     Cancel,
 }
@@ -212,6 +228,8 @@ pub struct Dispatcher {
     win_active: bool,
     /// A corner resize was accepted and not yet ended.
     resize_active: bool,
+    /// A pinch zoom was accepted and not yet ended.
+    zoom_active: bool,
     /// The corner swipe whose action is about to trigger.
     last_corner: Option<(usize, config::CornerSlot)>,
     last_multi: Option<(usize, MultiKind)>,
@@ -587,6 +605,7 @@ impl Dispatcher {
             win_join: None,
             win_active: false,
             resize_active: false,
+            zoom_active: false,
             last_corner: None,
             last_multi: None,
             last_press: None,
@@ -739,11 +758,12 @@ impl Dispatcher {
 
     /// Forget a half-done gesture (the executor lets go of buttons and keys on its own).
     pub fn cancel(&mut self) {
-        if self.win_active || self.resize_active {
+        if self.win_active || self.resize_active || self.zoom_active {
             self.win(WinCmd::Cancel);
         }
         self.win_active = false;
         self.resize_active = false;
+        self.zoom_active = false;
         self.drag_open = false;
         self.drag_px.clear();
         self.win_px.clear();
@@ -809,6 +829,13 @@ impl Dispatcher {
                 self.resize_active = false;
                 self.resize_px.clear();
                 (!self.win(WinCmd::EndResize)).then(|| WORKER_NOTE.to_owned())
+            }
+            Action::WindowZoomEnd => {
+                if !self.zoom_active {
+                    return None;
+                }
+                self.zoom_active = false;
+                (!self.win(WinCmd::EndZoom)).then(|| WORKER_NOTE.to_owned())
             }
             // Letting go of the cursor and closing the ring always run.
             Action::Suppress(Suppress::Off) => {
@@ -933,6 +960,19 @@ impl Dispatcher {
                     if dx != 0 || dy != 0 {
                         self.win(WinCmd::Resize { dx, dy });
                     }
+                }
+                None
+            }
+            Action::WindowZoomBegin => {
+                let Some(cursor) = cursor() else {
+                    return Some(NO_CURSOR_NOTE.to_owned());
+                };
+                self.zoom_active = self.win(WinCmd::BeginZoom { cursor });
+                (!self.zoom_active).then(|| WORKER_NOTE.to_owned())
+            }
+            Action::WindowZoom { ratio } => {
+                if self.zoom_active {
+                    self.win(WinCmd::Zoom { ratio: *ratio });
                 }
                 None
             }
@@ -1067,6 +1107,12 @@ impl Dispatcher {
             Plan::Launch { path, args } => Some(match launch_app(&path, &args) {
                 Ok(()) => format!("{source} → {label}"),
                 Err(e) => e,
+            }),
+            Plan::Arrange(p) => Some(if self.win(WinCmd::Arrange(p)) {
+                // The worker reports it if the window cannot be moved.
+                format!("{source} → {label}")
+            } else {
+                WORKER_NOTE.to_owned()
             }),
             Plan::Nothing => Some(format!("{source} → {label}（まだ動作しません）")),
             Plan::Invalid(msg) => Some(msg),
@@ -1438,6 +1484,41 @@ fn run_worker(rx: Receiver<WinCmd>, notify: impl Fn(String)) {
                     notify("ウィンドウのサイズ変更 終了".to_owned());
                 }
             }
+            WinCmd::BeginZoom { cursor } => {
+                mover = None;
+                match window::top_level_at(cursor) {
+                    None => notify("拡大・縮小できるウィンドウがありません".to_owned()),
+                    Some(h) if window::is_elevated_window(h) => notify(ELEVATED_NOTE.to_owned()),
+                    Some(h) => {
+                        mover = WindowMover::begin_zoom(h, cursor);
+                        notify(if mover.is_some() {
+                            "ウィンドウの拡大・縮小".to_owned()
+                        } else {
+                            "ウィンドウの大きさを変えられませんでした".to_owned()
+                        });
+                    }
+                }
+            }
+            WinCmd::Zoom { ratio } => {
+                if let Some(m) = mover.as_mut() {
+                    m.zoom_to(ratio);
+                }
+            }
+            WinCmd::EndZoom => {
+                if let Some(m) = mover.take() {
+                    m.end();
+                    notify("ウィンドウの拡大・縮小 終了".to_owned());
+                }
+            }
+            WinCmd::Arrange(preset) => match window::foreground() {
+                None => notify("並べられるウィンドウがありません".to_owned()),
+                Some(h) if window::is_elevated_window(h) => notify(ELEVATED_NOTE.to_owned()),
+                Some(h) => {
+                    if let Err(e) = window::apply_preset(h, preset) {
+                        notify(e);
+                    }
+                }
+            },
             WinCmd::Cancel => {
                 if let Some(m) = mover.take() {
                     m.end();
@@ -1639,6 +1720,78 @@ mod tests {
         assert_eq!(plan_for(&A::BrightnessStep(-5)), Plan::Brightness(-5));
         assert_eq!(plan_for(&A::ToggleMute), Plan::ToggleMute);
         assert_eq!(plan_for(&A::None), Plan::Nothing);
+        assert_eq!(
+            plan_for(&A::WindowArrange(config::WindowPreset::RightHalf)),
+            Plan::Arrange(config::WindowPreset::RightHalf)
+        );
+        assert!(matches!(plan_for(&A::WindowZoom), Plan::Invalid(_)));
+    }
+
+    #[test]
+    fn pinch_zoom_runs_begin_zoom_end_and_ends_even_in_practice() {
+        let (mut d, rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        d.handle(&START, &mut ex, &th, CURSOR);
+        assert!(
+            d.handle(&Action::WindowZoomBegin, &mut ex, &th, CURSOR)
+                .is_none()
+        );
+        d.handle(&Action::WindowZoom { ratio: 1.25 }, &mut ex, &th, CURSOR);
+        d.handle(&Action::WindowZoomEnd, &mut ex, &th, CURSOR);
+        assert_eq!(rx.try_recv(), Ok(WinCmd::BeginZoom { cursor: (100, 200) }));
+        assert_eq!(rx.try_recv(), Ok(WinCmd::Zoom { ratio: 1.25 }));
+        assert_eq!(rx.try_recv(), Ok(WinCmd::EndZoom));
+        assert!(rx.try_recv().is_err());
+        // An end without a begin sends nothing.
+        d.handle(&Action::WindowZoomEnd, &mut ex, &th, CURSOR);
+        assert!(rx.try_recv().is_err());
+        // Practice mode: nothing begins and nothing is scaled; an arrange trigger is dropped too.
+        d.set_dry_run(true);
+        d.handle(&Action::WindowZoomBegin, &mut ex, &th, CURSOR);
+        d.handle(&Action::WindowZoom { ratio: 2.0 }, &mut ex, &th, CURSOR);
+        let note = d.handle(
+            &Action::Trigger(config::Action::WindowArrange(
+                config::WindowPreset::LeftHalf,
+            )),
+            &mut ex,
+            &th,
+            CURSOR,
+        );
+        assert!(note.is_none());
+        d.handle(&Action::WindowZoomEnd, &mut ex, &th, CURSOR);
+        assert!(rx.try_recv().is_err());
+        // Practice switched on mid-pinch: scaling stops, but the end still reaches the worker.
+        d.set_dry_run(false);
+        d.handle(&Action::WindowZoomBegin, &mut ex, &th, CURSOR);
+        d.set_dry_run(true);
+        d.handle(&Action::WindowZoom { ratio: 1.1 }, &mut ex, &th, CURSOR);
+        d.handle(&Action::WindowZoomEnd, &mut ex, &th, CURSOR);
+        assert_eq!(rx.try_recv(), Ok(WinCmd::BeginZoom { cursor: (100, 200) }));
+        assert_eq!(rx.try_recv(), Ok(WinCmd::EndZoom));
+    }
+
+    #[test]
+    fn arrange_goes_to_the_worker_and_cancel_drops_a_zoom() {
+        let (mut d, rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        let p = config::WindowPreset::CenterTwoThirds;
+        d.handle(&START, &mut ex, &th, CURSOR);
+        let note = d.handle(
+            &Action::Trigger(config::Action::WindowArrange(p)),
+            &mut ex,
+            &th,
+            CURSOR,
+        );
+        assert!(note.is_some_and(|n| n.contains("ウィンドウを中央に 2/3")));
+        assert_eq!(rx.try_recv(), Ok(WinCmd::Arrange(p)));
+        d.handle(&Action::WindowZoomBegin, &mut ex, &th, CURSOR);
+        d.cancel();
+        assert_eq!(rx.try_recv(), Ok(WinCmd::BeginZoom { cursor: (100, 200) }));
+        assert_eq!(rx.try_recv(), Ok(WinCmd::Cancel));
     }
 
     #[test]

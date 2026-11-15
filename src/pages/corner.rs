@@ -659,8 +659,17 @@ fn panel(ui: &mut Ui, t: &Tokens, cfg: &mut Config, tr: CornerTrigger, view: &mu
                     }
                     action.set_kind(kind);
                 }
-                action_fields(ui, t, action);
+                // The window layout is chosen on a row of its own: the panel is too narrow for two
+                // choosers beside the label.
+                if !matches!(action, Action::WindowArrange(_)) {
+                    action_fields(ui, t, &("corner-fields", corner, slot.token()), action);
+                }
             });
+            if matches!(action, Action::WindowArrange(_)) {
+                g.row(None, "並べ方", "", |ui| {
+                    action_fields(ui, t, &("corner-arrange", corner, slot.token()), action)
+                });
+            }
             if let Action::Launch { path, args } = action {
                 g.raw_row(|ui| {
                     launch_block(ui, t, &("corner-launch", corner, slot.token()), path, args);
@@ -739,6 +748,12 @@ fn status(master: bool, trigger_on: bool, tr: CornerTrigger, action: &Action) ->
         format!("四隅の{}がオフです", tr.label())
     } else if *action == Action::None {
         "未割り当て".to_owned()
+    } else if let Action::WindowArrange(p) = action {
+        format!(
+            "有効: {}（{}）",
+            ActionKind::WindowArrange.label(),
+            p.label().replace(' ', "")
+        )
     } else {
         format!("有効: {}", action.label())
     }

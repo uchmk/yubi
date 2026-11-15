@@ -379,7 +379,7 @@ impl Recognizer {
         }
         self.window.cancel(out);
         self.drag.cancel(out);
-        self.multi.finish();
+        self.multi.finish(out);
         self.edge.release(out);
         self.corner.release(out, None);
         self.ring.cancel(out);
@@ -540,7 +540,7 @@ impl Recognizer {
             self.clicks_off_at = Some(at);
         }
         self.ring.finish(&self.g, t, out);
-        self.multi.finish();
+        self.multi.finish(out);
         self.scroll.finish(self.g.scroll.as_ref(), &self.th, t);
         self.arb.clear();
     }
@@ -588,6 +588,7 @@ impl Recognizer {
             proposals.extend(self.window.step(&ctx, free, out));
         }
         if ctx.g.any_multi() {
+            self.multi.drive(&ctx, out);
             let free = self.arb.is_free_for(Owner::Multi);
             if let Some(h) = self.multi.step(&ctx, free) {
                 proposals.push(h.proposal);

@@ -29,7 +29,8 @@ use std::ffi::c_void;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromWindow,
 };
 use windows::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
@@ -46,9 +47,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_LEFT, VK_RIGHT, VK
 use windows::Win32::UI::WindowsAndMessaging::{
     GA_ROOT, GetAncestor, GetClassNameW, GetCursorPos, GetDesktopWindow, GetForegroundWindow,
     GetShellWindow, GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, IsWindow,
-    IsZoomed, MINMAXINFO, SMTO_ABORTIFHUNG, SW_RESTORE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, SendMessageTimeoutW, SetForegroundWindow, SetWindowPos,
-    ShowWindowAsync, WINDOWPLACEMENT, WM_GETMINMAXINFO, WindowFromPoint,
+    IsZoomed, MINMAXINFO, SMTO_ABORTIFHUNG, SW_MAXIMIZE, SW_RESTORE, SWP_ASYNCWINDOWPOS,
+    SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SendMessageTimeoutW, SetForegroundWindow,
+    SetWindowPos, ShowWindowAsync, WINDOWPLACEMENT, WM_GETMINMAXINFO, WindowFromPoint,
 };
 
 use super::keys::{self, KeyCombo, VK_LWIN, Vk};
@@ -452,9 +453,14 @@ fn track_limits(hwnd: Hwnd) -> ((i32, i32), (i32, i32)) {
 /// rectangle itself instead of reading it back.
 pub struct WindowMover {
     hwnd: Hwnd,
+    /// The rectangle when the interaction began (the base of a zoom).
+    base: Rect,
     rect: Rect,
     min: (i32, i32),
     max: (i32, i32),
+    /// A maximised window of a zoom is restored only by the first zoom step that changes its
+    /// size, so a pinch that ends at ratio 1 leaves it maximised.
+    pending_restore: bool,
 }
 
 impl WindowMover {
@@ -501,9 +507,29 @@ impl WindowMover {
         let (min, max) = track_limits(hwnd);
         Some(Self {
             hwnd,
+            base: before,
             rect: before,
             min,
             max,
+            pending_restore: false,
+        })
+    }
+
+    /// Start a zoom of `hwnd`. Unlike [`Self::begin`] a maximised window stays maximised until
+    /// the first step that actually changes its size.
+    pub fn begin_zoom(hwnd: Hwnd, cursor: (i32, i32)) -> Option<Self> {
+        if !is_maximized(hwnd) {
+            return Self::begin(hwnd, cursor);
+        }
+        let base = restored_rect(hwnd)?;
+        let (min, max) = track_limits(hwnd);
+        Some(Self {
+            hwnd,
+            base,
+            rect: base,
+            min,
+            max,
+            pending_restore: true,
         })
     }
 
@@ -588,8 +614,79 @@ impl WindowMover {
         }
     }
 
+    /// Scale the window to `factor` times its size at the start, around its centre, kept inside
+    /// the work area of its monitor and within its size limits.
+    pub fn zoom_to(&mut self, factor: f32) {
+        let bounds = zoom_bounds(self.hwnd);
+        let next = zoom_rect(self.base, factor, self.min, self.max, bounds);
+        if self.pending_restore {
+            if next == self.base {
+                return;
+            }
+            restore(self.hwnd);
+            self.pending_restore = false;
+        } else if next == self.rect {
+            return;
+        }
+        self.rect = next;
+        // SAFETY: plain call; failures are ignored.
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd.to_win(),
+                None,
+                next.left,
+                next.top,
+                next.width(),
+                next.height(),
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            );
+        }
+    }
+
     /// Finish the interaction (nothing is pending to flush; consumes self).
     pub fn end(self) {}
+}
+
+/// The work area of the window's monitor in `GetWindowRect` space: grown by the invisible
+/// borders, so the visible frame can reach the work-area edge.
+fn zoom_bounds(hwnd: Hwnd) -> Rect {
+    let work = work_area_of(hwnd).unwrap_or(Rect::new(0, 0, 16384, 16384));
+    let (il, it, ir, ib) = frame_insets(hwnd);
+    Rect::new(
+        work.left - il,
+        work.top - it,
+        work.right + ir,
+        work.bottom + ib,
+    )
+}
+
+/// Pure zoom math: `base` scaled by `factor` around its centre. The factor is limited so that
+/// both sides stay within `min`..`max` and the window fits `bounds`; the result is then moved
+/// inside `bounds`. The minimum wins over the other limits.
+pub fn zoom_rect(base: Rect, factor: f32, min: (i32, i32), max: (i32, i32), bounds: Rect) -> Rect {
+    let (bw, bh) = (base.width().max(1) as f32, base.height().max(1) as f32);
+    // The limits are relative to the base: a factor of 1 is always allowed, so a window that is
+    // already beyond a limit (bigger than the work area, smaller than its minimum) does not jump
+    // at the first step.
+    let lo = (min.0 as f32 / bw).max(min.1 as f32 / bh).min(1.0);
+    let hi = (max.0 as f32 / bw)
+        .min(max.1 as f32 / bh)
+        .min(bounds.width() as f32 / bw)
+        .min(bounds.height() as f32 / bh)
+        .max(1.0);
+    let f = if factor.is_finite() { factor } else { 1.0 }.clamp(lo, hi);
+    if f == 1.0 {
+        return base;
+    }
+    let w = ((bw * f).round() as i32).max(1);
+    let h = ((bh * f).round() as i32).max(1);
+    // Twice the centre, so an odd size keeps it exact.
+    let (cx2, cy2) = (base.left + base.right, base.top + base.bottom);
+    let left = (cx2 - w).div_euclid(2);
+    let top = (cy2 - h).div_euclid(2);
+    let left = left.clamp(bounds.left, (bounds.right - w).max(bounds.left));
+    let top = top.clamp(bounds.top, (bounds.bottom - h).max(bounds.top));
+    Rect::new(left, top, left + w, top + h)
 }
 
 /// Direction for `snap`.
@@ -661,6 +758,237 @@ pub fn place(hwnd: Hwnd, rect: Rect) -> bool {
             SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         )
         .is_ok()
+    }
+}
+
+/// The rectangle a preset gives a window on `work` (visible-frame terms). `None` for the presets
+/// that are not a plain rectangle (maximise, restore, next monitor).
+pub fn preset_rect(work: Rect, preset: crate::config::WindowPreset) -> Option<Rect> {
+    use crate::config::WindowPreset as P;
+    let (w, h) = (work.width(), work.height());
+    let (mx, my) = (work.left + w / 2, work.top + h / 2);
+    Some(match preset {
+        P::LeftHalf => Rect::new(work.left, work.top, mx, work.bottom),
+        P::RightHalf => Rect::new(mx, work.top, work.right, work.bottom),
+        P::TopHalf => Rect::new(work.left, work.top, work.right, my),
+        P::BottomHalf => Rect::new(work.left, my, work.right, work.bottom),
+        P::CenterTwoThirds => Rect::new(
+            work.left + w / 6,
+            work.top + h / 6,
+            work.right - w / 6,
+            work.bottom - h / 6,
+        ),
+        P::Maximize | P::Restore | P::NextMonitor => return None,
+    })
+}
+
+/// `r` moved to the same relative place and share of `to` as it has on `from`, so a window on
+/// the left half of one monitor lands on the left half of the next, whatever their sizes and
+/// DPI. The result is kept inside `to`.
+pub fn map_rect(r: Rect, from: Rect, to: Rect) -> Rect {
+    let (fw, fh) = (from.width().max(1) as i64, from.height().max(1) as i64);
+    let (tw, th) = (to.width() as i64, to.height() as i64);
+    let map_x = |x: i32| to.left + ((x - from.left) as i64 * tw).div_euclid(fw) as i32;
+    let map_y = |y: i32| to.top + ((y - from.top) as i64 * th).div_euclid(fh) as i32;
+    let w = (r.width() as i64 * tw).div_euclid(fw).clamp(1, tw.max(1)) as i32;
+    let h = (r.height() as i64 * th).div_euclid(fh).clamp(1, th.max(1)) as i32;
+    let left = map_x(r.left).clamp(to.left, (to.right - w).max(to.left));
+    let top = map_y(r.top).clamp(to.top, (to.bottom - h).max(to.top));
+    Rect::new(left, top, left + w, top + h)
+}
+
+/// Index of the monitor after `current` in `works` ordered left to right, then top to bottom
+/// (wrapping around). `None` with fewer than two monitors or when `current` is not among them.
+pub fn next_monitor(works: &[Rect], current: Rect) -> Option<usize> {
+    if works.len() < 2 {
+        return None;
+    }
+    let mut order: Vec<usize> = (0..works.len()).collect();
+    order.sort_by_key(|&i| (works[i].left, works[i].top));
+    let at = order.iter().position(|&i| works[i] == current)?;
+    Some(order[(at + 1) % order.len()])
+}
+
+unsafe extern "system" fn collect_work_area(
+    m: HMONITOR,
+    _: HDC,
+    _: *mut RECT,
+    data: LPARAM,
+) -> windows::core::BOOL {
+    // SAFETY: `data` is the `Vec<Rect>` that `monitor_work_areas` passes in, alive for the call.
+    let list = unsafe { &mut *(data.0 as *mut Vec<Rect>) };
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: cbSize is set.
+    if unsafe { GetMonitorInfoW(m, &mut mi) }.as_bool() {
+        list.push(Rect::from_win(mi.rcWork));
+    }
+    true.into()
+}
+
+/// The work area of every monitor.
+fn monitor_work_areas() -> Vec<Rect> {
+    let mut list: Vec<Rect> = Vec::new();
+    // SAFETY: the callback only runs during this call and gets a pointer to `list`.
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(collect_work_area),
+            LPARAM(&mut list as *mut Vec<Rect> as isize),
+        );
+    }
+    list
+}
+
+/// What tells one window from another that reuses its handle: the process and the class.
+type WinIdentity = (u32, String);
+
+/// Where each window was before 「ウィンドウを並べる」 first moved it (visible-frame terms), for
+/// 「元に戻す」, kept by window handle together with an identity so that a handle that was
+/// reused by another window is not restored to a stranger's place.
+#[derive(Default)]
+struct SavedRects {
+    map: std::collections::HashMap<isize, (Rect, WinIdentity)>,
+}
+
+impl SavedRects {
+    /// Remember `rect` for `h` unless this very window already has one (the first position is
+    /// the one 「元に戻す」 returns to).
+    fn remember(&mut self, h: isize, id: WinIdentity, rect: Rect) {
+        match self.map.get(&h) {
+            Some((_, old)) if *old == id => {}
+            _ => {
+                self.map.insert(h, (rect, id));
+            }
+        }
+    }
+
+    /// Take the saved rect of `h`; an entry of a different window is dropped and gives nothing.
+    fn take(&mut self, h: isize, id: &WinIdentity) -> Option<Rect> {
+        let (rect, old) = self.map.remove(&h)?;
+        (old == *id).then_some(rect)
+    }
+
+    fn contains(&self, h: isize) -> bool {
+        self.map.contains_key(&h)
+    }
+
+    /// Forget the windows `alive` does not know any more.
+    fn retain_alive(&mut self, alive: impl Fn(isize) -> bool) {
+        self.map.retain(|h, _| alive(*h));
+    }
+}
+
+fn saved_rects() -> std::sync::MutexGuard<'static, SavedRects> {
+    use std::sync::{Mutex, OnceLock};
+    static SAVED: OnceLock<Mutex<SavedRects>> = OnceLock::new();
+    SAVED
+        .get_or_init(|| Mutex::new(SavedRects::default()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+fn identity_of(hwnd: Hwnd) -> WinIdentity {
+    let mut pid = 0u32;
+    // SAFETY: valid out pointer.
+    unsafe { GetWindowThreadProcessId(hwnd.to_win(), Some(&mut pid)) };
+    (pid, class_name(hwnd.to_win()))
+}
+
+/// The visible frame the window has now, or the one it will have once restored if it is
+/// maximised (taken from the placement, with the usual invisible borders taken off).
+fn current_visible(hwnd: Hwnd) -> Option<Rect> {
+    if is_maximized(hwnd) {
+        let r = restored_rect(hwnd)?;
+        let (il, it, ir, ib) = default_insets(monitor_dpi(hwnd));
+        Some(Rect::new(
+            r.left + il,
+            r.top + it,
+            r.right - ir,
+            r.bottom - ib,
+        ))
+    } else {
+        visible_rect(hwnd)
+    }
+}
+
+/// Remember where `hwnd` is, unless it was already moved by a preset.
+fn remember(hwnd: Hwnd) {
+    let id = identity_of(hwnd);
+    let mut saved = saved_rects();
+    // Do not let handles of closed windows pile up.
+    saved.retain_alive(|h| Hwnd(h).is_valid());
+    if let Some(r) = current_visible(hwnd) {
+        saved.remember(hwnd.0, id, r);
+    }
+}
+
+/// Carry out a 「ウィンドウを並べる」 preset on `hwnd` (asynchronous, like `place`). The error is
+/// a short Japanese text for the notes.
+pub fn apply_preset(hwnd: Hwnd, preset: crate::config::WindowPreset) -> Result<(), String> {
+    use crate::config::WindowPreset as P;
+    const FAILED: &str = "ウィンドウを動かせませんでした";
+    match preset {
+        P::Restore => {
+            let saved = saved_rects().take(hwnd.0, &identity_of(hwnd));
+            if let Some(r) = saved {
+                return if place(hwnd, r) {
+                    Ok(())
+                } else {
+                    Err(FAILED.to_owned())
+                };
+            }
+            if is_maximized(hwnd) {
+                restore(hwnd);
+                return Ok(());
+            }
+            Err("元に戻せる位置がありません".to_owned())
+        }
+        P::Maximize => {
+            remember(hwnd);
+            // SAFETY: plain call; posts the request instead of waiting for the target.
+            let posted = unsafe { ShowWindowAsync(hwnd.to_win(), SW_MAXIMIZE).as_bool() };
+            if posted {
+                Ok(())
+            } else {
+                Err(FAILED.to_owned())
+            }
+        }
+        P::NextMonitor => {
+            let works = monitor_work_areas();
+            let from = work_area_of(hwnd).ok_or_else(|| FAILED.to_owned())?;
+            let Some(i) = next_monitor(&works, from) else {
+                return Err("モニターが 1 つしかありません".to_owned());
+            };
+            let r = current_visible(hwnd).ok_or_else(|| FAILED.to_owned())?;
+            let maximised = is_maximized(hwnd);
+            let target = map_rect(r, from, works[i]);
+            remember(hwnd);
+            if !place(hwnd, target) {
+                return Err(FAILED.to_owned());
+            }
+            if maximised {
+                // SAFETY: as above; handled after the move by the same window thread.
+                let posted = unsafe { ShowWindowAsync(hwnd.to_win(), SW_MAXIMIZE).as_bool() };
+                if !posted {
+                    return Err(FAILED.to_owned());
+                }
+            }
+            Ok(())
+        }
+        rect => {
+            let work = work_area_of(hwnd).ok_or_else(|| FAILED.to_owned())?;
+            let target = preset_rect(work, rect).ok_or_else(|| FAILED.to_owned())?;
+            remember(hwnd);
+            if place(hwnd, target) {
+                Ok(())
+            } else {
+                Err(FAILED.to_owned())
+            }
+        }
     }
 }
 
@@ -825,6 +1153,157 @@ mod tests {
         let o = resize_rect(R, Corner::TopRight, 5000, -5000, MIN, MAX);
         assert_eq!((o.width(), o.height()), MAX);
         assert_eq!((o.left, o.bottom), (100, 400));
+    }
+
+    #[test]
+    fn zoom_scales_around_the_centre_within_limits() {
+        let bounds = Rect::new(0, 0, 1920, 1040);
+        let base = Rect::new(500, 300, 900, 600); // 400 x 300, centre (700, 450)
+        let big = zoom_rect(base, 1.5, MIN, (4000, 4000), bounds);
+        assert_eq!((big.width(), big.height()), (600, 450));
+        assert_eq!((big.left + big.right, big.top + big.bottom), (1400, 900));
+        // A limit that bites applies to both sides: the height reaches its minimum first.
+        let small = zoom_rect(base, 0.1, MIN, (4000, 4000), bounds);
+        assert_eq!((small.width(), small.height()), (200, 150));
+        // Never beyond the work area, even from far out.
+        let huge = zoom_rect(base, 50.0, MIN, (4000, 4000), bounds);
+        assert_eq!(huge.height(), 1040);
+        assert!(huge.left >= 0 && huge.right <= 1920 && huge.top >= 0 && huge.bottom <= 1040);
+        // A window at the edge grows inward.
+        let edge = Rect::new(1600, 0, 1920, 240);
+        let grown = zoom_rect(edge, 1.5, MIN, (4000, 4000), bounds);
+        assert!(grown.right <= 1920 && grown.top >= 0);
+        assert_eq!((grown.width(), grown.height()), (480, 360));
+        // The maximum track size of the window limits the growth.
+        let capped = zoom_rect(base, 10.0, MIN, (800, 600), bounds);
+        assert_eq!((capped.width(), capped.height()), (800, 600));
+        // A base already beyond the limits is left alone at factor 1 (no jump on the first step).
+        let over = Rect::new(-50, -50, 2000, 1100);
+        assert_eq!(zoom_rect(over, 1.0, MIN, (1500, 1500), bounds), over);
+        // 1.0 gives the base back; nonsense factors do not panic.
+        assert_eq!(zoom_rect(base, 1.0, MIN, MAX, bounds), base);
+        let _ = zoom_rect(base, f32::NAN, MIN, MAX, bounds);
+        let _ = zoom_rect(base, -3.0, MIN, MAX, bounds);
+    }
+
+    #[test]
+    fn zoom_works_on_a_monitor_left_of_the_primary() {
+        let bounds = Rect::new(-1920, 0, 0, 1040);
+        let base = Rect::new(-500, 100, -100, 400);
+        let grown = zoom_rect(base, 1.5, MIN, (4000, 4000), bounds);
+        assert!(grown.right <= 0 && grown.left >= -1920);
+        assert_eq!((grown.width(), grown.height()), (600, 450));
+        assert_eq!(grown.left + grown.right, -600);
+    }
+
+    #[test]
+    fn presets_fill_the_work_area_parts() {
+        use crate::config::WindowPreset as P;
+        let work = Rect::new(0, 0, 1920, 1040);
+        assert_eq!(
+            preset_rect(work, P::LeftHalf),
+            Some(Rect::new(0, 0, 960, 1040))
+        );
+        assert_eq!(
+            preset_rect(work, P::RightHalf),
+            Some(Rect::new(960, 0, 1920, 1040))
+        );
+        assert_eq!(
+            preset_rect(work, P::TopHalf),
+            Some(Rect::new(0, 0, 1920, 520))
+        );
+        assert_eq!(
+            preset_rect(work, P::BottomHalf),
+            Some(Rect::new(0, 520, 1920, 1040))
+        );
+        assert_eq!(
+            preset_rect(work, P::CenterTwoThirds),
+            Some(Rect::new(320, 173, 1600, 867))
+        );
+        for p in [P::Maximize, P::Restore, P::NextMonitor] {
+            assert_eq!(preset_rect(work, p), None);
+        }
+    }
+
+    #[test]
+    fn presets_follow_a_monitor_at_negative_coordinates() {
+        use crate::config::WindowPreset as P;
+        let work = Rect::new(-2561, -1000, -1, 400);
+        let l = preset_rect(work, P::LeftHalf).unwrap();
+        let r = preset_rect(work, P::RightHalf).unwrap();
+        assert_eq!(l.left, -2561);
+        assert_eq!(l.right, r.left, "the halves meet without a gap");
+        assert_eq!(r.right, -1);
+        assert_eq!((l.top, l.bottom), (-1000, 400));
+        let t = preset_rect(work, P::TopHalf).unwrap();
+        let b = preset_rect(work, P::BottomHalf).unwrap();
+        assert_eq!(t.bottom, b.top);
+        assert_eq!((t.top, b.bottom), (-1000, 400));
+        let odd = Rect::new(-3, -3, 98, 98);
+        let (a, c) = (
+            preset_rect(odd, P::LeftHalf).unwrap(),
+            preset_rect(odd, P::RightHalf).unwrap(),
+        );
+        assert_eq!((a.left, a.right, c.right), (-3, c.left, 98));
+        let mid = preset_rect(work, P::CenterTwoThirds).unwrap();
+        assert!(mid.left > work.left && mid.right < work.right);
+        assert!(mid.top > work.top && mid.bottom < work.bottom);
+    }
+
+    #[test]
+    fn saved_rects_remember_the_first_place_and_drop_strangers() {
+        let id = |pid: u32, c: &str| (pid, c.to_owned());
+        let first = Rect::new(10, 10, 410, 310);
+        let moved = Rect::new(0, 0, 960, 1040);
+        let mut s = SavedRects::default();
+        s.remember(7, id(1, "A"), first);
+        // A second preset (or a next-monitor move) does not replace the original place.
+        s.remember(7, id(1, "A"), moved);
+        assert_eq!(s.take(7, &id(1, "A")), Some(first));
+        assert_eq!(s.take(7, &id(1, "A")), None);
+        // Next monitor, then restore: the place before the move comes back.
+        s.remember(7, id(1, "A"), first);
+        s.remember(7, id(1, "A"), Rect::new(1920, 0, 2320, 300));
+        assert_eq!(s.take(7, &id(1, "A")), Some(first));
+        // A handle reused by another window is not restored to the old place.
+        s.remember(8, id(1, "A"), first);
+        assert_eq!(s.take(8, &id(2, "B")), None);
+        assert!(!s.contains(8));
+        s.remember(9, id(1, "A"), first);
+        s.remember(9, id(3, "C"), moved);
+        assert_eq!(s.take(9, &id(3, "C")), Some(moved));
+        s.remember(1, id(1, "A"), first);
+        s.retain_alive(|_| false);
+        assert!(!s.contains(1));
+    }
+
+    #[test]
+    fn next_monitor_goes_left_to_right_and_wraps() {
+        let left = Rect::new(-1920, 0, 0, 1040);
+        let main = Rect::new(0, 0, 2560, 1400);
+        let right = Rect::new(2560, -200, 4480, 880);
+        // Enumeration order is arbitrary.
+        let works = [main, right, left];
+        assert_eq!(next_monitor(&works, left), Some(0));
+        assert_eq!(next_monitor(&works, main), Some(1));
+        assert_eq!(next_monitor(&works, right), Some(2));
+        assert_eq!(next_monitor(&works[..1], main), None);
+        assert_eq!(next_monitor(&works, Rect::new(1, 1, 2, 2)), None);
+    }
+
+    #[test]
+    fn mapping_a_window_keeps_its_place_and_share() {
+        let main = Rect::new(0, 0, 1920, 1040);
+        let other = Rect::new(-2560, -300, 0, 1100);
+        let half = Rect::new(960, 0, 1920, 1040);
+        let m = map_rect(half, main, other);
+        assert_eq!(m, Rect::new(-1280, -300, 0, 1100));
+        assert_eq!(map_rect(m, other, main), half);
+        // Never leaves the target, even for a window that stuck out of the source.
+        let out = Rect::new(1800, 900, 2200, 1300);
+        let m = map_rect(out, main, other);
+        assert!(m.left >= other.left && m.right <= other.right);
+        assert!(m.top >= other.top && m.bottom <= other.bottom);
     }
 
     #[test]

@@ -322,6 +322,14 @@ pub enum Action {
         dy_mm: f32,
     },
     WindowResizeEnd,
+    /// A pinch bound to 「ウィンドウを拡大・縮小」 was recognised: the window under the cursor is
+    /// picked now and scaled by every `WindowZoom` until `WindowZoomEnd`.
+    WindowZoomBegin,
+    /// Spread of the fingers now over the spread when the zoom began (1.0 = unchanged).
+    WindowZoom {
+        ratio: f32,
+    },
+    WindowZoomEnd,
     /// Two-finger scroll output in `WHEEL_DELTA` units (120 = one notch), at most one per input
     /// frame. Positive `v` scrolls up and positive `h` scrolls right (the Win32 wheel convention).
     Scroll {

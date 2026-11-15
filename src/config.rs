@@ -153,11 +153,73 @@ pub enum Action {
     /// Corner gestures only (the diagonal slot): resize the foreground window from the corner
     /// opposite the one the finger started in, for as long as the finger keeps moving.
     ResizeFromOpposite,
+    /// Pinch slots only: while the pinch lasts, the window under the cursor scales around its
+    /// centre with the spread of the fingers.
+    WindowZoom,
+    /// Put the foreground window somewhere on its monitor (a half, maximised, restored, ...).
+    WindowArrange(WindowPreset),
     /// Start an app: an exe or a shortcut (`.lnk`) with optional arguments.
     Launch {
         path: String,
         args: String,
     },
+}
+
+/// Where 「ウィンドウを並べる」 puts the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowPreset {
+    #[default]
+    LeftHalf,
+    RightHalf,
+    TopHalf,
+    BottomHalf,
+    Maximize,
+    Restore,
+    CenterTwoThirds,
+    NextMonitor,
+}
+
+impl WindowPreset {
+    pub const ALL: [Self; 8] = [
+        Self::LeftHalf,
+        Self::RightHalf,
+        Self::TopHalf,
+        Self::BottomHalf,
+        Self::Maximize,
+        Self::Restore,
+        Self::CenterTwoThirds,
+        Self::NextMonitor,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LeftHalf => "左半分",
+            Self::RightHalf => "右半分",
+            Self::TopHalf => "上半分",
+            Self::BottomHalf => "下半分",
+            Self::Maximize => "最大化",
+            Self::Restore => "元に戻す",
+            Self::CenterTwoThirds => "中央に 2/3",
+            Self::NextMonitor => "次のモニターへ",
+        }
+    }
+
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::LeftHalf => "left_half",
+            Self::RightHalf => "right_half",
+            Self::TopHalf => "top_half",
+            Self::BottomHalf => "bottom_half",
+            Self::Maximize => "maximize",
+            Self::Restore => "restore",
+            Self::CenterTwoThirds => "center_two_thirds",
+            Self::NextMonitor => "next_monitor",
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.token() == s)
+    }
 }
 
 /// Step the picker starts with when the user switches to a volume or brightness action.
@@ -186,16 +248,43 @@ pub enum ActionKind {
     Keys,
     /// Offered by the corner diagonal slot only; see [`ActionKind::WITH_RESIZE`].
     ResizeFromOpposite,
+    /// Offered by the pinch slots only; see [`ActionKind::PINCH`].
+    WindowZoom,
+    WindowArrange,
     Launch,
 }
 
 impl ActionKind {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::None,
         Self::TaskView,
         Self::ShowDesktop,
         Self::AppSwitch,
         Self::TabSwitch,
+        Self::WindowArrange,
+        Self::Find,
+        Self::MiddleClick,
+        Self::RightClick,
+        Self::RingMenu,
+        Self::VolumeStep,
+        Self::BrightnessStep,
+        Self::ToggleMute,
+        Self::DesktopPrev,
+        Self::DesktopNext,
+        Self::Keys,
+        Self::Launch,
+    ];
+
+    /// [`ALL`](Self::ALL) plus the window zoom, for the pinch slots (the window zoom follows the
+    /// fingers until they lift, like the corner resize).
+    pub const PINCH: [Self; 18] = [
+        Self::None,
+        Self::TaskView,
+        Self::ShowDesktop,
+        Self::AppSwitch,
+        Self::TabSwitch,
+        Self::WindowZoom,
+        Self::WindowArrange,
         Self::Find,
         Self::MiddleClick,
         Self::RightClick,
@@ -210,12 +299,13 @@ impl ActionKind {
     ];
 
     /// [`ALL`](Self::ALL) plus the window resize, for the diagonal slot of a pad corner.
-    pub const WITH_RESIZE: [Self; 17] = [
+    pub const WITH_RESIZE: [Self; 18] = [
         Self::None,
         Self::TaskView,
         Self::ShowDesktop,
         Self::AppSwitch,
         Self::TabSwitch,
+        Self::WindowArrange,
         Self::Find,
         Self::MiddleClick,
         Self::RightClick,
@@ -248,6 +338,8 @@ impl ActionKind {
             Self::DesktopNext => "次のデスクトップ",
             Self::Keys => "キー入力",
             Self::ResizeFromOpposite => "反対側の角でウィンドウサイズを変更",
+            Self::WindowZoom => "ウィンドウを拡大・縮小",
+            Self::WindowArrange => "ウィンドウを並べる",
             Self::Launch => "アプリを起動",
         }
     }
@@ -297,6 +389,8 @@ impl ActionKind {
             | Self::ShowDesktop
             | Self::AppSwitch
             | Self::TabSwitch
+            | Self::WindowZoom
+            | Self::WindowArrange
             | Self::ResizeFromOpposite => ActionGroup::Window,
             Self::DesktopPrev | Self::DesktopNext => ActionGroup::Desktop,
             Self::VolumeStep | Self::BrightnessStep | Self::ToggleMute => ActionGroup::Level,
@@ -334,6 +428,8 @@ impl Action {
             Self::DesktopNext => ActionKind::DesktopNext,
             Self::Keys(_) => ActionKind::Keys,
             Self::ResizeFromOpposite => ActionKind::ResizeFromOpposite,
+            Self::WindowZoom => ActionKind::WindowZoom,
+            Self::WindowArrange(_) => ActionKind::WindowArrange,
             Self::Launch { .. } => ActionKind::Launch,
         }
     }
@@ -360,6 +456,8 @@ impl Action {
             ActionKind::DesktopNext => Self::DesktopNext,
             ActionKind::Keys => Self::Keys(String::new()),
             ActionKind::ResizeFromOpposite => Self::ResizeFromOpposite,
+            ActionKind::WindowZoom => Self::WindowZoom,
+            ActionKind::WindowArrange => Self::WindowArrange(WindowPreset::default()),
             ActionKind::Launch => Self::Launch {
                 path: String::new(),
                 args: String::new(),
@@ -374,6 +472,7 @@ impl Action {
             Self::VolumeStep(n) => format!("音量 {n:+}"),
             Self::BrightnessStep(n) => format!("明るさ {n:+}"),
             Self::Launch { path, .. } if !path.trim().is_empty() => file_stem_of(path),
+            Self::WindowArrange(p) => format!("ウィンドウを{}", p.label()),
             other => other.kind().label().to_owned(),
         }
     }
@@ -396,6 +495,8 @@ impl Action {
             Self::DesktopNext => "desktop_next".into(),
             Self::Keys(k) => format!("keys:{k}"),
             Self::ResizeFromOpposite => "resize_opposite".into(),
+            Self::WindowZoom => "window_zoom".into(),
+            Self::WindowArrange(p) => format!("window_arrange:{}", p.token()),
             // `|` splits the path from the arguments. A Windows path cannot hold one, so a typed
             // `|` is dropped from the path here instead of being read back as the separator.
             Self::Launch { path, args } => {
@@ -431,10 +532,16 @@ impl Action {
             "desktop_prev" => Self::DesktopPrev,
             "desktop_next" => Self::DesktopNext,
             "resize_opposite" => Self::ResizeFromOpposite,
+            "window_zoom" => Self::WindowZoom,
             "volume" | "brightness" => return TokenParse::Legacy,
             other => {
                 if let Some(k) = other.strip_prefix("keys:") {
                     Self::Keys(k.to_owned())
+                } else if let Some(p) = other.strip_prefix("window_arrange:") {
+                    match WindowPreset::from_token(p) {
+                        Some(p) => Self::WindowArrange(p),
+                        None => return TokenParse::Unknown,
+                    }
                 } else if let Some(rest) = other.strip_prefix("launch:") {
                     let (path, args) = rest.split_once('|').unwrap_or((rest, ""));
                     Self::Launch {
@@ -4216,6 +4323,37 @@ enabled = true
             Action::Keys("Ctrl+Shift+T".into())
         );
         assert_eq!(Action::from_token("garbage"), Action::None);
+    }
+
+    #[test]
+    fn window_actions_round_trip_and_sit_in_the_window_group() {
+        for p in WindowPreset::ALL {
+            let a = Action::WindowArrange(p);
+            assert_eq!(Action::from_token(&a.to_token()), a, "{p:?}");
+        }
+        assert_eq!(
+            Action::from_token(&Action::WindowZoom.to_token()),
+            Action::WindowZoom
+        );
+        // A preset that does not exist is not an action.
+        assert_eq!(Action::from_token("window_arrange:nope"), Action::None);
+        assert_eq!(ActionKind::WindowZoom.group(), Some(ActionGroup::Window));
+        assert_eq!(ActionKind::WindowArrange.group(), Some(ActionGroup::Window));
+        // The zoom is offered in pinch slots only.
+        assert!(ActionKind::PINCH.contains(&ActionKind::WindowZoom));
+        assert!(!ActionKind::ALL.contains(&ActionKind::WindowZoom));
+        assert!(ActionKind::PINCH.contains(&ActionKind::WindowArrange));
+        // And through TOML, in a gesture slot.
+        let mut cfg = Config::default();
+        cfg.four.pinch_out = Action::WindowZoom;
+        cfg.four.swipe_left = Action::WindowArrange(WindowPreset::NextMonitor);
+        let text = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.four.pinch_out, Action::WindowZoom);
+        assert_eq!(
+            back.four.swipe_left,
+            Action::WindowArrange(WindowPreset::NextMonitor)
+        );
     }
 
     #[test]

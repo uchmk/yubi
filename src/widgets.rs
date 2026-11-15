@@ -9,7 +9,7 @@ use eframe::egui::{
     RichText, Role, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, text::LayoutJob,
 };
 
-use crate::config::{Action, ActionGroup, ActionKind};
+use crate::config::{Action, ActionGroup, ActionKind, WindowPreset};
 use crate::fonts;
 use crate::icons;
 use crate::theme::Tokens;
@@ -290,6 +290,21 @@ impl Group<'_> {
     ) {
         let t = self.t;
         self.row(None, title, desc, |ui| action_picker(ui, t, id, action));
+    }
+
+    /// [`Self::action_row`] limited to the action kinds in `kinds`.
+    pub fn action_row_of(
+        &mut self,
+        title: &str,
+        desc: &str,
+        id: impl Hash + Debug,
+        action: &mut Action,
+        kinds: &[ActionKind],
+    ) {
+        let t = self.t;
+        self.row(None, title, desc, |ui| {
+            action_picker_of(ui, t, id, action, kinds)
+        });
     }
 
     pub fn combo_row<T: Copy + PartialEq>(
@@ -706,21 +721,26 @@ struct PickerState {
 /// Dev screenshots: the first picker drawn opens with this filter text.
 struct Preview {
     filter: Option<String>,
+    /// Only a picker that offers this kind is opened (the pinch slots offer the window zoom).
+    needs: Option<ActionKind>,
     epoch: u32,
     claimed: Option<egui::Id>,
 }
 
 static PREVIEW: std::sync::Mutex<Preview> = std::sync::Mutex::new(Preview {
     filter: None,
+    needs: None,
     epoch: 0,
     claimed: None,
 });
 
-/// Open the first picker drawn with `filter` typed in (`None`: no preview). For dev screenshots.
-pub fn set_picker_preview(filter: Option<&str>) {
+/// Open the first picker drawn (that offers `needs`, if given) with `filter` typed in (`None`: no
+/// preview). For dev screenshots.
+pub fn set_picker_preview(filter: Option<&str>, needs: Option<ActionKind>) {
     let mut p = PREVIEW.lock().unwrap_or_else(|e| e.into_inner());
-    if p.filter.as_deref() != filter {
+    if p.filter.as_deref() != filter || p.needs != needs {
         p.filter = filter.map(str::to_owned);
+        p.needs = needs;
         p.epoch += 1;
         p.claimed = None;
     }
@@ -772,7 +792,7 @@ pub fn kind_picker(
     if !egui::ComboBox::is_open(&ctx, button_id) {
         ctx.data_mut(|d| d.remove::<PickerState>(state_id));
     }
-    preview_open(&ctx, button_id, popup_id, state_id);
+    preview_open(&ctx, button_id, popup_id, state_id, kinds);
 
     let mut picked = None;
     // The popup scrolls the list itself (under the filter box), so its own limit stays out of the way.
@@ -800,11 +820,20 @@ pub fn kind_picker(
 }
 
 /// Dev screenshots: the claimed picker opens (once per preview) with the preview's filter.
-fn preview_open(ctx: &egui::Context, button_id: egui::Id, popup_id: egui::Id, state_id: egui::Id) {
+fn preview_open(
+    ctx: &egui::Context,
+    button_id: egui::Id,
+    popup_id: egui::Id,
+    state_id: egui::Id,
+    kinds: &[ActionKind],
+) {
     let mut p = PREVIEW.lock().unwrap_or_else(|e| e.into_inner());
     let Some(filter) = p.filter.clone() else {
         return;
     };
+    if p.needs.is_some_and(|k| !kinds.contains(&k)) {
+        return;
+    }
     match p.claimed {
         None => p.claimed = Some(button_id),
         Some(c) if c != button_id => return,
@@ -1058,11 +1087,11 @@ pub fn action_picker_head_with(
     if let Some(kind) = kind_combo(ui, t, id, action.kind(), kinds, label) {
         action.set_kind(kind);
     }
-    action_fields(ui, t, action);
+    action_fields(ui, t, id, action);
 }
 
 /// The extra field an action needs (keys, or a step), if any.
-pub fn action_fields(ui: &mut Ui, t: &Tokens, action: &mut Action) {
+pub fn action_fields(ui: &mut Ui, t: &Tokens, id: &(impl Hash + Debug), action: &mut Action) {
     match action {
         Action::Keys(keys) => {
             ui.add(
@@ -1072,6 +1101,17 @@ pub fn action_fields(ui: &mut Ui, t: &Tokens, action: &mut Action) {
             );
         }
         Action::VolumeStep(n) | Action::BrightnessStep(n) => step_field(ui, n),
+        Action::WindowArrange(p) => {
+            // The caller's id keeps two rows of one page apart.
+            combo(
+                ui,
+                t,
+                ("window-arrange", id),
+                p,
+                &WindowPreset::ALL,
+                WindowPreset::label,
+            );
+        }
         _ => {}
     }
 }

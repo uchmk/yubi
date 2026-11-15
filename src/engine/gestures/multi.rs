@@ -15,6 +15,17 @@ pub struct MultiHit {
     pub fingers: usize,
     pub kind: MultiKind,
     pub action: config::Action,
+    /// Mean finger distance from the centroid when the gesture was recognised (0 for a tap).
+    spread: f32,
+}
+
+/// A window zoom in progress: the pinch that started it keeps streaming its spread ratio.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ZoomRun {
+    fingers: usize,
+    /// The spread when the zoom began: the ratio is measured from here, so the window does not
+    /// jump by the part of the pinch that was needed to recognise it.
+    base_spread: f32,
 }
 
 #[derive(Debug, Default)]
@@ -22,6 +33,7 @@ pub struct MultiState {
     /// Centroid and spread when the counted fingers were first all down.
     start: Option<(Point, f32)>,
     fired: bool,
+    zoom: Option<ZoomRun>,
 }
 
 impl MultiState {
@@ -84,7 +96,31 @@ impl MultiState {
             fingers: n,
             kind,
             action,
+            spread,
         })
+    }
+
+    /// While a window zoom runs: stream the spread ratio of the fingers, and end the zoom as soon
+    /// as the finger count changes (a lifted finger ends it before the lift of the rest).
+    pub fn drive(&mut self, ctx: &Ctx, out: &mut Vec<Action>) {
+        let Some(run) = self.zoom else {
+            return;
+        };
+        if ctx.raw != run.fingers || ctx.stable != run.fingers {
+            self.zoom = None;
+            out.push(Action::WindowZoomEnd);
+            return;
+        }
+        if !ctx.from_frame || ctx.rebase {
+            return;
+        }
+        let Some(c) = ctx.centroid else {
+            return;
+        };
+        let ratio = spread_of(ctx.cur, c) / run.base_spread;
+        if ratio.is_finite() && ratio > 0.0 {
+            out.push(Action::WindowZoom { ratio });
+        }
     }
 
     /// A touch of `peak` fingers ended as a tap: the tap binding of that count, if any and if
@@ -102,6 +138,7 @@ impl MultiState {
             fingers: peak,
             kind: MultiKind::Tap,
             action,
+            spread: 0.0,
         })
     }
 
@@ -112,11 +149,27 @@ impl MultiState {
             fingers: hit.fingers,
             kind: hit.kind,
         }));
-        out.push(Action::Trigger(hit.action));
+        let pinch = matches!(hit.kind, MultiKind::PinchIn | MultiKind::PinchOut);
+        if pinch && hit.action == config::Action::WindowZoom {
+            // The window zoom is not one-shot: it follows the fingers until they lift. Without a
+            // usable spread it cannot start, and then nothing happens (it is no trigger).
+            if hit.spread >= 1.0 {
+                self.zoom = Some(ZoomRun {
+                    fingers: hit.fingers,
+                    base_spread: hit.spread,
+                });
+                out.push(Action::WindowZoomBegin);
+            }
+        } else {
+            out.push(Action::Trigger(hit.action));
+        }
     }
 
-    /// All fingers are up (or the touch was cancelled).
-    pub fn finish(&mut self) {
+    /// All fingers are up (or the touch was cancelled): a zoom in flight ends.
+    pub fn finish(&mut self, out: &mut Vec<Action>) {
+        if self.zoom.is_some() {
+            out.push(Action::WindowZoomEnd);
+        }
         *self = Self::default();
     }
 }

@@ -14,8 +14,8 @@ use crate::practice_gestures::Status;
 use crate::theme::Tokens;
 use crate::widgets::{self, group, section_header};
 
-/// Low enough that 接触 and 判定 stay in view in the default window.
-const PAD_MAX_HEIGHT: f32 = 250.0;
+/// Same size as the old 入力モニター page; 接触 and 判定 sit below and scroll into view.
+const PAD_MAX_HEIGHT: f32 = 360.0;
 
 const REFRESH: Duration = Duration::from_millis(250);
 

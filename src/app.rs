@@ -15,7 +15,7 @@ use crate::engine::Engine;
 use crate::icons;
 use crate::nav::{NAV, Node, Page};
 use crate::pages::{
-    Cmd, diagnostics::Diagnostics, features, general, general_io, home, sensitivity,
+    Cmd, apps, diagnostics::Diagnostics, features, general, general_io, home, overview, sensitivity,
 };
 use crate::resident::{self, Resident};
 use crate::search::{self, Entry};
@@ -44,6 +44,9 @@ pub struct App {
     win_page_was_open: bool,
     /// Export / import and haptic-permission state of the 全般 page.
     general_state: general_io::GeneralState,
+    /// Per-app editor and overview page state.
+    apps: apps::AppsState,
+    overview: overview::OverviewState,
     applied_theme: config::ThemeChoice,
     /// User preference for the nav pane when the window is wide.
     nav_collapsed: bool,
@@ -93,6 +96,8 @@ impl App {
             win_message: None,
             win_page_was_open: false,
             general_state,
+            apps: apps::AppsState::default(),
+            overview: overview::OverviewState::default(),
             nav_collapsed: false,
             nav_expanded_narrow: false,
             group_open: [true; NAV.len()],
@@ -242,6 +247,10 @@ impl App {
     fn run(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Goto(p) => self.page = p,
+            Cmd::OpenProfile(i) => {
+                self.apps.selected = Some(i);
+                self.page = Page::Profiles;
+            }
             Cmd::DisableWindowsGestures => {
                 let r = win_gestures::disable(&self.backup_path());
                 self.report("無効に", r);
@@ -438,7 +447,10 @@ impl App {
             Page::Edge => features::edge(ui, t, cfg),
             Page::Window => return features::window(ui, t, cfg, &self.win_values),
             Page::Ring => features::ring(ui, t, cfg),
-            Page::Profiles => features::profiles(ui, t, cfg),
+            Page::Profiles => return apps::page(ui, t, cfg, &mut self.apps),
+            Page::Overview => {
+                return overview::page(ui, t, cfg, &self.win_values, &mut self.overview);
+            }
             Page::Sensitivity => sensitivity::sensitivity(ui, t, cfg),
             Page::Haptic => features::haptic(ui, t, cfg),
             Page::Monitor => self.diagnostics.monitor(ui, t),
@@ -479,6 +491,10 @@ impl eframe::App for App {
         if let Some(shot) = self.devshot.as_ref().and_then(|d| d.current()) {
             // Keep `saved` in step so the capture run never writes the config file.
             self.page = shot.page;
+            shot.fixture.apply(&mut self.cfg);
+            if shot.page == Page::Profiles {
+                self.apps.selected = shot.profile;
+            }
             self.cfg.general.theme = shot.theme;
             self.saved.general.theme = shot.theme;
         }
@@ -491,7 +507,10 @@ impl eframe::App for App {
         let ctx_now = ui.ctx().clone();
         self.sync_engine(&ctx_now);
         // Pages that show the Windows-gesture state (or warn about it) re-read it when opened.
-        let general_open = matches!(self.page, Page::General | Page::Drag | Page::Window);
+        let general_open = matches!(
+            self.page,
+            Page::General | Page::Drag | Page::Window | Page::Overview
+        );
         if general_open && !self.win_page_was_open {
             self.refresh_win_values();
         }

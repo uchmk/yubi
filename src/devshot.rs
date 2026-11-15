@@ -8,7 +8,7 @@ use std::{fs, io};
 
 use eframe::egui::{self, ColorImage, Vec2, ViewportCommand};
 
-use crate::config::ThemeChoice;
+use crate::config::{Action, Config, EdgeTarget, Profile, ThemeChoice};
 use crate::nav::Page;
 
 /// Frames to wait after changing page/theme/size before capturing (layout and animations settle).
@@ -17,11 +17,82 @@ const SETTLE_FRAMES: u32 = 20;
 const WIDE: Vec2 = Vec2::new(1200.0, 800.0);
 const NARROW: Vec2 = Vec2::new(700.0, 520.0);
 
+/// The per-app data a shot runs with, so the pages show the same thing on every machine.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Fixture {
+    /// Whatever is on disk.
+    Keep,
+    /// No profiles at all.
+    NoProfiles,
+    /// A few profiles with overrides, a stopped app and long names; some conflicting settings.
+    DemoProfiles,
+}
+
+impl Fixture {
+    /// Set the fixture's data (idempotent: called every frame).
+    pub fn apply(self, cfg: &mut Config) {
+        match self {
+            Self::Keep => {}
+            Self::NoProfiles => cfg.profiles.clear(),
+            Self::DemoProfiles => {
+                cfg.gestures_enabled = true;
+                cfg.four.enabled = true;
+                cfg.four.swipe_left = Action::DesktopNext;
+                cfg.four.swipe_right = Action::DesktopPrev;
+                cfg.four.tap = Action::MiddleClick;
+                cfg.five.enabled = false;
+                cfg.five.pinch_in = Action::ShowDesktop;
+                cfg.drag.enabled = true;
+                cfg.drag.fingers = 4;
+                cfg.edge.enabled = true;
+                cfg.edge.left = EdgeTarget::Volume;
+                let mut code = Profile {
+                    exe_name: "code.exe".into(),
+                    display_name: "Visual Studio Code".into(),
+                    enabled: true,
+                    ..Profile::default()
+                };
+                code.overrides
+                    .insert("swipe.4.left".into(), Action::Keys("Ctrl+PageUp".into()));
+                code.overrides
+                    .insert("swipe.4.right".into(), Action::Keys("Ctrl+PageDown".into()));
+                code.overrides.insert("tap.4".into(), Action::None);
+                code.edge_overrides
+                    .insert("edge.left".into(), EdgeTarget::Scroll);
+                let mut browser = Profile {
+                    exe_name: "chrome.exe".into(),
+                    enabled: true,
+                    ..Profile::default()
+                };
+                browser
+                    .overrides
+                    .insert("swipe.4.left".into(), Action::TabSwitch);
+                let long = Profile {
+                    exe_name: "very-long-launcher-executable-name-for-the-layout-check.exe".into(),
+                    display_name:
+                        "とても長い名前のゲームランチャー（レイアウト確認用の日本語表示名）".into(),
+                    enabled: false,
+                    ..Profile::default()
+                };
+                let quiet = Profile {
+                    exe_name: "notepad.exe".into(),
+                    enabled: true,
+                    ..Profile::default()
+                };
+                cfg.profiles = vec![code, browser, long, quiet];
+            }
+        }
+    }
+}
+
 pub struct Shot {
     pub name: String,
     pub page: Page,
     pub theme: ThemeChoice,
     pub size: Vec2,
+    pub fixture: Fixture,
+    /// The profile whose editor is open (per-app page only).
+    pub profile: Option<usize>,
 }
 
 pub struct DevShot {
@@ -64,6 +135,8 @@ impl DevShot {
                 page,
                 theme: ThemeChoice::Black,
                 size: WIDE,
+                fixture: Fixture::Keep,
+                profile: None,
             })
             .collect();
         for &(n, page) in &[("home", Page::Home), ("haptic", Page::Haptic)] {
@@ -72,6 +145,8 @@ impl DevShot {
                 page,
                 theme: ThemeChoice::Light,
                 size: WIDE,
+                fixture: Fixture::Keep,
+                profile: None,
             });
         }
         for &(n, page) in &[
@@ -90,7 +165,39 @@ impl DevShot {
                 page,
                 theme: ThemeChoice::Black,
                 size: NARROW,
+                fixture: Fixture::Keep,
+                profile: None,
             });
+        }
+        // Per-app pages with fixed data: list, empty list, two editors, the overview.
+        for (size_name, size) in [("wide", WIDE), ("narrow", NARROW)] {
+            for (n, page, fixture, profile) in [
+                ("apps-list", Page::Profiles, Fixture::DemoProfiles, None),
+                ("apps-empty", Page::Profiles, Fixture::NoProfiles, None),
+                (
+                    "apps-detail",
+                    Page::Profiles,
+                    Fixture::DemoProfiles,
+                    Some(0),
+                ),
+                (
+                    "apps-detail-long",
+                    Page::Profiles,
+                    Fixture::DemoProfiles,
+                    Some(2),
+                ),
+                ("overview", Page::Overview, Fixture::DemoProfiles, None),
+                ("overview-empty", Page::Overview, Fixture::NoProfiles, None),
+            ] {
+                shots.push(Shot {
+                    name: format!("cfg-{size_name}-{n}"),
+                    page,
+                    theme: ThemeChoice::Black,
+                    size,
+                    fixture,
+                    profile,
+                });
+            }
         }
         let _ = fs::create_dir_all(&dir);
         let (tx, rx) = channel();

@@ -1,11 +1,10 @@
-//! Feature pages (操作の割り当て, リングメニュー, アプリ設定, 押し込みと触覚): settings cards bound to the config.
+//! Feature pages (操作の割り当て, リングメニュー, 押し込みと触覚): settings cards bound to the config.
 //! The gestures themselves are not implemented yet; these pages only edit the model.
 
 use eframe::egui::{self, Align, Layout, RichText, Ui};
 
 use crate::config::{
-    Combo, Config, EdgeKind, EdgeTarget, Finger, HapticStrength, HoldCombos, HoldTrigger, Profile,
-    RingItem,
+    Combo, Config, EdgeKind, EdgeTarget, Finger, HapticStrength, HoldCombos, HoldTrigger, RingItem,
 };
 use crate::icons;
 use crate::nav::Page;
@@ -14,7 +13,7 @@ use crate::win_gestures;
 use super::Cmd;
 use crate::theme::Tokens;
 use crate::widgets::{
-    self, SliderSpec, accent_button, combo_sized, group, icon_button, section_header, toggle,
+    self, SliderSpec, accent_button, combo_sized, group, icon_button, section_header,
 };
 
 const FINGER_COMBO_W: f32 = 120.0;
@@ -515,45 +514,6 @@ pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
             items.push(RingItem::default());
         }
     });
-}
-
-pub fn profiles(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
-    widgets::page_header(ui, t, Page::Profiles.label(), Page::Profiles.subtitle());
-    let mut remove = None;
-    group(ui, t, |g| {
-        for (i, p) in cfg.profiles.iter_mut().enumerate() {
-            g.raw_row(|ui| {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icon_button(ui, t, icons::DELETE, "削除").clicked() {
-                        remove = Some(i);
-                    }
-                    toggle(ui, t, &mut p.enabled);
-                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut p.exe_name)
-                                .hint_text("実行ファイル名（例: code.exe）")
-                                .desired_width(ui.available_width()),
-                        );
-                    });
-                });
-            });
-        }
-        if cfg.profiles.is_empty() {
-            g.raw_row(|ui| {
-                ui.label(RichText::new("プロファイルはまだありません。").color(t.text_muted));
-            });
-        }
-    });
-    if let Some(i) = remove {
-        cfg.profiles.remove(i);
-    }
-    if accent_button(ui, t, "追加").clicked() {
-        cfg.profiles.push(Profile {
-            exe_name: String::new(),
-            enabled: true,
-            ..Profile::default()
-        });
-    }
 }
 
 pub fn haptic(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {

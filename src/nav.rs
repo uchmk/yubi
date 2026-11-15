@@ -18,6 +18,7 @@ pub enum Page {
     Window,
     Ring,
     Profiles,
+    Overview,
     Sensitivity,
     Haptic,
     Monitor,
@@ -34,7 +35,7 @@ pub enum Node {
     },
 }
 
-pub const NAV: [Node; 7] = [
+pub const NAV: [Node; 8] = [
     Node::Item(Page::Home),
     Node::Group {
         label: "操作の割り当て",
@@ -53,6 +54,7 @@ pub const NAV: [Node; 7] = [
     },
     Node::Item(Page::Ring),
     Node::Item(Page::Profiles),
+    Node::Item(Page::Overview),
     Node::Item(Page::Sensitivity),
     Node::Group {
         label: "デバイス",
@@ -103,7 +105,8 @@ impl Page {
             Self::Edge => "エッジスライダー",
             Self::Window => "ウィンドウ操作",
             Self::Ring => "リングメニュー",
-            Self::Profiles => "アプリ設定",
+            Self::Profiles => "アプリごとの割り当て",
+            Self::Overview => "割り当ての一覧",
             Self::Sensitivity => "感度",
             Self::Haptic => "押し込みと触覚",
             Self::Monitor => "入力モニター",
@@ -127,7 +130,10 @@ impl Page {
             Self::Edge => "端をなぞって音量や明るさを調整します。",
             Self::Window => "ウィンドウの移動・スナップ・サイズ変更を設定します。",
             Self::Ring => "指を置き続けると現れるリング状のメニューです。",
-            Self::Profiles => "アプリごとにジェスチャーの有効・無効を切り替えます。",
+            Self::Profiles => {
+                "アプリごとに、ジェスチャーの操作を差し替えたり、yubi を止めたりします。"
+            }
+            Self::Overview => "すべての割り当てと、重なって動かない設定を一度に確認します。",
             Self::Sensitivity => "ドラッグの速さ、タップやスワイプの判定の厳しさを調整します。",
             Self::Haptic => "押し込みの深さのしきい値と、触覚フィードバックの強さです。",
             Self::Monitor => "トラックパッド上の接触をリアルタイムで表示します。",
@@ -151,6 +157,7 @@ impl Page {
             Self::Window => icons::WINDOW,
             Self::Ring => icons::RING,
             Self::Profiles => icons::APPS,
+            Self::Overview => icons::LOG,
             Self::Sensitivity => icons::SENSITIVITY,
             Self::Haptic => icons::HAPTIC,
             Self::Monitor => icons::MONITOR,
@@ -195,7 +202,7 @@ mod tests {
     #[test]
     fn every_page_is_in_the_nav() {
         let pages = all_pages();
-        assert_eq!(pages.len(), 18);
+        assert_eq!(pages.len(), 19);
         assert!(pages.contains(&Page::Home) && pages.contains(&Page::General));
     }
 }

@@ -5,6 +5,7 @@ pub mod brightness;
 pub mod file_dialog;
 pub mod keys;
 pub mod process;
+pub mod running;
 pub mod volume;
 pub mod window;
 

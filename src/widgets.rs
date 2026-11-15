@@ -506,11 +506,31 @@ pub fn combo_sized<T: Copy + PartialEq>(
     label: impl Fn(T) -> &'static str,
 ) -> bool {
     let mut changed = false;
+    combo_menu(ui, t, width, id, label(*value), |ui| {
+        for &o in options {
+            if ui.selectable_label(*value == o, label(o)).clicked() {
+                *value = o;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+/// The same combo box with free-form menu contents: `selected` is the text on the closed box.
+pub fn combo_menu(
+    ui: &mut Ui,
+    t: &Tokens,
+    width: f32,
+    id: impl Hash + Debug,
+    selected: &str,
+    menu: impl FnOnce(&mut Ui),
+) {
     let size = t.fs_small;
     let stroke = t.stroke_thin;
     egui::ComboBox::from_id_salt(id)
         .width(width)
-        .selected_text(label(*value))
+        .selected_text(selected)
         .icon(move |ui, rect, visuals, _open| {
             let c = rect.center();
             let color = visuals.fg_stroke.color;
@@ -527,15 +547,7 @@ pub fn combo_sized<T: Copy + PartialEq>(
                 p.line_segment([c + Vec2::new(0.0, d / 2.0), c + Vec2::new(d, -d / 2.0)], s);
             }
         })
-        .show_ui(ui, |ui| {
-            for &o in options {
-                if ui.selectable_label(*value == o, label(o)).clicked() {
-                    *value = o;
-                    changed = true;
-                }
-            }
-        });
-    changed
+        .show_ui(ui, menu);
 }
 
 /// Action combo box plus a key-string field when "キー入力" is chosen.

@@ -974,6 +974,9 @@ pub const EDGE_KEYS: [&str; 3] = ["edge.left", "edge.right", "edge.top"];
 pub struct Profile {
     /// Executable name the profile applies to (case-insensitive, exact base name).
     pub exe_name: String,
+    /// Optional name shown in the settings UI instead of the exe name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub display_name: String,
     /// False switches yubi off for the app.
     pub enabled: bool,
     /// Per-gesture actions that replace the global ones in this app. The key is a gesture id

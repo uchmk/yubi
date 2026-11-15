@@ -21,8 +21,6 @@ pub enum Cmd {
     OpenConfigFolder,
     DisableWindowsGestures,
     RestoreWindowsGestures,
-    /// Try again to put back Windows' gestures that practice switched off.
-    RetryPracticeRestore,
     TogglePause,
     /// Open Windows' touchpad settings (`ms-settings:devices-touchpad`).
     OpenTouchpadSettings,

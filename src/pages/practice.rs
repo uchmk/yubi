@@ -10,7 +10,6 @@ use crate::engine::MonitorState;
 use crate::engine::practice::{History, Judgement, Outcome, ago_label, idle_reason};
 use crate::input::{Contact, DeviceInfo, TouchFrame};
 use crate::nav::Page;
-use crate::practice_gestures::Status;
 use crate::theme::Tokens;
 use crate::widgets::{self, group, section_header};
 
@@ -26,7 +25,7 @@ impl Diagnostics {
         ui: &mut Ui,
         t: &Tokens,
         practice_on: &mut bool,
-        win: Status<'_>,
+        win_on: bool,
     ) -> Option<Cmd> {
         widgets::page_header(ui, t, Page::Practice.label(), Page::Practice.subtitle());
         ui.ctx().request_repaint_after(REFRESH);
@@ -40,36 +39,25 @@ impl Diagnostics {
                 practice_on,
             );
         });
-        let note = match win {
-            Status::Quiet => None,
-            Status::Active => Some((
-                "練習中は Windows のタッチパッド ジェスチャーを一時的にオフにしています".to_owned(),
-                t.text_muted,
-            )),
-            Status::Failed(e) => Some((
-                format!(
-                    "Windows のジェスチャーをオフにできませんでした。練習中は Windows 側の操作が重なって動くことがあります（{e}）"
-                ),
-                t.text_muted,
-            )),
-            Status::RestoreFailed(e) => Some((
-                format!("Windows のジェスチャーを元に戻せませんでした（{e}）"),
-                t.text,
-            )),
-        };
         let mut cmd = None;
-        if let Some((text, color)) = note {
+        if win_on {
             group(ui, t, |g| {
                 g.wrapped_row(|ui| {
-                    ui.label(RichText::new(text).size(t.fs_small).color(color));
+                    ui.label(
+                        RichText::new(
+                            "Windows の3本指・4本指ジェスチャーは練習モードでも止まりません。\n\
+                             yubi と重なる場合は、Windows の設定で「何もしない」にしてください。",
+                        )
+                        .size(t.fs_small)
+                        .color(t.text_muted),
+                    );
                 });
-                if matches!(win, Status::RestoreFailed(_)) {
-                    g.wrapped_row(|ui| {
-                        if widgets::button(ui, t, "もう一度元に戻す").clicked() {
-                            cmd = Some(Cmd::RetryPracticeRestore);
-                        }
-                    });
-                }
+                g.wrapped_row(|ui| {
+                    if widgets::button(ui, t, "Windows のタッチパッド設定を開く").clicked()
+                    {
+                        cmd = Some(Cmd::OpenTouchpadSettings);
+                    }
+                });
             });
         }
 

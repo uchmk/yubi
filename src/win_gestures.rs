@@ -2,7 +2,7 @@
 //!
 //! The values live under `HKCU\Software\Microsoft\Windows\CurrentVersion\PrecisionTouchPad`.
 //! A missing value means "Windows default" (enabled). Nothing here runs by itself: the 全般 page
-//! reads the values, and only a button press backs them up (including "missing") and writes 0,
+//! and the 練習モード page (for its note) read the values, and only a button press backs them up (including "missing") and writes 0,
 //! or restores exactly what was backed up. The planning is pure so it can be tested.
 
 use std::collections::BTreeMap;
@@ -189,35 +189,6 @@ fn restore_with(
         .map_err(|e| format!("元に戻しましたが、使用済みバックアップを移せません: {e}"))
 }
 
-/// Like [`restore`] for a backup that is only ever temporary (practice): the used file is deleted
-/// instead of moved aside.
-pub fn restore_temporary(backup_path: &Path) -> Result<(), String> {
-    restore_temporary_with(backup_path, apply, |p| std::fs::remove_file(p))
-}
-
-fn restore_temporary_with(
-    backup_path: &Path,
-    write: impl FnOnce(&[RegOp]) -> io::Result<()>,
-    mut remove: impl FnMut(&Path) -> io::Result<()>,
-) -> Result<(), String> {
-    let backup = read_backup(backup_path).map_err(|e| format!("バックアップを読めません: {e}"))?;
-    write(&plan_restore(&backup)).map_err(|e| format!("レジストリに書き込めません: {e}"))?;
-    // The registry is back: from here on this counts as success. The used backup must never be
-    // applied again, so try to delete it, then to move it aside, then to empty it.
-    for _ in 0..3 {
-        if remove(backup_path).is_ok() {
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    if move_backup_aside(backup_path).is_ok() {
-        return Ok(());
-    }
-    let empty = toml::to_string_pretty(&Backup::default()).map_err(|e| e.to_string())?;
-    std::fs::write(backup_path, empty)
-        .map_err(|e| format!("元に戻しましたが、使用済みバックアップを無効にできません: {e}"))
-}
-
 fn move_backup_aside(path: &Path) -> io::Result<()> {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -255,6 +226,19 @@ pub fn pan_enabled() -> Option<bool> {
         }
     }
     crate::os::touchpad::two_finger_scroll_enabled()
+}
+
+/// The current values. `YUBI_WIN_GESTURES=on|off` overrides them for screenshots (only with
+/// `YUBI_SHOT` set, like [`pan_enabled`]).
+pub fn read_current() -> io::Result<Values> {
+    if std::env::var_os("YUBI_SHOT").is_some() {
+        match std::env::var("YUBI_WIN_GESTURES").as_deref() {
+            Ok("on") => return Ok([None; 4]),
+            Ok("off") => return Ok([Some(0); 4]),
+            _ => {}
+        }
+    }
+    read_values()
 }
 
 #[cfg(windows)]
@@ -482,41 +466,6 @@ mod tests {
         assert!(moved[0].starts_with("windows-gestures-backup.restored-"));
         // The next disable takes a fresh backup.
         assert!(write_backup_new(&path, &backup_of(&[Some(0); 4])).unwrap());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn restore_temporary_deletes_the_backup_and_keeps_it_on_failure() {
-        let dir = temp_dir("restore-temp");
-        let path = dir.join("practice.toml");
-        write_backup_new(&path, &backup_of(&[Some(1), None, Some(0), Some(1)])).unwrap();
-        let rm = |p: &Path| std::fs::remove_file(p);
-        assert!(restore_temporary_with(&path, |_| Err(io::Error::other("x")), rm).is_err());
-        assert!(path.exists());
-        let mut ops = Vec::new();
-        restore_temporary_with(
-            &path,
-            |o| {
-                ops = o.to_vec();
-                Ok(())
-            },
-            rm,
-        )
-        .unwrap();
-        assert_eq!(ops.len(), 4);
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn restore_temporary_is_a_success_even_when_deleting_fails() {
-        let dir = temp_dir("restore-temp-rm");
-        let path = dir.join("practice.toml");
-        write_backup_new(&path, &backup_of(&[Some(1); 4])).unwrap();
-        let r = restore_temporary_with(&path, |_| Ok(()), |_| Err(io::Error::other("locked")));
-        assert!(r.is_ok());
-        // Never left in place to be applied again.
-        assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -475,9 +475,6 @@ fn setting_label(path: &str) -> String {
         | "corner.enabled"
         | "edge.enabled"
         | "ring.enabled" => "機能を有効にする",
-        "drag.three" => "3本指ドラッグ",
-        "drag.four" => "4本指ドラッグ",
-        "drag.five" => "5本指ドラッグ",
         "drag.lift_timeout_ms" => "指を離してから終了するまでの時間",
         "drag.keep_drag_on_release" => "離したあともドラッグを続ける",
         "five.tap" => "タップ",
@@ -511,6 +508,9 @@ fn setting_label(path: &str) -> String {
         "ring.items" => "リングメニューの項目",
         "profiles" => "アプリ設定",
         other => {
+            if let Some(l) = drag_row_label(other) {
+                return l;
+            }
             return other
                 .strip_prefix("sensitivity.")
                 .and_then(config::Sensitivity::label_of)
@@ -518,6 +518,25 @@ fn setting_label(path: &str) -> String {
         }
     }
     .to_string()
+}
+
+/// `drag.three.enabled` and the like: the row's label from the diff's leaf path.
+fn drag_row_label(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("drag.")?;
+    let (row, leaf) = rest.split_once('.')?;
+    let n = match row {
+        "three" => 3,
+        "four" => 4,
+        "five" => 5,
+        _ => return None,
+    };
+    let what = match leaf {
+        "enabled" => "有効",
+        "start" => "開始方法",
+        "action" => "実行する動作",
+        _ => return None,
+    };
+    Some(format!("{n}本指ドラッグ: {what}"))
 }
 
 const DETAILS_PER_SECTION: usize = 3;
@@ -609,6 +628,29 @@ mod tests {
         assert!(names.contains(&"ドラッグ") && names.contains(&"5本指ジェスチャー"));
         assert_eq!(d.len(), 2, "{d:?}");
         assert!(d[0].details[0].contains('→'));
+    }
+
+    #[test]
+    fn a_real_drag_diff_shows_japanese_labels() {
+        let a = Config::default();
+        let mut b = a.clone();
+        b.drag.three.enabled = !a.drag.three.enabled;
+        b.drag.four.start = crate::config::DragStart::TapThenMove;
+        b.drag.five.action = crate::config::DragAction::WindowResize;
+        let d = diff(&a, &b);
+        let text = d
+            .iter()
+            .flat_map(|c| c.details.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(text.contains("3本指ドラッグ: 有効"), "{text}");
+        assert!(text.contains("4本指ドラッグ: 開始方法"), "{text}");
+        assert!(text.contains("5本指ドラッグ: 実行する動作"), "{text}");
+        assert!(!text.contains("drag."), "{text}");
     }
 
     #[test]
@@ -768,7 +810,7 @@ exe_name = \"A.EXE\"
 
     #[test]
     fn labels_are_japanese() {
-        assert_eq!(setting_label("drag.four"), "4本指ドラッグ");
+        assert_eq!(setting_label("drag.four.start"), "4本指ドラッグ: 開始方法");
         assert_eq!(setting_label("x.unknown"), "x.unknown");
         assert_eq!(setting_label("sensitivity.hold_ms"), "長押しの時間");
         assert_eq!(setting_label("sensitivity.nope"), "sensitivity.nope");

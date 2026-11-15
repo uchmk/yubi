@@ -225,7 +225,7 @@ pub fn sensitivity(
                     g,
                     t,
                     "ウィンドウ移動の速さ",
-                    "3本指でウィンドウを動かすときの速さです。",
+                    "ドラッグでウィンドウを移動するときの速さです。",
                     spec(r, 1.0, 0, " px/mm"),
                     &mut s.window_gain,
                     d.window_gain,

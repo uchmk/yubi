@@ -331,12 +331,14 @@ mod tests {
     #[test]
     fn out_of_range_warns_and_unknown_keys_pass() {
         let got = parse_import(
-            "future_key = 1\n[long_hold]\nhold_ms = 60000\nfingers = 0\n[drag]\nfingers = 9\n",
+            "future_key = 1\n[long_hold]\nhold_ms = 60000\nfingers = 0\n[drag]\nlift_timeout_ms = 5000\n",
         )
         .unwrap();
         assert_eq!(got.config.sensitivity.hold_ms, 1500);
-        assert_eq!(got.warnings.len(), 2, "{:?}", got.warnings);
+        assert_eq!(got.warnings.len(), 3, "{:?}", got.warnings);
         assert!(got.warnings.iter().any(|m| m.contains("60000")));
+        assert!(got.warnings.iter().any(|m| m.contains("5000")));
+        assert_eq!(got.config.drag.lift_timeout_ms, 1000);
     }
 
     #[test]

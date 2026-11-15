@@ -1594,3 +1594,35 @@ fn only_a_touch_move_row_shadows_the_swipes() {
     assert!(gt.touch_rows().any(|(n, _)| n == 4));
     assert!(!g.touch_rows().any(|(n, _)| n == 4));
 }
+
+#[test]
+fn a_tap_survives_a_different_count_touch_in_the_gap() {
+    use config::{DragAction::WindowMove, DragStart::TapThenMove};
+    let mut cfg = rows_cfg(4, TapThenMove, WindowMove);
+    cfg.four.tap = config::Action::Find;
+    let mut s = Seq::default();
+    s.still(&row(4, 60.0, 50.0), 70);
+    s.lift(100);
+    // A one-finger touch that lifts again: the four-finger tap is not lost.
+    s.still(&row(1, 60.0, 50.0), 60);
+    s.lift(0);
+    let out = s.run(&cfg);
+    assert_eq!(triggers(&out), vec![config::Action::Find]);
+    assert_eq!(count(&out, |a| matches!(a, Action::WindowMoveBegin)), 0);
+}
+
+#[test]
+fn a_tap_survives_a_same_count_touch_that_never_moves() {
+    use config::{DragAction::WindowMove, DragStart::TapThenMove};
+    let mut cfg = rows_cfg(4, TapThenMove, WindowMove);
+    cfg.four.tap = config::Action::Find;
+    let mut s = Seq::default();
+    let p = row(4, 60.0, 50.0);
+    s.still(&p, 70);
+    s.lift(100);
+    s.still(&p, 500);
+    s.lift(0);
+    let out = s.run(&cfg);
+    assert_eq!(triggers(&out), vec![config::Action::Find]);
+    assert_eq!(count(&out, |a| matches!(a, Action::WindowMoveBegin)), 0);
+}

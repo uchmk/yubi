@@ -792,8 +792,15 @@ mod tests {
 
 /// Seconds one drag demonstration lasts.
 pub const DRAG_CYCLE: f32 = 5.2;
-/// Time of the still frame shown when animation is off: mid-move.
-pub const DRAG_KEY_T: f32 = 2.2;
+/// When the moving fingers land (a tap-then-move lands soon after the tap, within the 0.3 s gap).
+fn drag_touch_t(tap_first: bool) -> f32 {
+    if tap_first { 0.8 } else { 0.4 }
+}
+
+/// Time of the still frame shown when animation is off: mid-move, for either start.
+pub fn drag_key_t(tap_first: bool) -> f32 {
+    drag_touch_t(tap_first) + 1.4
+}
 
 /// What the drag scene shows at one moment.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -811,9 +818,10 @@ pub struct DragFrame {
 pub fn drag_frame(time: f32, tap_first: bool) -> DragFrame {
     let l = time.max(0.0).rem_euclid(DRAG_CYCLE);
     // The tap comes first and the real touch a little later.
-    let t0 = if tap_first { 1.5 } else { 0.4 };
+    let t0 = drag_touch_t(tap_first);
     let tap = if tap_first {
-        ramp(l, 0.2, 0.4) * (1.0 - ramp(l, 0.6, 0.9))
+        // The tap is gone about 0.3 s before the fingers land again.
+        ramp(l, 0.1, 0.25) * (1.0 - ramp(l, 0.35, 0.5))
     } else {
         0.0
     };
@@ -835,7 +843,7 @@ pub fn drag_frame(time: f32, tap_first: bool) -> DragFrame {
 }
 
 pub fn drag_scene_width(avail: f32) -> f32 {
-    avail.clamp(260.0, 460.0)
+    avail.clamp(260.0, 460.0).min(avail)
 }
 
 /// The pad with the fingers moving, and a small screen showing what the row does with it.
@@ -855,7 +863,7 @@ pub fn drag_scene(
     let h = pad_size.y.max(104.0);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
     let p = ui.painter_at(rect.expand(2.0));
-    let frame = drag_frame(anim.at(DRAG_KEY_T), tap_first);
+    let frame = drag_frame(anim.at(drag_key_t(tap_first)), tap_first);
 
     let pad = Rect::from_min_size(
         Pos2::new(rect.left(), rect.center().y - pad_size.y / 2.0),

@@ -2661,13 +2661,17 @@ fn migrate_drag_rows(root: &mut toml::Table, notes: &mut Vec<String>) {
         }
     }
     if let Some(w) = root.get_mut("window").and_then(Value::as_table_mut) {
+        let old_format = w.contains_key("enabled") || w.contains_key("move_with_three_finger");
         let enabled = matches!(w.remove("enabled"), Some(Value::Boolean(true)));
         let moves = !matches!(
             w.remove("move_with_three_finger"),
             Some(Value::Boolean(false))
         );
-        if !enabled {
-            // The corner resize used to run only with the window switch on.
+        if old_format && !w.contains_key("corner_resize") {
+            // The corner resize used to default on, but ran only with the window switch on.
+            // A new-format file is left alone: its corner_resize is the user's own value.
+            w.insert("corner_resize".into(), Value::Boolean(enabled));
+        } else if old_format && !enabled {
             w.insert("corner_resize".into(), Value::Boolean(false));
         }
         if enabled && moves {
@@ -4069,6 +4073,31 @@ enabled = false
 ",
         );
         assert!(!off.config.drag.any() && !off.config.window.corner_resize);
+        // A new-format file keeps its own corner_resize.
+        let new_fmt = migrated(
+            "schema_version = 2
+[window]
+corner_resize = true
+",
+        );
+        assert!(new_fmt.config.window.corner_resize);
+        // Old file: window on, no corner_resize key: the old default (on) is kept.
+        let old_on = migrated(
+            "schema_version = 2
+[window]
+enabled = true
+",
+        );
+        assert!(old_on.config.window.corner_resize);
+        // Old file with the window off: the corner resize was off too, even with the key.
+        let old_off = migrated(
+            "schema_version = 2
+[window]
+enabled = false
+corner_resize = true
+",
+        );
+        assert!(!old_off.config.window.corner_resize);
         let no_move = migrated(
             "schema_version = 2
 [window]

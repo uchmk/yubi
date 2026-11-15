@@ -883,6 +883,9 @@ impl DevShot {
             // One shot per page and tab at `size` (logical points; the scale is YUBI_SHOT_PPP),
             // dark. The fit log (fit.txt) says whether each page needed scrolling.
             let tag = format!("{}x{}", size.x, size.y);
+            // A fresh log per run (the shots themselves are overwritten).
+            let _ = fs::create_dir_all(&dir);
+            let _ = fs::remove_file(dir.join("fit.txt"));
             let mut list = Vec::new();
             let mut add = |name: String, page: Page, fixture: Fixture| {
                 list.push(Shot::plain(

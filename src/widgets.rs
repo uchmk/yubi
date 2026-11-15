@@ -62,19 +62,34 @@ pub fn sections2(
     t: &Tokens,
     split: usize,
     total: usize,
+    f: impl FnMut(&mut Ui, usize),
+) {
+    let left: Vec<usize> = (0..split).collect();
+    let right: Vec<usize> = (split..total).collect();
+    let narrow: Vec<usize> = (0..total).collect();
+    sections2_ordered(ui, t, &left, &right, &narrow, f);
+}
+
+/// Like `sections2`, with the sections of each column and their order in a narrow window given.
+pub fn sections2_ordered(
+    ui: &mut Ui,
+    t: &Tokens,
+    left: &[usize],
+    right: &[usize],
+    narrow: &[usize],
     mut f: impl FnMut(&mut Ui, usize),
 ) {
     if ui.available_width() >= t.wide_min {
         ui.columns(2, |cols| {
-            for i in 0..split {
+            for &i in left {
                 f(&mut cols[0], i);
             }
-            for i in split..total {
+            for &i in right {
                 f(&mut cols[1], i);
             }
         });
     } else {
-        for i in 0..total {
+        for &i in narrow {
             f(ui, i);
         }
     }

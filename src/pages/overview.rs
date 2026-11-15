@@ -1038,7 +1038,35 @@ mod tests {
         assert!(
             t.conflicts
                 .iter()
-                .any(|c| c.kind == ConflictKind::WindowsWins && c.rows.is_empty())
+                .any(|c| c.kind == ConflictKind::WindowsWins
+                    && c.rows.is_empty()
+                    && c.reason.contains("3本指のドラッグ"))
+        );
+    }
+
+    #[test]
+    fn a_tap_then_move_row_overlaps_the_tap_of_its_count() {
+        let mut cfg = base();
+        cfg.drag.disable_all();
+        cfg.drag.four = crate::config::DragRow {
+            enabled: true,
+            start: crate::config::DragStart::TapThenMove,
+            action: crate::config::DragAction::WindowMove,
+        };
+        cfg.four.tap = Action::Find;
+        let t = build(&cfg, &WIN_OFF);
+        let c = t
+            .conflicts
+            .iter()
+            .find(|c| c.kind == ConflictKind::Overlap && c.reason.contains("タップ後に動かす"))
+            .expect("tap overlap");
+        assert!(c.rows.contains(&"tap.4".to_owned()), "{c:?}");
+        assert_eq!(c.page, Page::Drag);
+        // The swipes of that count are not shadowed by a tap-then-move row.
+        assert!(
+            !t.conflicts
+                .iter()
+                .any(|c| c.reason.contains("スワイプはドラッグとして"))
         );
     }
 

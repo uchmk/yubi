@@ -1802,6 +1802,16 @@ mod tests {
         d.handle(&Action::DragBegin, &mut ex, &th, CURSOR);
         d.handle(&mv, &mut ex, &th, CURSOR);
         d.handle(&Action::WindowMoveBegin, &mut ex, &th, CURSOR);
+        d.handle(&Action::WindowResizeBegin, &mut ex, &th, CURSOR);
+        d.handle(
+            &Action::WindowResizeMove {
+                dx_mm: 1.0,
+                dy_mm: 0.0,
+            },
+            &mut ex,
+            &th,
+            CURSOR,
+        );
         let note = d.handle(
             &Action::Trigger(config::Action::ShowDesktop),
             &mut ex,

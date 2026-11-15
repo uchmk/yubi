@@ -156,7 +156,7 @@ fn drag_guide(ui: &mut Ui, t: &Tokens, cfg: &Config) {
                     t,
                     &title,
                     &[
-                        "指の動きが少し進むと始まり、指が 1 本でも離れると終了します。".to_owned(),
+                        "指の動きが少し進むと始まります。指を離すと、「保持と一時停止」で決めた時間のあとに終了します（離したあとも続ける設定なら、次のタップまで続きます）。".to_owned(),
                         "タップ後に動かす行は、タップのあと 0.3 秒以内に置き直した指だけが対象です。"
                             .to_owned(),
                     ],
@@ -241,7 +241,7 @@ pub fn drag(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win: &win_gestures::Value
             ui.add_space(t.space_sm);
             ui.label(
                 RichText::new(
-                    "テキストの選択、ファイルの移動、タイトルバーの操作に使えます。指が 1 本でも離れると終了します。Windows の同じ本数のスワイプ・タップは、あなたが「なし」にしてください（yubi は Windows の設定を変えません）。",
+                    "テキストの選択、ファイルの移動、タイトルバーの操作に使えます。指を離すと、「保持と一時停止」で決めた時間のあとに終了します。Windows の同じ本数のスワイプ・タップと重なる場合は、Windows の設定で「何もしない」にしてください。",
                 )
                 .size(t.fs_small)
                 .color(t.text_muted),
@@ -486,7 +486,7 @@ pub fn custom_press(
     let mut cmd = None;
     let measured = device_key.is_some_and(|k| cfg.calibration.contains_key(k));
     ui.add_enabled_ui(on, |ui| {
-        widgets::sections2(ui, t, 3, 7, |ui, i| {
+        widgets::sections2_ordered(ui, t, &[0, 1, 2], &[3, 4, 5, 6], &[0, 3, 1, 2, 4, 5, 6], |ui, i| {
         if i == 0 {
         section_header(ui, t, "使い方");
         group(ui, t, |g| {

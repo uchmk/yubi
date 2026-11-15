@@ -81,7 +81,7 @@ pub fn corner(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
         if view.selected.is_some_and(|(_, s)| s.trigger() != tr) {
             view.selected = None;
         }
-        crate::widgets::sections2(ui, t, 2, 3, |ui, i| match i {
+        crate::widgets::sections2_ordered(ui, t, &[0, 1], &[2], &[0, 2, 1], |ui, i| match i {
             0 => {
             section_header(ui, t, "使い方");
             group(ui, t, |g| g.wrapped_row(|ui| guide(ui, t, cfg, tr)));

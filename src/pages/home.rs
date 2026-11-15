@@ -23,11 +23,11 @@ pub fn home(ui: &mut Ui, t: &Tokens, cfg: &mut Config, connected: bool) -> Optio
     cmd = quick_access(ui, t).or(cmd);
     if ui.available_width() >= t.two_col_min {
         ui.columns(2, |cols| {
-            cmd = left_column(&mut cols[0], t, cfg).or(cmd);
+            left_column(&mut cols[0], t, cfg);
             cmd = right_column(&mut cols[1], t, cfg).or(cmd);
         });
     } else {
-        cmd = left_column(ui, t, cfg).or(cmd);
+        left_column(ui, t, cfg);
         cmd = right_column(ui, t, cfg).or(cmd);
     }
     cmd
@@ -88,8 +88,7 @@ fn quick_access(ui: &mut Ui, t: &Tokens) -> Option<Cmd> {
     cmd
 }
 
-fn left_column(ui: &mut Ui, t: &Tokens, cfg: &Config) -> Option<Cmd> {
-    let cmd = None;
+fn left_column(ui: &mut Ui, t: &Tokens, cfg: &Config) {
     section_header(ui, t, "保存された割り当て");
     group(ui, t, |g| {
         let list = cfg.assignments();
@@ -102,7 +101,6 @@ fn left_column(ui: &mut Ui, t: &Tokens, cfg: &Config) -> Option<Cmd> {
             g.list_row(trigger, action);
         }
     });
-    cmd
 }
 
 fn right_column(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {

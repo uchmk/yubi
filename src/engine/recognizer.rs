@@ -241,6 +241,8 @@ impl Recognizer {
             .pending_tap
             .as_ref()
             .is_some_and(|(due, _)| now_us >= *due)
+            // While the second touch of a tap-then-move is on, it decides what the tap does.
+            && self.session.as_ref().is_none_or(|s| s.armed.is_none())
             && let Some((_, hit)) = self.pending_tap.take()
         {
             self.multi.commit(hit, &mut out);
@@ -278,7 +280,10 @@ impl Recognizer {
             self.corner.deadline(&self.g, &self.th),
             self.clicks_off_at,
             self.drag.lift_deadline(&self.g),
-            self.pending_tap.as_ref().map(|(due, _)| *due),
+            self.pending_tap
+                .as_ref()
+                .filter(|_| self.session.as_ref().is_none_or(|s| s.armed.is_none()))
+                .map(|(due, _)| *due),
             self.ring.deadline(&self.g),
             self.session
                 .as_ref()
@@ -321,12 +326,16 @@ impl Recognizer {
             })
             .map(|(_, n)| n);
         self.window.tap = None;
-        if let Some((_, hit)) = self.pending_tap.take() {
-            if armed == Some(hit.fingers) {
-                // The tap was the first half of a tap-then-move: its own action stays quiet.
-            } else {
-                self.multi.commit(hit, out);
-            }
+        // The tap of a tap-then-move row waits (even past the gap while the second touch is
+        // on) until that touch really starts the move, which drops it, or ends without, which
+        // commits it. Any other pending tap fires now.
+        if self
+            .pending_tap
+            .as_ref()
+            .is_some_and(|(_, hit)| armed != Some(hit.fingers))
+            && let Some((_, hit)) = self.pending_tap.take()
+        {
+            self.multi.commit(hit, out);
         }
         if let Some(n) = armed
             && let Some(m) = n.checked_sub(3).and_then(|i| self.g.multi.get_mut(i))
@@ -365,6 +374,9 @@ impl Recognizer {
 
     /// Close what is in flight, drop the session and ignore the fingers until all are up.
     fn cancel_touch(&mut self, out: &mut Vec<Action>) {
+        if let Some((_, hit)) = self.pending_tap.take() {
+            self.multi.commit(hit, out);
+        }
         self.window.cancel(out);
         self.drag.cancel(out);
         self.multi.finish();
@@ -434,7 +446,19 @@ impl Recognizer {
                 }
             }
         }
+        let before = out.len();
         self.gestures(now, from_frame, out);
+        // The second touch really started the drag or window move: the tap was its first half.
+        if self.pending_tap.is_some()
+            && out[before..].iter().any(|a| {
+                matches!(
+                    a,
+                    Action::DragBegin | Action::WindowMoveBegin | Action::WindowResizeBegin
+                )
+            })
+        {
+            self.pending_tap = None;
+        }
     }
 
     fn end_session(&mut self, t: u64, out: &mut Vec<Action>) {
@@ -456,6 +480,10 @@ impl Recognizer {
                 fingers: s.peak,
                 duration_us: duration,
             }));
+        }
+        // A tap that waited for a move that never began fires now.
+        if let Some((_, hit)) = self.pending_tap.take() {
+            self.multi.commit(hit, out);
         }
         self.finish_gestures(&s, is_tap, t, out);
         self.glide_exe = self.scroll.glide_deadline().and(touch_exe);

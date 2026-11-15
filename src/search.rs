@@ -14,7 +14,27 @@ const fn e(page: Page, title: &'static str, desc: &'static str) -> Entry {
 
 /// Searchable rows inside pages. The pages themselves are added by `index`.
 const ROWS: &[Entry] = &[
-    e(Page::Drag, "指の本数", "ドラッグに使う指の本数"),
+    e(
+        Page::Drag,
+        "3本指ドラッグ",
+        "3本指で動かしてドラッグやウィンドウ操作",
+    ),
+    e(
+        Page::Drag,
+        "4本指ドラッグ",
+        "4本指で動かしてドラッグやウィンドウ操作",
+    ),
+    e(
+        Page::Drag,
+        "5本指ドラッグ",
+        "5本指で動かしてドラッグやウィンドウ操作",
+    ),
+    e(Page::Drag, "開始方法", "触れて動かす、タップ後に動かす"),
+    e(
+        Page::Drag,
+        "実行する動作",
+        "通常のドラッグ、ウィンドウ移動、サイズ変更",
+    ),
     e(
         Page::Drag,
         "指を離してから終了するまでの時間",
@@ -95,17 +115,12 @@ const ROWS: &[Entry] = &[
     ),
     e(
         Page::Drag,
-        "3本指でウィンドウを移動",
-        "タップしてからスワイプ",
-    ),
-    e(
-        Page::Drag,
         "フリックでスナップ",
         "ウィンドウを画面の端に寄せる",
     ),
     e(
-        Page::Drag,
-        "コーナースワイプでサイズ変更",
+        Page::Corner,
+        "対角を固定してサイズ変更",
         "反対側の角でウィンドウサイズを変更",
     ),
     e(

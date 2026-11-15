@@ -786,3 +786,138 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Drag rows
+
+/// Seconds one drag demonstration lasts.
+pub const DRAG_CYCLE: f32 = 5.2;
+/// Time of the still frame shown when animation is off: mid-move.
+pub const DRAG_KEY_T: f32 = 2.2;
+
+/// What the drag scene shows at one moment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DragFrame {
+    /// Opacity of the fingers that move.
+    pub finger: f32,
+    /// How far the fingers have travelled (0..1).
+    pub travel: f32,
+    /// Opacity of the first tap (tap-then-move only).
+    pub tap: f32,
+    /// The step (0-based) of the three-step strip this moment belongs to.
+    pub step: usize,
+}
+
+pub fn drag_frame(time: f32, tap_first: bool) -> DragFrame {
+    let l = time.max(0.0).rem_euclid(DRAG_CYCLE);
+    // The tap comes first and the real touch a little later.
+    let t0 = if tap_first { 1.5 } else { 0.4 };
+    let tap = if tap_first {
+        ramp(l, 0.2, 0.4) * (1.0 - ramp(l, 0.6, 0.9))
+    } else {
+        0.0
+    };
+    let travel = ease(ramp(l, t0 + 0.5, t0 + 2.2));
+    let finger = ramp(l, t0, t0 + 0.3) * (1.0 - ramp(l, t0 + 2.5, t0 + 2.8));
+    let step = if l >= t0 + 2.5 {
+        2
+    } else if l >= t0 + 0.5 {
+        1
+    } else {
+        0
+    };
+    DragFrame {
+        finger,
+        travel,
+        tap,
+        step,
+    }
+}
+
+pub fn drag_scene_width(avail: f32) -> f32 {
+    avail.clamp(260.0, 460.0)
+}
+
+/// The pad with the fingers moving, and a small screen showing what the row does with it.
+/// Returns the strip step the animation is on.
+pub fn drag_scene(
+    ui: &mut Ui,
+    t: &Tokens,
+    anim: Anim,
+    fingers: usize,
+    tap_first: bool,
+    action: crate::config::DragAction,
+) -> usize {
+    use crate::config::DragAction;
+    let w = drag_scene_width(ui.available_width());
+    let pad_w = (w * 0.42).min(180.0);
+    let pad_size = Vec2::new(pad_w, pad_w * PAD_MM.1 / PAD_MM.0);
+    let h = pad_size.y.max(104.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+    let p = ui.painter_at(rect.expand(2.0));
+    let frame = drag_frame(anim.at(DRAG_KEY_T), tap_first);
+
+    let pad = Rect::from_min_size(
+        Pos2::new(rect.left(), rect.center().y - pad_size.y / 2.0),
+        pad_size,
+    );
+    pad_surface(&p, t, pad);
+    let dot = (pad.height() * 0.085).max(4.0);
+    let shift = Vec2::new(pad.width() * 0.22, pad.height() * 0.14) * (frame.travel - 0.5);
+    for hnd in hand(fingers) {
+        let base = pad.center() + Vec2::new(hnd.x * pad.width() * 0.8, hnd.y * pad.height() * 0.8);
+        if frame.tap > 0.0 {
+            p.circle_stroke(base, dot + 3.0, Stroke::new(1.5, fade(t.accent, frame.tap)));
+            finger(&p, t, base, dot, frame.tap);
+        }
+        finger(&p, t, base + shift, dot, frame.finger);
+    }
+    if frame.finger > 0.05 {
+        let a = pad.center() - shift - Vec2::new(0.0, pad.height() * 0.30);
+        let b = pad.center() + shift - Vec2::new(0.0, pad.height() * 0.30);
+        arrow(
+            &p,
+            a,
+            b,
+            Stroke::new(1.5, fade(t.accent, frame.finger * 0.8)),
+        );
+    }
+
+    // The screen on the right.
+    let sw = (rect.right() - pad.right() - 28.0).clamp(80.0, 190.0);
+    let screen = Rect::from_min_size(
+        Pos2::new(rect.right() - sw, rect.center().y - sw * 0.31),
+        Vec2::new(sw, sw * 0.62),
+    );
+    p.rect_filled(screen, 6.0, track(t));
+    p.rect_stroke(screen, 6.0, Stroke::new(1.0, t.border), StrokeKind::Inside);
+    let u = frame.travel;
+    let win = |r: Rect| {
+        p.rect_filled(r, 3.0, t.card);
+        p.rect_stroke(r, 3.0, Stroke::new(1.5, t.accent), StrokeKind::Inside);
+        let bar = Rect::from_min_size(r.min, Vec2::new(r.width(), 6.0));
+        p.rect_filled(bar, 3.0, t.accent_soft);
+    };
+    match action {
+        DragAction::Drag => {
+            // A selected item follows the pointer.
+            let at = screen.left_top() + Vec2::new(sw * (0.2 + 0.45 * u), sw * (0.12 + 0.2 * u));
+            let item = Rect::from_min_size(at, Vec2::new(sw * 0.26, 11.0));
+            p.rect_filled(item, 3.0, fade(t.accent, 0.35 + 0.4 * u));
+            p.circle_filled(item.right_bottom(), 3.0, t.text);
+        }
+        DragAction::WindowMove => {
+            let at = screen.left_top() + Vec2::new(sw * (0.08 + 0.42 * u), sw * (0.06 + 0.12 * u));
+            win(Rect::from_min_size(at, Vec2::new(sw * 0.42, sw * 0.30)));
+        }
+        DragAction::WindowResize => {
+            let at = screen.left_top() + Vec2::new(sw * 0.12, sw * 0.08);
+            let size = Vec2::new(sw * (0.30 + 0.38 * u), sw * (0.22 + 0.26 * u));
+            let r = Rect::from_min_size(at, size);
+            win(r);
+            p.circle_filled(r.right_bottom(), 3.5, t.accent);
+        }
+    }
+    anim.keep_alive(ui, rect);
+    frame.step
+}

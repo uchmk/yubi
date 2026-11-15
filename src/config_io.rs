@@ -274,7 +274,7 @@ mod tests {
             ..Config::default()
         };
         cfg.five.swipe_up = Action::Keys("Win+Tab".into());
-        cfg.drag.fingers = 4;
+        cfg.drag.only(4);
         export_to(&path, &cfg).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("# yubi settings export "));
@@ -335,8 +335,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got.config.sensitivity.hold_ms, 1500);
-        assert_eq!(got.config.drag.fingers, 5);
-        assert_eq!(got.warnings.len(), 3, "{:?}", got.warnings);
+        assert_eq!(got.warnings.len(), 2, "{:?}", got.warnings);
         assert!(got.warnings.iter().any(|m| m.contains("60000")));
     }
 

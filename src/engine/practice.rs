@@ -283,6 +283,12 @@ impl Recorder {
                 Some("ウィンドウを動かす".to_owned()),
                 mode.outcome(),
             )),
+            Action::WindowResizeBegin => Some(made(
+                "ウィンドウのサイズ変更".to_owned(),
+                "window.resize".to_owned(),
+                Some("ウィンドウのサイズを変える".to_owned()),
+                mode.outcome(),
+            )),
             _ => None,
         }
     }

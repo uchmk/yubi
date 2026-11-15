@@ -314,6 +314,14 @@ pub enum Action {
     WindowMoveEnd {
         snap: Option<SnapDir>,
     },
+    /// Resize the window under the cursor from the 3x3 cell the cursor is in (corner cell: that
+    /// corner, edge cell: that edge, centre: a move) until `WindowResizeEnd`.
+    WindowResizeBegin,
+    WindowResizeMove {
+        dx_mm: f32,
+        dy_mm: f32,
+    },
+    WindowResizeEnd,
     /// Two-finger scroll output in `WHEEL_DELTA` units (120 = one notch), at most one per input
     /// frame. Positive `v` scrolls up and positive `h` scrolls right (the Win32 wheel convention).
     Scroll {
@@ -676,11 +684,10 @@ pub const RING_MAX_ITEMS: usize = config::Ring::MAX_ITEMS;
 /// Gesture settings, read when a touch session starts (and kept while a drag outlives it).
 #[derive(Debug, Clone, Default)]
 pub struct GestureCfg {
-    pub drag: bool,
-    pub drag_n: usize,
+    /// The drag rows, indexed by `count - 3` (`None` = row off).
+    pub drag_rows: [Option<config::DragRow>; 3],
     pub lift_us: u64,
     pub keep_drag: bool,
-    pub window: bool,
     pub flick: bool,
     /// Indexed by `count - 3`. Three fingers have no multi bindings yet.
     pub multi: [Option<MultiCfg>; 3],
@@ -746,11 +753,42 @@ impl GestureCfg {
     /// but never more than the drag start distance when the drag's own finger count is also a
     /// long-hold count (ring or plain action): once a hand moves that much it is a drag, not a hold.
     pub fn hold_travel_limit(&self, th: &Thresholds) -> f32 {
-        if self.drag && self.long_hold_count(self.drag_n) {
+        if self.touch_rows().any(|(n, _)| self.long_hold_count(n)) {
             th.hold_travel_mm.min(th.drag_start_mm)
         } else {
             th.hold_travel_mm
         }
+    }
+
+    /// The drag row for `n` fingers, if it is on.
+    pub fn drag_row(&self, n: usize) -> Option<config::DragRow> {
+        n.checked_sub(3)
+            .and_then(|i| self.drag_rows.get(i))
+            .copied()
+            .flatten()
+    }
+
+    /// Whether any drag row is on.
+    pub fn any_drag(&self) -> bool {
+        self.drag_rows.iter().any(Option::is_some)
+    }
+
+    /// The rows that start by touching and moving (the others wait for a tap first).
+    pub fn touch_rows(&self) -> impl Iterator<Item = (usize, config::DragRow)> + '_ {
+        (3..=5).filter_map(|n| {
+            self.drag_row(n)
+                .filter(|r| r.start == config::DragStart::TouchMove)
+                .map(|r| (n, r))
+        })
+    }
+
+    /// The row for `n` fingers if it may start now: a touch-and-move row, or a tap-then-move row
+    /// while this session is armed by a tap of `n` fingers (`armed`).
+    pub fn startable_row(&self, n: usize, armed: Option<usize>) -> Option<config::DragRow> {
+        self.drag_row(n).filter(|r| {
+            r.start == config::DragStart::TouchMove
+                || (r.start == config::DragStart::TapThenMove && armed == Some(n))
+        })
     }
 
     /// A long hold with `n` fingers does something (opens the ring or runs an action).
@@ -762,8 +800,11 @@ impl GestureCfg {
     /// The settings for a touch session that began while `exe` was in the foreground. Every
     /// multi-finger binding goes through the resolver, so a per-app override applies.
     pub fn from_config(cfg: &Config, exe: Option<&str>) -> Self {
-        let drag_n = usize::from(cfg.drag.fingers.clamp(3, 5));
-        let swipes_free = |n: usize| !(cfg.drag.enabled && drag_n == n);
+        let swipes_free = |n: usize| {
+            !cfg.drag
+                .row(n)
+                .is_some_and(|r| r.enabled && r.start == config::DragStart::TouchMove)
+        };
         let multi = |n: usize| MultiCfg {
             tap: resolve(cfg, exe, &MultiKind::Tap.gesture_id(n)),
             swipe_left: resolve(cfg, exe, &MultiKind::SwipeLeft.gesture_id(n)),
@@ -775,11 +816,9 @@ impl GestureCfg {
             swipes: swipes_free(n),
         };
         Self {
-            drag: cfg.drag.enabled,
-            drag_n,
+            drag_rows: [3, 4, 5].map(|n| cfg.drag.row(n).copied().filter(|r| r.enabled)),
             lift_us: u64::from(cfg.drag.lift_timeout_ms) * 1000,
             keep_drag: cfg.drag.keep_drag_on_release,
-            window: cfg.window.enabled && cfg.window.move_with_three_finger,
             flick: cfg.window.flick_snap,
             multi: [
                 None,
@@ -883,8 +922,9 @@ pub struct Ctx<'a> {
     /// The set of contact IDs changed in this frame: positions must be re-based.
     pub rebase: bool,
     pub session_start_us: u64,
-    /// This touch began soon after a 3-finger tap, so it may become a window move.
-    pub win_candidate: bool,
+    /// This touch began soon after a tap of this many fingers, so a tap-then-move row of that
+    /// count may start.
+    pub armed: Option<usize>,
     /// Pad width and height in mm (`None` until the device is known).
     pub dims: Option<(f32, f32)>,
     /// Furthest any contact of this session has been from where it landed.
@@ -906,10 +946,19 @@ impl Ctx<'_> {
     /// session is within the landing grace, or already reached N): a press or hold of the lower
     /// count `n` must not fire from it.
     pub fn is_drag_transient(&self, n: usize) -> bool {
-        self.g.drag
-            && n < self.g.drag_n
-            && (self.peak >= self.g.drag_n
-                || self.now.saturating_sub(self.session_start_us) < LANDING_GRACE_US)
+        self.g.touch_rows().any(|(m, _)| {
+            n < m
+                && (self.peak >= m
+                    || self.now.saturating_sub(self.session_start_us) < LANDING_GRACE_US)
+        })
+    }
+}
+
+impl Ctx<'_> {
+    /// The touch already had as many fingers as a drag row above `n` (the drag's fingers are
+    /// landing or lifting, not a gesture of `n` fingers).
+    pub fn drag_reached_above(&self, n: usize) -> bool {
+        self.g.touch_rows().any(|(m, _)| n < m && self.peak >= m)
     }
 }
 
@@ -1056,15 +1105,14 @@ mod tests {
     #[test]
     fn drag_on_the_same_count_turns_swipes_off() {
         let mut cfg = Config::default();
-        cfg.drag.enabled = true;
-        cfg.drag.fingers = 4;
+        cfg.drag.only(4);
         let g = GestureCfg::from_config(&cfg, None);
         let four = g.multi_for(4).unwrap();
         assert!(!four.swipes);
         assert!(four.bound(MultiKind::SwipeLeft).is_none());
         // Pinch and tap stay available (here: unbound by default).
         assert!(four.bound(MultiKind::PinchIn).is_none());
-        cfg.drag.fingers = 3;
+        cfg.drag.only(3);
         let g = GestureCfg::from_config(&cfg, None);
         assert!(
             g.multi_for(4)

@@ -359,22 +359,49 @@ pub fn resize_rect(
     min: (i32, i32),
     max: (i32, i32),
 ) -> Rect {
-    let mut o = r;
-    let (left_side, top_side) = match corner {
-        Corner::TopLeft => (true, true),
-        Corner::TopRight => (false, true),
-        Corner::BottomLeft => (true, false),
-        Corner::BottomRight => (false, false),
+    let (hx, hy) = match corner {
+        Corner::TopLeft => (-1, -1),
+        Corner::TopRight => (1, -1),
+        Corner::BottomLeft => (-1, 1),
+        Corner::BottomRight => (1, 1),
     };
-    if left_side {
-        o.left = (r.left + dx).clamp(r.right - max.0, r.right - min.0);
-    } else {
-        o.right = (r.right + dx).clamp(r.left + min.0, r.left + max.0);
+    resize_rect_by(r, (hx, hy), dx, dy, min, max)
+}
+
+/// Which handle of a window a point picks on the 3x3 grid laid over it: each axis is -1 (left /
+/// top third), 0 (middle) or 1 (right / bottom third). (0, 0) is the centre: a move.
+pub fn grid_handle(r: Rect, point: (i32, i32)) -> (i8, i8) {
+    let axis = |p: i32, lo: i32, size: i32| -> i8 {
+        let size = size.max(1);
+        let third = ((p - lo) * 3 / size).clamp(0, 2);
+        (third - 1) as i8
+    };
+    (
+        axis(point.0, r.left, r.width()),
+        axis(point.1, r.top, r.height()),
+    )
+}
+
+/// Resize math for any handle: an axis of -1 moves the left / top edge, 1 the right / bottom
+/// edge and 0 leaves that axis alone. The size stays within `min`..`max`.
+pub fn resize_rect_by(
+    r: Rect,
+    handle: (i8, i8),
+    dx: i32,
+    dy: i32,
+    min: (i32, i32),
+    max: (i32, i32),
+) -> Rect {
+    let mut o = r;
+    match handle.0 {
+        -1 => o.left = (r.left + dx).clamp(r.right - max.0, r.right - min.0),
+        1 => o.right = (r.right + dx).clamp(r.left + min.0, r.left + max.0),
+        _ => {}
     }
-    if top_side {
-        o.top = (r.top + dy).clamp(r.bottom - max.1, r.bottom - min.1);
-    } else {
-        o.bottom = (r.bottom + dy).clamp(r.top + min.1, r.top + max.1);
+    match handle.1 {
+        -1 => o.top = (r.top + dy).clamp(r.bottom - max.1, r.bottom - min.1),
+        1 => o.bottom = (r.bottom + dy).clamp(r.top + min.1, r.top + max.1),
+        _ => {}
     }
     o
 }
@@ -518,6 +545,31 @@ impl WindowMover {
     /// (or a 200x150 floor).
     pub fn resize_from(&mut self, corner: Corner, dx: i32, dy: i32) {
         let next = resize_rect(self.rect, corner, dx, dy, self.min, self.max);
+        if next == self.rect {
+            return;
+        }
+        self.rect = next;
+        // SAFETY: plain call; failures are ignored.
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd.to_win(),
+                None,
+                next.left,
+                next.top,
+                next.width(),
+                next.height(),
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            );
+        }
+    }
+
+    /// Resize by a grid handle (see [`grid_handle`]); the centre handle moves the window.
+    pub fn resize_handle(&mut self, handle: (i8, i8), dx: i32, dy: i32) {
+        if handle == (0, 0) {
+            self.move_by(dx, dy);
+            return;
+        }
+        let next = resize_rect_by(self.rect, handle, dx, dy, self.min, self.max);
         if next == self.rect {
             return;
         }
@@ -718,6 +770,37 @@ mod tests {
     };
     const MIN: (i32, i32) = (200, 150);
     const MAX: (i32, i32) = (1000, 800);
+
+    #[test]
+    fn grid_picks_corner_edge_or_centre() {
+        // R is 400 x 300: thirds at x 233 / 367 and y 200 / 300.
+        assert_eq!(grid_handle(R, (110, 110)), (-1, -1));
+        assert_eq!(grid_handle(R, (490, 110)), (1, -1));
+        assert_eq!(grid_handle(R, (110, 390)), (-1, 1));
+        assert_eq!(grid_handle(R, (490, 390)), (1, 1));
+        assert_eq!(grid_handle(R, (300, 110)), (0, -1));
+        assert_eq!(grid_handle(R, (300, 390)), (0, 1));
+        assert_eq!(grid_handle(R, (110, 250)), (-1, 0));
+        assert_eq!(grid_handle(R, (490, 250)), (1, 0));
+        assert_eq!(grid_handle(R, (300, 250)), (0, 0));
+        // Outside the window picks the nearest cell.
+        assert_eq!(grid_handle(R, (-50, 9999)), (-1, 1));
+    }
+
+    #[test]
+    fn handle_resize_moves_only_its_edges() {
+        let right = resize_rect_by(R, (1, 0), 60, 99, MIN, MAX);
+        assert_eq!(right, Rect::new(100, 100, 560, 400));
+        let top = resize_rect_by(R, (0, -1), 99, -40, MIN, MAX);
+        assert_eq!(top, Rect::new(100, 60, 500, 400));
+        let corner = resize_rect_by(R, (-1, 1), -30, 20, MIN, MAX);
+        assert_eq!(corner, Rect::new(70, 100, 500, 420));
+        // The minimum holds from any handle, and the far edge stays put.
+        let small = resize_rect_by(R, (-1, -1), 1000, 1000, MIN, MAX);
+        assert_eq!((small.width(), small.height()), MIN);
+        assert_eq!((small.right, small.bottom), (500, 400));
+        assert_eq!(resize_rect_by(R, (0, 0), 10, 10, MIN, MAX), R);
+    }
 
     #[test]
     fn resize_bottom_right_grows() {

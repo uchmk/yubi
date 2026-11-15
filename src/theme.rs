@@ -54,6 +54,9 @@ pub struct Tokens {
     pub row_icon_w: f32,
     pub content_max_w: f32,
     pub two_col_min: f32,
+    /// Content width (and the window width it needs) at which dense pages split into two columns.
+    pub content_max_w_wide: f32,
+    pub wide_min: f32,
     pub tile_w: f32,
     pub tile_h: f32,
     pub control_h: f32,
@@ -182,6 +185,8 @@ impl Tokens {
             row_icon_w: 40.0,
             content_max_w: 1180.0,
             two_col_min: 900.0,
+            content_max_w_wide: 1720.0,
+            wide_min: 1300.0,
             tile_w: 112.0,
             tile_h: 84.0,
             control_h: 32.0,

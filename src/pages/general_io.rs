@@ -313,7 +313,7 @@ impl GeneralState {
             _ => return,
         }
         let mut sample = cfg.clone();
-        sample.drag.fingers = 4;
+        sample.drag.four.enabled = true;
         sample.sensitivity.hold_ms = 1500;
         sample.press.light_threshold = 0.1;
         sample.five.swipe_up = config::Action::Keys("Win+Tab".into());
@@ -467,17 +467,17 @@ fn setting_label(path: &str) -> String {
         "general.start_with_windows" => "Windows の起動時に開始",
         "general.pause_shortcut" => "一時停止のショートカット",
         "general.pause_in_fullscreen" => "全画面のアプリの間は自動で一時停止",
-        "drag.enabled"
-        | "five.enabled"
+        "five.enabled"
         | "press.enabled"
         | "long_hold.enabled"
         | "finger_hold.enabled"
         | "thumb_hold.enabled"
         | "corner.enabled"
         | "edge.enabled"
-        | "window.enabled"
         | "ring.enabled" => "機能を有効にする",
-        "drag.fingers" => "指の本数",
+        "drag.three" => "3本指ドラッグ",
+        "drag.four" => "4本指ドラッグ",
+        "drag.five" => "5本指ドラッグ",
         "drag.lift_timeout_ms" => "指を離してから終了するまでの時間",
         "drag.keep_drag_on_release" => "離したあともドラッグを続ける",
         "five.tap" => "タップ",
@@ -506,9 +506,8 @@ fn setting_label(path: &str) -> String {
         "edge.top" => "上端",
         "edge.show_level" => "レベルを画面に表示する",
         "edge.haptic_ticks" => "段階ごとに触覚で知らせる",
-        "window.move_with_three_finger" => "3本指でウィンドウを移動",
         "window.flick_snap" => "フリックでスナップ",
-        "window.corner_resize" => "コーナースワイプでサイズ変更",
+        "window.corner_resize" => "対角を固定してサイズ変更",
         "ring.items" => "リングメニューの項目",
         "profiles" => "アプリ設定",
         other => {
@@ -603,7 +602,7 @@ mod tests {
         let a = Config::default();
         assert!(diff(&a, &a).is_empty());
         let mut b = a.clone();
-        b.drag.fingers = if a.drag.fingers == 4 { 3 } else { 4 };
+        b.drag.only(4);
         b.five.swipe_up = Action::Keys("Win+Tab".into());
         let d = diff(&a, &b);
         let names: Vec<&str> = d.iter().map(|c| c.section.as_str()).collect();
@@ -638,9 +637,9 @@ mod tests {
         let dir = temp_dir("apply");
         let path = dir.join("config.toml");
         let mut live = Config::default();
-        live.drag.fingers = 4;
+        live.drag.only(4);
         let mut new = Config::default();
-        new.drag.fingers = 3;
+        new.drag.only(3);
         new.sensitivity.hold_ms = 900;
         // What is on disk is what gets backed up (and the live config is not saved first).
         config::save(&path, &live).unwrap();
@@ -649,8 +648,8 @@ mod tests {
         assert!(undo.backup.as_ref().is_some_and(|b| b.exists()));
         assert_eq!(config::load(&path), new);
         undo_apply(&mut live, &path, &undo, false).unwrap();
-        assert_eq!(live.drag.fingers, 4);
-        assert_eq!(config::load(&path).drag.fingers, 4);
+        assert!(live.drag.on(4));
+        assert!(config::load(&path).drag.on(4));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -662,8 +661,8 @@ mod tests {
         fs::write(
             &path,
             "schema_version = 2
-[drag]
-fingers = 5
+[drag.five]
+enabled = true
 [four]
 swipe_up = \"teleport\"
 [[profiles]]
@@ -676,9 +675,9 @@ exe_name = \"A.EXE\"
         assert!(config_io::import_from(&path).is_err());
         let mut live = config::load(&path);
         let undo = apply_import(&mut live, &path, &Config::default(), false).unwrap();
-        assert_eq!(live.drag.fingers, 3);
+        assert!(!live.drag.any());
         undo_apply(&mut live, &path, &undo, false).unwrap();
-        assert_eq!(live.drag.fingers, 5);
+        assert!(live.drag.on(5));
         assert_eq!(live.four.swipe_up, Action::None);
         assert_eq!(live.profiles.len(), 1);
         let _ = fs::remove_dir_all(&dir);
@@ -689,13 +688,13 @@ exe_name = \"A.EXE\"
         let dir = temp_dir("disk-backup");
         let path = dir.join("config.toml");
         let mut on_disk = Config::default();
-        on_disk.drag.fingers = 5;
+        on_disk.drag.only(5);
         config::save(&path, &on_disk).unwrap();
         let mut live = Config::default();
-        live.drag.fingers = 4;
+        live.drag.only(4);
         let undo = apply_import(&mut live, &path, &Config::default(), false).unwrap();
         let b = undo.backup.unwrap();
-        assert_eq!(config::load(&b).drag.fingers, 5);
+        assert!(config::load(&b).drag.on(5));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -737,7 +736,10 @@ exe_name = \"A.EXE\"
         let mut imp = Imported {
             config: Config {
                 drag: crate::config::Drag {
-                    fingers: 4,
+                    four: crate::config::DragRow {
+                        enabled: true,
+                        ..Default::default()
+                    },
                     ..Config::default().drag
                 },
                 ..Config::default()
@@ -756,7 +758,7 @@ exe_name = \"A.EXE\"
             live.general.start_with_windows
         );
         st.apply_preview(&mut live, &path);
-        assert_eq!(live.drag.fingers, 4);
+        assert!(live.drag.on(4));
         assert_eq!(
             live.general.start_with_windows,
             before.general.start_with_windows
@@ -766,7 +768,7 @@ exe_name = \"A.EXE\"
 
     #[test]
     fn labels_are_japanese() {
-        assert_eq!(setting_label("drag.fingers"), "指の本数");
+        assert_eq!(setting_label("drag.four"), "4本指ドラッグ");
         assert_eq!(setting_label("x.unknown"), "x.unknown");
         assert_eq!(setting_label("sensitivity.hold_ms"), "長押しの時間");
         assert_eq!(setting_label("sensitivity.nope"), "sensitivity.nope");

@@ -196,65 +196,73 @@ pub fn sensitivity(
         Page::Sensitivity.label(),
         Page::Sensitivity.subtitle(),
     );
-    section_header(ui, t, "カーソル");
-    group(ui, t, |g| cursor_group(g, t, &mut cfg.cursor, paused));
-
-    section_header(ui, t, "2 本指スクロール");
-    let cmd = scroll_group(ui, t, cfg, win_pan);
-
+    let mut cmd = None;
     let d = Sensitivity::default();
-    let s = &mut cfg.sensitivity;
-
-    section_header(ui, t, "基本");
-    group(ui, t, |g| {
-        let r = Sensitivity::DRAG_GAIN;
-        row(
-            g,
-            t,
-            "ドラッグの速さ",
-            "指を動かしたときにカーソルが進む速さです。大きいほど速く動きます。",
-            spec(r, 1.0, 0, " px/mm"),
-            &mut s.drag_gain,
-            d.drag_gain,
-        );
-        row(
-            g,
-            t,
-            "ウィンドウ移動の速さ",
-            "3本指でウィンドウを動かすときの速さです。",
-            spec(r, 1.0, 0, " px/mm"),
-            &mut s.window_gain,
-            d.window_gain,
-        );
-        row(
-            g,
-            t,
-            "スワイプの距離",
-            "スワイプと判定するために指を動かす距離です。小さいほど軽いなぞりで反応します。",
-            spec(Sensitivity::SWIPE, 1.0, 0, " mm"),
-            &mut s.swipe_mm,
-            d.swipe_mm,
-        );
-        row(
-            g,
-            t,
-            "長押しの時間",
-            "長押しと判定するまで指を置き続ける時間です。",
-            spec(Sensitivity::HOLD_MS, 50.0, 0, " ms"),
-            &mut s.hold_ms,
-            d.hold_ms,
-        );
+    widgets::sections2(ui, t, 2, 4, |ui, i| match i {
+        0 => {
+            section_header(ui, t, "カーソル");
+            group(ui, t, |g| cursor_group(g, t, &mut cfg.cursor, paused));
+        }
+        1 => {
+            section_header(ui, t, "2 本指スクロール");
+            cmd = scroll_group(ui, t, cfg, win_pan);
+        }
+        2 => {
+            let s = &mut cfg.sensitivity;
+            section_header(ui, t, "基本");
+            group(ui, t, |g| {
+                let r = Sensitivity::DRAG_GAIN;
+                row(
+                    g,
+                    t,
+                    "ドラッグの速さ",
+                    "指を動かしたときにカーソルが進む速さです。大きいほど速く動きます。",
+                    spec(r, 1.0, 0, " px/mm"),
+                    &mut s.drag_gain,
+                    d.drag_gain,
+                );
+                row(
+                    g,
+                    t,
+                    "ウィンドウ移動の速さ",
+                    "3本指でウィンドウを動かすときの速さです。",
+                    spec(r, 1.0, 0, " px/mm"),
+                    &mut s.window_gain,
+                    d.window_gain,
+                );
+                row(
+                    g,
+                    t,
+                    "スワイプの距離",
+                    "スワイプと判定するために指を動かす距離です。小さいほど軽いなぞりで反応します。",
+                    spec(Sensitivity::SWIPE, 1.0, 0, " mm"),
+                    &mut s.swipe_mm,
+                    d.swipe_mm,
+                );
+                row(
+                    g,
+                    t,
+                    "長押しの時間",
+                    "長押しと判定するまで指を置き続ける時間です。",
+                    spec(Sensitivity::HOLD_MS, 50.0, 0, " ms"),
+                    &mut s.hold_ms,
+                    d.hold_ms,
+                );
+            });
+        }
+        _ => {
+            let s = &mut cfg.sensitivity;
+            section_header(ui, t, "詳細");
+            // A shot can open the section to check its layout.
+            let open = std::env::var_os("YUBI_SENS_OPEN").is_some();
+            egui::CollapsingHeader::new("詳細な判定値を調整")
+                .id_salt("sensitivity-detail")
+                .default_open(open)
+                .show(ui, |ui| {
+                    detail(ui, t, s, &d);
+                });
+        }
     });
-
-    section_header(ui, t, "詳細");
-    // A shot can open the section to check its layout.
-    let open = std::env::var_os("YUBI_SENS_OPEN").is_some();
-    egui::CollapsingHeader::new("詳細な判定値を調整")
-        .id_salt("sensitivity-detail")
-        .default_open(open)
-        .show(ui, |ui| {
-            detail(ui, t, s, &d);
-        });
     cmd
 }
 

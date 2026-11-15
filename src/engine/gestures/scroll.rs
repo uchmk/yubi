@@ -383,7 +383,7 @@ mod tests {
             centroid: super::super::super::types::centroid(pts),
             rebase: false,
             session_start_us: 0,
-            win_candidate: false,
+            armed: None,
             dims: None,
             max_travel: 0.0,
             pressures: &[],

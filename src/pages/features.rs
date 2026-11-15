@@ -4,8 +4,8 @@
 use eframe::egui::{self, Align, Layout, RichText, Ui};
 
 use crate::config::{
-    Action, ActionKind, Combo, Config, EdgeKind, EdgeTarget, Finger, HoldCombos, HoldTrigger, Ring,
-    RingItem,
+    Action, ActionKind, Combo, Config, DragAction, DragRow, DragStart, EdgeKind, EdgeTarget,
+    Finger, HoldCombos, HoldTrigger, Ring, RingItem,
 };
 use crate::howto::{self, Mini, Side};
 use crate::howto_scenes;
@@ -35,7 +35,7 @@ pub(super) fn feature_top(ui: &mut Ui, t: &Tokens, cfg: &mut Config, page: Page)
             );
         }
     });
-    page.enabled_mut(cfg).is_some_and(|f| *f)
+    page.is_on(cfg)
 }
 
 /// A warning card with a jump to 全般 when Windows' own `fingers`-finger gestures are still on.
@@ -67,9 +67,9 @@ fn windows_conflict(
     cmd
 }
 
-/// A muted note when the drag and a long hold use the same finger count.
-fn overlap_note(ui: &mut Ui, t: &Tokens, cfg: &Config, on: bool) {
-    if let Some(o) = overview::drag_hold_overlap(cfg).filter(|_| on) {
+/// Muted notes when a drag row and a long hold use the same finger count.
+fn overlap_note(ui: &mut Ui, t: &Tokens, cfg: &Config) {
+    for o in overview::drag_hold_overlaps(cfg) {
         group(ui, t, |g| {
             g.wrapped_row(|ui| {
                 ui.label(RichText::new(o.note()).size(t.fs_small).color(t.text_muted));
@@ -78,23 +78,135 @@ fn overlap_note(ui: &mut Ui, t: &Tokens, cfg: &Config, on: bool) {
     }
 }
 
+/// The tab of the ドラッグ page (0: 開始と動作, 1: 保持と一時停止).
+fn drag_tab_id(ui: &Ui) -> egui::Id {
+    ui.make_persistent_id("yubi-drag-tab")
+}
+
+/// Development aid (devshots): pin the ドラッグ tab (`usize::MAX`: not pinned).
+static FORCE_DRAG_TAB: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+pub fn force_drag_tab(tab: usize) {
+    FORCE_DRAG_TAB.store(tab.min(1), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn start_label(s: DragStart) -> &'static str {
+    match s {
+        DragStart::TouchMove => "触れて動かす",
+        DragStart::TapThenMove => "タップ後に動かす",
+    }
+}
+
+fn action_label(a: DragAction) -> &'static str {
+    match a {
+        DragAction::Drag => "通常のドラッグ",
+        DragAction::WindowMove => "ウィンドウ移動",
+        DragAction::WindowResize => "ウィンドウのサイズ変更",
+    }
+}
+
+/// The row the how-to scene follows: the first one that is on, else the three-finger row.
+fn demo_row(cfg: &Config) -> (usize, DragRow) {
+    cfg.drag.active().next().unwrap_or((3, DragRow::default()))
+}
+
+/// The three-step strip, the animated scene and the one-line summary.
+fn drag_guide(ui: &mut Ui, t: &Tokens, cfg: &Config) {
+    let (n, row) = demo_row(cfg);
+    let tap_first = row.start == DragStart::TapThenMove;
+    let what = match row.action {
+        DragAction::Drag => "ドラッグ",
+        DragAction::WindowMove => "ウィンドウを移動",
+        DragAction::WindowResize => "ウィンドウのサイズを変更",
+    };
+    let captions: [String; 3] = if tap_first {
+        [
+            format!("{n}本指でタップ"),
+            format!("すぐ {n}本指を置いて動かして{what}"),
+            "指を離すと終了".to_owned(),
+        ]
+    } else {
+        [
+            format!("{n}本指を置く"),
+            format!("そのまま動かして{what}"),
+            "指を離すと終了".to_owned(),
+        ]
+    };
+    let title = if tap_first {
+        format!("{n}本指でタップしてから、すぐ置いて動かします")
+    } else {
+        format!("{n}本指を置いて、そのまま動かします")
+    };
+    ui.vertical(|ui| {
+        let anim = howto::Anim::new(ui);
+        let step = std::cell::Cell::new(0);
+        howto::two_col(
+            ui,
+            t,
+            howto_scenes::drag_scene_width(ui.available_width()),
+            |ui| {
+                step.set(howto_scenes::drag_scene(
+                    ui, t, anim, n, tap_first, row.action,
+                ))
+            },
+            |ui| {
+                howto::summary(
+                    ui,
+                    t,
+                    &title,
+                    &[
+                        "指の動きが少し進むと始まり、指が 1 本でも離れると終了します。".to_owned(),
+                        "タップ後に動かす行は、タップのあと 0.3 秒以内に置き直した指だけが対象です。"
+                            .to_owned(),
+                    ],
+                );
+                ui.add_space(t.space_md);
+                howto::steps(
+                    ui,
+                    t,
+                    &[
+                        Mini::Icon(icons::TOUCHPAD),
+                        Mini::Icon(icons::DRAG),
+                        Mini::Icon(icons::FOUR_FINGER),
+                    ],
+                    &[&captions[0], &captions[1], &captions[2]],
+                    anim.live().then(|| step.get()),
+                );
+            },
+        );
+    });
+}
+
 pub fn drag(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win: &win_gestures::Values) -> Option<Cmd> {
-    let on = feature_top(ui, t, cfg, Page::Drag);
-    // Window move is a three-finger gesture: one card covers it and a 3-finger drag.
-    let win_on = cfg.window.enabled && cfg.window.move_with_three_finger;
-    let mut cmd = windows_conflict(ui, t, win, cfg.drag.fingers, on);
-    let drag_covers_three = on && cfg.drag.fingers == 3;
-    overlap_note(ui, t, cfg, on);
-    ui.add_enabled_ui(on, |ui| {
-        section_header(ui, t, "動作");
+    widgets::page_header(ui, t, Page::Drag.label(), Page::Drag.subtitle());
+    let pinned = FORCE_DRAG_TAB.load(std::sync::atomic::Ordering::Relaxed);
+    let mut tab: usize = if pinned == usize::MAX {
+        ui.data(|d| d.get_temp(drag_tab_id(ui))).unwrap_or(0)
+    } else {
+        pinned
+    }
+    .min(1);
+    ui.add_space(t.space_sm);
+    let before = tab;
+    super::corner::segmented_tabs(
+        ui,
+        t,
+        "drag-tab",
+        &["開始と動作", "保持と一時停止"],
+        &mut tab,
+    );
+    if tab != before {
+        ui.data_mut(|d| d.insert_temp(drag_tab_id(ui), tab));
+        if pinned != usize::MAX {
+            FORCE_DRAG_TAB.store(tab, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let mut cmd = None;
+    if tab == 1 {
+        section_header(ui, t, "保持と一時停止");
         group(ui, t, |g| {
             let d = &mut cfg.drag;
-            g.slider_row(
-                "指の本数",
-                "ドラッグに使う指の本数です。",
-                SliderSpec::int(3, 5, 1, " 本"),
-                &mut d.fingers,
-            );
             g.slider_row(
                 "指を離してから終了するまでの時間",
                 "この時間内に指を置き直すと、ドラッグを続けられます。",
@@ -108,45 +220,91 @@ pub fn drag(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win: &win_gestures::Value
                 &mut d.keep_drag_on_release,
             );
         });
-    });
-    // Window operations live here until they fold into the per-count drag rows.
-    section_header(ui, t, "ウィンドウ操作");
-    cmd = cmd.or(windows_conflict(
-        ui,
-        t,
-        win,
-        3,
-        win_on && !drag_covers_three,
-    ));
-    group(ui, t, |g| {
-        g.toggle_row(
-            Some(icons::WINDOW),
-            "ウィンドウ操作を有効にする",
-            "オフにすると、ウィンドウの移動・スナップ・サイズ変更は動きません。",
-            &mut cfg.window.enabled,
+        ui.add_space(t.space_sm);
+        ui.label(
+            RichText::new("この設定は、有効なすべての本数のドラッグに共通です。")
+                .size(t.fs_small)
+                .color(t.text_muted),
         );
-    });
-    ui.add_enabled_ui(cfg.window.enabled, |ui| {
+        return cmd;
+    }
+    ui.add_space(t.space_sm);
+    drag_guide(ui, t, cfg);
+    section_header(ui, t, "本数ごとの設定");
+    widgets::sections2(ui, t, 2, 4, |ui, i| {
+        if i == 3 {
+            let active: Vec<usize> = cfg.drag.active().map(|(n, _)| n).collect();
+            for n in active {
+                cmd = cmd.or(windows_conflict(ui, t, win, n as u8, true));
+            }
+            overlap_note(ui, t, cfg);
+            ui.add_space(t.space_sm);
+            ui.label(
+                RichText::new(
+                    "テキストの選択、ファイルの移動、タイトルバーの操作に使えます。指が 1 本でも離れると終了します。Windows の同じ本数のスワイプ・タップは、あなたが「なし」にしてください（yubi は Windows の設定を変えません）。",
+                )
+                .size(t.fs_small)
+                .color(t.text_muted),
+            );
+            return;
+        }
+        let (n, icon) = [
+            (3usize, icons::DRAG),
+            (4, icons::FOUR_FINGER),
+            (5, icons::FIVE_FINGER),
+        ][i];
+        let flick = &mut cfg.window.flick_snap;
+        let Some(row) = cfg.drag.row_mut(n) else {
+            return;
+        };
         group(ui, t, |g| {
-            let w = &mut cfg.window;
             g.toggle_row(
-                None,
-                "3本指でウィンドウを移動",
-                "3本指でタップしてからスワイプすると、ウィンドウを動かします。",
-                &mut w.move_with_three_finger,
+                Some(icon),
+                &format!("{n}本指ドラッグ"),
+                &format!("{n}本指を使う操作です。"),
+                &mut row.enabled,
             );
-            g.toggle_row(
-                None,
-                "フリックでスナップ",
-                "ウィンドウをはじくと、画面の端や角に寄せます。",
-                &mut w.flick_snap,
-            );
-            g.toggle_row(
-                None,
-                "コーナースワイプでサイズ変更",
-                "角から反対側の角へなぞって、ウィンドウサイズを変更します。",
-                &mut w.corner_resize,
-            );
+            if row.enabled {
+                g.combo_row(
+                    "開始方法",
+                    "指を置いてすぐ動かすか、先にタップするかを選びます。",
+                    ("drag-start", n),
+                    &mut row.start,
+                    &[DragStart::TouchMove, DragStart::TapThenMove],
+                    start_label,
+                );
+                g.combo_row(
+                    "実行する動作",
+                    "動かしている間に行うことです。",
+                    ("drag-action", n),
+                    &mut row.action,
+                    &[
+                        DragAction::Drag,
+                        DragAction::WindowMove,
+                        DragAction::WindowResize,
+                    ],
+                    action_label,
+                );
+                if row.action == DragAction::WindowMove {
+                    g.toggle_row(
+                        None,
+                        "フリックでスナップ",
+                        "ウィンドウをはじいて離すと、画面の端や角に寄せます。",
+                        flick,
+                    );
+                }
+                if row.action == DragAction::WindowResize {
+                    g.wrapped_row(|ui| {
+                        ui.label(
+                            RichText::new(
+                                "触れた位置で決まります。ウィンドウを 3x3 に分けて、角のマスはその角を、辺のマスはその辺を、中央は移動です。",
+                            )
+                            .size(t.fs_small)
+                            .color(t.text_muted),
+                        );
+                    });
+                }
+            }
         });
     });
     cmd
@@ -239,7 +397,12 @@ pub fn gesture(
     });
     let on = *flag;
     let mut cmd = windows_conflict(ui, t, win, n, on);
-    if on && cfg.drag.enabled && cfg.drag.fingers == n {
+    if on
+        && cfg
+            .drag
+            .row(n as usize)
+            .is_some_and(|r| r.enabled && r.start == DragStart::TouchMove)
+    {
         group(ui, t, |g| {
             g.wrapped_row(|ui| {
                 ui.label(
@@ -323,10 +486,15 @@ pub fn custom_press(
     let mut cmd = None;
     let measured = device_key.is_some_and(|k| cfg.calibration.contains_key(k));
     ui.add_enabled_ui(on, |ui| {
+        widgets::sections2(ui, t, 3, 7, |ui, i| {
+        if i == 0 {
         section_header(ui, t, "使い方");
         group(ui, t, |g| {
             g.wrapped_row(|ui| press_guide(ui, t, cfg));
         });
+        return;
+        }
+        if i == 3 {
         group(ui, t, |g| {
             g.wrapped_row(|ui| {
                 ui.label(
@@ -352,7 +520,10 @@ pub fn custom_press(
                 }
             });
         });
-        for n in 1..=5usize {
+        return;
+        }
+        {
+            let n = if i < 3 { i } else { i - 1 };
             section_header(ui, t, &format!("{n} 本指"));
             group(ui, t, |g| {
                 let f = &mut cfg.press.fingers[n - 1];
@@ -370,6 +541,7 @@ pub fn custom_press(
                 super::press::count_thresholds(g, t, &mut cfg.press, n);
             });
         }
+        });
     });
     // Keep deep above light whichever slider was moved.
     cfg.normalize();
@@ -380,7 +552,9 @@ pub fn custom_press(
 /// what makes the ring open there; the ring page only shows which counts those are.
 pub fn long_hold(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
     let on = feature_top(ui, t, cfg, Page::LongHold);
-    overlap_note(ui, t, cfg, on);
+    if on {
+        overlap_note(ui, t, cfg);
+    };
     let mut cmd = None;
     ui.add_enabled_ui(on, |ui| {
         section_header(ui, t, "使い方");
@@ -717,7 +891,7 @@ pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
             g.wrapped_row(|ui| ring_guide(ui, t, cfg));
         });
         for n in cfg.ring_counts() {
-            if (cfg.drag.enabled && usize::from(cfg.drag.fingers) == n)
+            if cfg.drag.on(n)
                 || (cfg.four.enabled && n == 4)
                 || (cfg.five.enabled && n == 5)
             {

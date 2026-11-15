@@ -55,6 +55,31 @@ pub fn section_header(ui: &mut Ui, t: &Tokens, text: &str) {
     ui.add_space(t.space_sm);
 }
 
+/// Sections `0..total` of a dense page: in two columns (`0..split` left, the rest right) when the
+/// window is wide, otherwise one after the other. `f` draws section `i`.
+pub fn sections2(
+    ui: &mut Ui,
+    t: &Tokens,
+    split: usize,
+    total: usize,
+    mut f: impl FnMut(&mut Ui, usize),
+) {
+    if ui.available_width() >= t.wide_min {
+        ui.columns(2, |cols| {
+            for i in 0..split {
+                f(&mut cols[0], i);
+            }
+            for i in split..total {
+                f(&mut cols[1], i);
+            }
+        });
+    } else {
+        for i in 0..total {
+            f(ui, i);
+        }
+    }
+}
+
 /// A card made of joined rows separated by thin lines.
 pub struct Group<'a> {
     ui: &'a mut Ui,

@@ -381,26 +381,33 @@ impl DragHoldOverlap {
     }
 }
 
-/// Whether the 3 to 5 finger drag shares its finger count with a long hold that is switched on.
+/// The drag rows whose finger count a long hold that is switched on shares.
+pub fn drag_hold_overlaps(cfg: &Config) -> Vec<DragHoldOverlap> {
+    cfg.drag
+        .active()
+        .filter_map(|(count, _)| {
+            let n = count as u8;
+            if cfg.ring_counts().contains(&count) {
+                return Some(DragHoldOverlap {
+                    fingers: n,
+                    ring: true,
+                });
+            }
+            let a = cfg.long_hold.actions.get(count);
+            (cfg.long_hold.enabled && *a != Action::None && *a != Action::RingMenu).then_some(
+                DragHoldOverlap {
+                    fingers: n,
+                    ring: false,
+                },
+            )
+        })
+        .collect()
+}
+
+/// The first of [`drag_hold_overlaps`].
+#[cfg(test)]
 pub fn drag_hold_overlap(cfg: &Config) -> Option<DragHoldOverlap> {
-    if !cfg.drag.enabled {
-        return None;
-    }
-    let n = cfg.drag.fingers.clamp(3, 5);
-    let count = usize::from(n);
-    if cfg.ring_counts().contains(&count) {
-        return Some(DragHoldOverlap {
-            fingers: n,
-            ring: true,
-        });
-    }
-    let a = cfg.long_hold.actions.get(count);
-    (cfg.long_hold.enabled && *a != Action::None && *a != Action::RingMenu).then_some(
-        DragHoldOverlap {
-            fingers: n,
-            ring: false,
-        },
-    )
+    drag_hold_overlaps(cfg).into_iter().next()
 }
 
 fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conflict> {
@@ -516,7 +523,7 @@ fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conf
                 page: Page::General,
             });
         }
-        if cfg.drag.enabled && cfg.drag.fingers == fingers {
+        if cfg.drag.on(usize::from(fingers)) {
             out.push(Conflict {
                 kind: ConflictKind::WindowsWins,
                 rows: Vec::new(),
@@ -526,41 +533,39 @@ fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conf
                 page: Page::General,
             });
         }
-        if fingers == 3 && cfg.window.enabled && cfg.window.move_with_three_finger {
-            out.push(Conflict {
-                kind: ConflictKind::WindowsWins,
-                rows: Vec::new(),
-                reason: "3本指でのウィンドウ移動が、有効なままの Windows の3本指ジェスチャーと重なります。「全般」で無効にできます。".into(),
-                page: Page::General,
-            });
-        }
     }
 
     // Triggers the engine cannot tell apart.
-    if cfg.drag.enabled {
-        let n = cfg.drag.fingers;
-        let prefix = format!("swipe.{n}.");
-        let affected = keys(&|r| r.key.starts_with(&prefix) && feature_on_key(cfg, &r.key));
-        if !affected.is_empty() {
-            out.push(Conflict {
-                kind: ConflictKind::Overlap,
-                rows: affected,
-                reason: format!(
-                    "ドラッグが同じ{n}本指を使うため、スワイプはドラッグとして先に判定されます。"
-                ),
-                page: Page::Drag,
-            });
-        }
-        if n == 3 && cfg.window.enabled && cfg.window.move_with_three_finger {
-            out.push(Conflict {
-                kind: ConflictKind::Overlap,
-                rows: Vec::new(),
-                reason: "3本指のドラッグと3本指でのウィンドウ移動は、同じ操作から始まるため区別できません。".into(),
-                page: Page::Drag,
-            });
+    for (n, row) in cfg.drag.active() {
+        if row.start == crate::config::DragStart::TouchMove {
+            let prefix = format!("swipe.{n}.");
+            let affected = keys(&|r| r.key.starts_with(&prefix) && feature_on_key(cfg, &r.key));
+            if !affected.is_empty() {
+                out.push(Conflict {
+                    kind: ConflictKind::Overlap,
+                    rows: affected,
+                    reason: format!(
+                        "ドラッグが同じ{n}本指を使うため、スワイプはドラッグとして先に判定されます。"
+                    ),
+                    page: Page::Drag,
+                });
+            }
+        } else {
+            let tap = format!("tap.{n}");
+            let affected = keys(&|r| r.key == tap && feature_on_key(cfg, &r.key));
+            if !affected.is_empty() {
+                out.push(Conflict {
+                    kind: ConflictKind::Overlap,
+                    rows: affected,
+                    reason: format!(
+                        "{n}本指のタップは、「タップ後に動かす」の最初のタップと同じ操作です。動きが続かないと分かってから、少し遅れて実行されます。"
+                    ),
+                    page: Page::Drag,
+                });
+            }
         }
     }
-    if let Some(o) = drag_hold_overlap(cfg) {
+    for o in drag_hold_overlaps(cfg) {
         out.push(Conflict {
             kind: ConflictKind::Overlap,
             rows: Vec::new(),
@@ -568,7 +573,7 @@ fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conf
             page: Page::LongHold,
         });
     }
-    if cfg.corner.enabled && cfg.window.enabled && cfg.window.corner_resize {
+    if cfg.corner.enabled && cfg.window.corner_resize {
         let affected = keys(&|r| r.key.starts_with("corner.") && r.key.ends_with(".diagonal"));
         if !affected.is_empty() {
             out.push(Conflict {
@@ -576,7 +581,7 @@ fn conflicts(cfg: &Config, win: &win_gestures::Values, rows: &[Row]) -> Vec<Conf
                 rows: affected,
                 reason: "コーナースワイプが、ウィンドウのサイズ変更（角から反対側の角へなぞる）と重なります。"
                     .into(),
-                page: Page::Drag,
+                page: Page::Corner,
             });
         }
     }
@@ -856,8 +861,7 @@ mod tests {
             gestures_enabled: true,
             ..Config::default()
         };
-        cfg.drag.enabled = false;
-        cfg.window.enabled = false;
+        cfg.drag.disable_all();
         cfg.ring.enabled = false;
         cfg.long_hold.enabled = false;
         cfg.long_hold.actions = crate::config::LongHoldActions::default();
@@ -1025,23 +1029,23 @@ mod tests {
     #[test]
     fn three_finger_window_move_conflicts_with_windows() {
         let mut cfg = base();
-        cfg.window.enabled = true;
-        cfg.window.move_with_three_finger = true;
+        cfg.drag.three = crate::config::DragRow {
+            enabled: true,
+            start: crate::config::DragStart::TapThenMove,
+            action: crate::config::DragAction::WindowMove,
+        };
         let t = build(&cfg, &WIN_ON);
         assert!(
             t.conflicts
                 .iter()
-                .any(|c| c.kind == ConflictKind::WindowsWins
-                    && c.rows.is_empty()
-                    && c.reason.contains("ウィンドウ"))
+                .any(|c| c.kind == ConflictKind::WindowsWins && c.rows.is_empty())
         );
     }
 
     #[test]
     fn drag_with_the_same_finger_count_overlaps_swipes() {
         let mut cfg = base();
-        cfg.drag.enabled = true;
-        cfg.drag.fingers = 4;
+        cfg.drag.only(4);
         cfg.four.swipe_left = Action::Find;
         let t = build(&cfg, &WIN_OFF);
         let c = t
@@ -1051,8 +1055,7 @@ mod tests {
             .expect("overlap");
         assert_eq!(c.page, Page::Drag);
         assert!(c.rows.contains(&"swipe.4.left".to_owned()));
-        cfg.drag.fingers = 3;
-        cfg.window.enabled = false;
+        cfg.drag.only(3);
         assert!(
             build(&cfg, &WIN_OFF)
                 .conflicts
@@ -1064,8 +1067,7 @@ mod tests {
     #[test]
     fn drag_and_long_hold_with_the_same_count_overlap() {
         let mut cfg = base();
-        cfg.drag.enabled = true;
-        cfg.drag.fingers = 3;
+        cfg.drag.only(3);
         assert_eq!(drag_hold_overlap(&cfg), None);
         // The ring on 3 fingers needs the long hold and the ring on.
         cfg.long_hold.actions.three = Action::RingMenu;
@@ -1086,13 +1088,12 @@ mod tests {
                     && c.reason.contains("リングが先に開きます"))
         );
         // Another count, or the drag off: no overlap.
-        cfg.drag.fingers = 4;
+        cfg.drag.only(4);
         assert_eq!(drag_hold_overlap(&cfg), None);
-        cfg.drag.fingers = 3;
-        cfg.drag.enabled = false;
+        cfg.drag.disable_all();
         assert_eq!(drag_hold_overlap(&cfg), None);
         // A plain action counts too; "none" does not.
-        cfg.drag.enabled = true;
+        cfg.drag.only(3);
         cfg.long_hold.actions.three = Action::Find;
         let o = drag_hold_overlap(&cfg).expect("plain overlap");
         assert!(!o.ring);
@@ -1105,8 +1106,8 @@ mod tests {
         let mut cfg = base();
         cfg.four.enabled = false;
         cfg.four.swipe_left = Action::Find;
-        cfg.drag.enabled = true;
-        cfg.window.enabled = true;
+        cfg.drag.only(3);
+        cfg.drag.four.enabled = true;
         for c in build(&cfg, &WIN_ON).conflicts {
             assert!(!c.reason.is_empty());
             assert_ne!(c.kind.label(), "");

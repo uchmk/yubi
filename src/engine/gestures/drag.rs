@@ -2,6 +2,7 @@
 
 use super::super::arbitration::{Owner, Proposal};
 use super::super::types::{Action, Ctx, GestureCfg, Point, dist};
+use crate::config::DragAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DragPhase {
@@ -21,6 +22,8 @@ pub struct DragState {
     origin: Option<Point>,
     /// Centroid at the previous move; `None` re-bases on the next frame.
     last: Option<Point>,
+    /// The finger count of the row that started (or is about to start) the drag.
+    n: usize,
 }
 
 impl DragState {
@@ -44,9 +47,6 @@ impl DragState {
     /// Run one step. `free` says nobody else owns the session. Returns a proposal when the drag
     /// wants to begin (or resume); the coordinator calls [`commit`](Self::commit) if it wins.
     pub fn step(&mut self, ctx: &Ctx, free: bool) -> Option<Proposal> {
-        let g = ctx.g;
-        let n = g.drag_n;
-        let full = ctx.raw == n && ctx.stable == n;
         let c = ctx.centroid;
         if ctx.rebase {
             self.last = None;
@@ -60,24 +60,30 @@ impl DragState {
         });
         match self.phase {
             DragPhase::Idle => {
-                // A tap-then-swipe window move wins over a 3-finger drag, but only for the tap
-                // window (300 ms from the second touch); after that the touch is a plain drag.
-                let in_tap_window = ctx.win_candidate
-                    && ctx.now.saturating_sub(ctx.session_start_us) <= ctx.th.window_tap_gap_us;
-                let blocked = !free || (in_tap_window && n == 3);
-                match c {
-                    Some(c) if full && !blocked => {
+                // The row whose finger count is down right now (a plain drag row that may start).
+                let row = (3..=5).find(|&n| {
+                    ctx.raw == n
+                        && ctx.stable == n
+                        && ctx
+                            .g
+                            .startable_row(n, ctx.armed)
+                            .is_some_and(|r| r.action == DragAction::Drag)
+                });
+                match (c, row) {
+                    (Some(c), Some(n)) if free => {
                         let origin = *self.origin.get_or_insert(c);
                         if dist(origin, c) > ctx.th.drag_start_mm {
+                            self.n = n;
                             return propose;
                         }
                     }
-                    _ if !full => self.origin = None,
+                    (_, None) => self.origin = None,
                     _ => {}
                 }
             }
             DragPhase::Active => {}
             DragPhase::Lifted(_) | DragPhase::Held => {
+                let full = ctx.raw == self.n && ctx.stable == self.n;
                 if c.is_some() && full && free {
                     return propose;
                 }
@@ -103,7 +109,7 @@ impl DragState {
         if self.phase != DragPhase::Active {
             return;
         }
-        let n = ctx.g.drag_n;
+        let n = self.n;
         let full = ctx.raw == n && ctx.stable == n;
         match ctx.centroid {
             Some(c) if full && !ctx.rebase => {

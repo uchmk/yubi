@@ -740,11 +740,19 @@ impl eframe::App for App {
                 if let Some(y) = general_io::shot_scroll() {
                     area = area.vertical_scroll_offset(y);
                 }
-                area.show(ui, |ui| {
-                    ui.set_max_width(ui.available_width().min(t.content_max_w));
+                let out = area.show(ui, |ui| {
+                    let cap = if self.page.wide() {
+                        t.content_max_w_wide
+                    } else {
+                        t.content_max_w
+                    };
+                    ui.set_max_width(ui.available_width().min(cap));
                     cmd = self.content(ui, &t, now);
                     ui.add_space(t.space_xl);
                 });
+                if let Some(d) = self.devshot.as_mut() {
+                    d.note_fit(out.content_size.y, out.inner_rect.height());
+                }
             });
         if let Some(c) = cmd {
             self.run(c);

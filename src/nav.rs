@@ -118,7 +118,7 @@ impl Page {
     pub fn subtitle(self) -> &'static str {
         match self {
             Self::Home => "Magic Trackpad の状態と設定を確認します。",
-            Self::Drag => "複数本指でのドラッグと、ウィンドウの移動・スナップを設定します。",
+            Self::Drag => "ドラッグの始め方と、保持・一時停止を設定します。",
             Self::Gesture => "4本指・5本指のタップ・スワイプ・ピンチに操作を割り当てます。",
             Self::CustomPress => "指の本数と押し込みの深さごとに操作を割り当てます。",
             Self::LongHold => "指を置き続けたときの操作を設定します。",
@@ -165,10 +165,45 @@ impl Page {
         }
     }
 
-    /// The enable flag of a feature page.
+    /// Whether the page lays itself out in two columns when the window is wide (see
+    /// `widgets::sections2`), so it may use more than the usual content width.
+    pub fn wide(self) -> bool {
+        matches!(
+            self,
+            Self::Drag | Self::CustomPress | Self::Corner | Self::Sensitivity | Self::General
+        )
+    }
+
+    /// Whether the feature page's switch reads as on. The drag page has one switch per finger
+    /// count, so it reads as on when any row is.
+    pub fn is_on(self, cfg: &mut Config) -> bool {
+        match self {
+            Self::Drag => cfg.drag.any(),
+            _ => self.enabled_mut(cfg).is_some_and(|f| *f),
+        }
+    }
+
+    /// Set the feature page's switch. For the drag page, on turns the three-finger row on when no
+    /// row is, and off turns every row off.
+    pub fn set_on(self, cfg: &mut Config, on: bool) {
+        match self {
+            Self::Drag if on => {
+                if !cfg.drag.any() {
+                    cfg.drag.three.enabled = true;
+                }
+            }
+            Self::Drag => cfg.drag.disable_all(),
+            _ => {
+                if let Some(f) = self.enabled_mut(cfg) {
+                    *f = on;
+                }
+            }
+        }
+    }
+
+    /// The enable flag of a feature page (not the drag page: see [`Self::set_on`]).
     pub fn enabled_mut(self, cfg: &mut Config) -> Option<&mut bool> {
         Some(match self {
-            Self::Drag => &mut cfg.drag.enabled,
             Self::Gesture => &mut cfg.four.enabled,
             Self::CustomPress => &mut cfg.press.enabled,
             Self::LongHold => &mut cfg.long_hold.enabled,
@@ -192,7 +227,8 @@ mod tests {
         let mut covered = vec![false; FEATURE_COUNT];
         for page in FEATURES {
             let before = cfg.feature_flags();
-            *page.enabled_mut(&mut cfg).unwrap() ^= true;
+            let on = page.is_on(&mut cfg);
+            page.set_on(&mut cfg, !on);
             let after = cfg.feature_flags();
             let changed: Vec<usize> = (0..FEATURE_COUNT)
                 .filter(|&i| before[i] != after[i])

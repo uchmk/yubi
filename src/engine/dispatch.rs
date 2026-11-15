@@ -178,6 +178,14 @@ pub enum WinCmd {
         dy: i32,
     },
     EndResize,
+    /// Resize the window under `cursor` from the 3x3 grid cell the cursor is in.
+    BeginGrid {
+        cursor: (i32, i32),
+    },
+    GridMove {
+        dx: i32,
+        dy: i32,
+    },
     /// Drop the move without snapping (device gone, config changed, ...).
     Cancel,
 }
@@ -794,7 +802,7 @@ impl Dispatcher {
                 // The worker reports what really happened (moved, snapped, no window, ...).
                 (!self.win(WinCmd::End { snap: *snap })).then(|| WORKER_NOTE.to_owned())
             }
-            Action::CornerResizeEnd => {
+            Action::CornerResizeEnd | Action::WindowResizeEnd => {
                 if !self.resize_active {
                     return None;
                 }
@@ -897,6 +905,25 @@ impl Dispatcher {
                 });
                 self.last_corner = None;
                 (!self.resize_active).then(|| WORKER_NOTE.to_owned())
+            }
+            Action::WindowResizeBegin => {
+                self.resize_px.clear();
+                let Some(cursor) = cursor() else {
+                    return Some(NO_CURSOR_NOTE.to_owned());
+                };
+                self.resize_active = self.win(WinCmd::BeginGrid { cursor });
+                (!self.resize_active).then(|| WORKER_NOTE.to_owned())
+            }
+            Action::WindowResizeMove { dx_mm, dy_mm } => {
+                if self.resize_active {
+                    let (dx, dy) = self
+                        .resize_px
+                        .take(dx_mm * th.window_px_per_mm, dy_mm * th.window_px_per_mm);
+                    if dx != 0 || dy != 0 {
+                        self.win(WinCmd::GridMove { dx, dy });
+                    }
+                }
+                None
             }
             Action::CornerResizeMove { dx_mm, dy_mm } => {
                 if self.resize_active {
@@ -1295,10 +1322,27 @@ fn snap_label(d: SnapDir) -> &'static str {
     }
 }
 
+/// What the 3x3 cell picked, for the note shown while the drag starts.
+fn grid_label(h: (i8, i8)) -> String {
+    let what = match h {
+        (-1, -1) => "左上の角",
+        (1, -1) => "右上の角",
+        (-1, 1) => "左下の角",
+        (1, 1) => "右下の角",
+        (-1, 0) => "左の辺",
+        (1, 0) => "右の辺",
+        (0, -1) => "上の辺",
+        (0, 1) => "下の辺",
+        _ => "中央 (移動)",
+    };
+    format!("ウィンドウのサイズ変更: {what}")
+}
+
 fn run_worker(rx: Receiver<WinCmd>, notify: impl Fn(String)) {
     use crate::os::window::{self, SnapDir as OsSnap, WindowMover};
     let mut mover: Option<WindowMover> = None;
     let mut resize_corner = window::Corner::BottomRight;
+    let mut grid = (0i8, 0i8);
     for cmd in rx {
         match cmd {
             WinCmd::Begin { cursor } => {
@@ -1363,6 +1407,29 @@ fn run_worker(rx: Receiver<WinCmd>, notify: impl Fn(String)) {
             WinCmd::Resize { dx, dy } => {
                 if let Some(m) = mover.as_mut() {
                     m.resize_from(resize_corner, dx, dy);
+                }
+            }
+            WinCmd::BeginGrid { cursor } => {
+                mover = None;
+                match window::top_level_at(cursor) {
+                    None => notify("サイズを変えられるウィンドウがありません".to_owned()),
+                    Some(h) if window::is_elevated_window(h) => notify(ELEVATED_NOTE.to_owned()),
+                    Some(h) => {
+                        // The cell is read before a maximised window is restored under the cursor.
+                        let before = window::visible_rect(h);
+                        mover = WindowMover::begin(h, cursor);
+                        if let Some(m) = mover.as_ref() {
+                            grid = window::grid_handle(before.unwrap_or_else(|| m.rect()), cursor);
+                            notify(grid_label(grid));
+                        } else {
+                            notify("ウィンドウのサイズを変えられませんでした".to_owned());
+                        }
+                    }
+                }
+            }
+            WinCmd::GridMove { dx, dy } => {
+                if let Some(m) = mover.as_mut() {
+                    m.resize_handle(grid, dx, dy);
                 }
             }
             WinCmd::EndResize => {

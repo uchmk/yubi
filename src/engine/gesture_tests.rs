@@ -103,8 +103,7 @@ impl Seq {
 
 fn drag_cfg(fingers: u8) -> Config {
     let mut cfg = Config::default();
-    cfg.drag.enabled = true;
-    cfg.drag.fingers = fingers;
+    cfg.drag.only(fingers as usize);
     cfg.drag.lift_timeout_ms = 300;
     cfg.drag.keep_drag_on_release = false;
     cfg
@@ -112,8 +111,11 @@ fn drag_cfg(fingers: u8) -> Config {
 
 fn window_cfg() -> Config {
     let mut cfg = Config::default();
-    cfg.window.enabled = true;
-    cfg.window.move_with_three_finger = true;
+    cfg.drag.three = crate::config::DragRow {
+        enabled: true,
+        start: crate::config::DragStart::TapThenMove,
+        action: crate::config::DragAction::WindowMove,
+    };
     cfg.window.flick_snap = true;
     cfg
 }
@@ -293,17 +295,17 @@ fn drag_does_not_jump_when_three_fingers_become_two_and_back() {
 }
 
 #[test]
-fn drag_is_allowed_after_the_tap_window() {
+fn a_late_touch_after_the_tap_window_starts_nothing() {
     let mut s = Seq::default();
     let p = tap_then_touch(&mut s, 100);
-    // Rest well past 300 ms, then a small drag: it is not a window move any more.
+    // Rest well past 300 ms, then a small move: it is not a window move any more, and the
+    // three-finger row is a window row, so it is not a drag either.
     s.still(&p, 400);
     s.glide(&p, 3.0, 0.0, 100);
     s.lift(0);
-    let mut cfg = window_cfg();
-    cfg.drag = drag_cfg(3).drag;
+    let cfg = window_cfg();
     let out = s.run(&cfg);
-    assert_eq!(count(&out, |a| matches!(a, Action::DragBegin)), 1);
+    assert_eq!(count(&out, |a| matches!(a, Action::DragBegin)), 0);
     assert_eq!(count(&out, |a| matches!(a, Action::WindowMoveBegin)), 0);
 }
 
@@ -323,9 +325,7 @@ fn window_move_after_a_three_finger_tap() {
     let p = tap_then_touch(&mut s, 100);
     s.glide(&p, 20.0, 0.0, 400);
     s.lift(0);
-    let mut cfg = window_cfg();
-    // Drag on the same finger count must lose to the window move.
-    cfg.drag = drag_cfg(3).drag;
+    let cfg = window_cfg();
     let out = s.run(&cfg);
     let r = real(&out);
     assert!(matches!(r.first(), Some(Action::WindowMoveBegin)), "{r:?}");
@@ -1430,7 +1430,7 @@ fn overlap_one_finger_drifting_past_the_drag_start_ends_the_hold() {
     assert_eq!(count(&out, |a| matches!(a, Action::DragBegin)), 0);
     // Without a drag on this count the old hold travel (3 mm) still applies.
     let mut cfg = overlap_cfg();
-    cfg.drag.enabled = false;
+    cfg.drag.disable_all();
     let out = overlap_run(&cfg, 8, |s, p| {
         let mut q = p.to_vec();
         q[0].0 += 2.2;
@@ -1495,4 +1495,102 @@ fn overlap_a_brief_fourth_contact_is_no_four_finger_swipe() {
     });
     assert!(triggers(&out).is_empty(), "{:?}", triggers(&out));
     assert_eq!(count(&out, |a| matches!(a, Action::DragBegin)), 1);
+}
+
+// ---- drag rows: any count, any start, any action ----
+
+fn rows_cfg(n: usize, start: config::DragStart, action: config::DragAction) -> Config {
+    let mut cfg = Config::default();
+    cfg.drag.disable_all();
+    *cfg.drag.row_mut(n).unwrap() = config::DragRow {
+        enabled: true,
+        start,
+        action,
+    };
+    cfg
+}
+
+#[test]
+fn a_tap_then_move_row_does_not_steal_a_plain_tap() {
+    use config::{DragAction::WindowMove, DragStart::TapThenMove};
+    for n in [4usize, 5] {
+        let mut cfg = rows_cfg(n, TapThenMove, WindowMove);
+        match n {
+            4 => cfg.four.tap = config::Action::Find,
+            _ => {
+                cfg.five.enabled = true;
+                cfg.five.tap = config::Action::Find;
+            }
+        }
+        let mut s = Seq::default();
+        s.still(&ring_n(n, 1.0), 60);
+        s.lift(0);
+        let out = s.run(&cfg);
+        // The tap still fires (after the short wait) and nothing starts.
+        assert_eq!(triggers(&out), vec![config::Action::Find], "n={n}");
+        assert_eq!(count(&out, |a| matches!(a, Action::WindowMoveBegin)), 0);
+        assert_eq!(count(&out, |a| matches!(a, Action::DragBegin)), 0);
+    }
+}
+
+#[test]
+fn the_tap_wait_is_dropped_when_a_move_follows() {
+    use config::{DragAction::WindowMove, DragStart::TapThenMove};
+    let mut cfg = rows_cfg(4, TapThenMove, WindowMove);
+    cfg.four.tap = config::Action::Find;
+    let mut s = Seq::default();
+    let p = row(4, 60.0, 50.0);
+    s.still(&p, 70);
+    s.lift(100);
+    s.still(&p, 100);
+    s.glide(&p, 20.0, 0.0, 400);
+    s.lift(0);
+    let out = s.run(&cfg);
+    assert!(triggers(&out).is_empty(), "{:?}", triggers(&out));
+    let r = real(&out);
+    assert!(matches!(r.first(), Some(Action::WindowMoveBegin)), "{r:?}");
+    assert!(
+        matches!(r.last(), Some(Action::WindowMoveEnd { .. })),
+        "{r:?}"
+    );
+}
+
+#[test]
+fn touch_move_rows_start_at_once_for_each_action() {
+    use config::{DragAction, DragStart::TouchMove};
+    for n in [3usize, 4, 5] {
+        for (action, pred) in [
+            (
+                DragAction::Drag,
+                (|a: &Action| matches!(a, Action::DragBegin)) as fn(&Action) -> bool,
+            ),
+            (DragAction::WindowMove, |a| {
+                matches!(a, Action::WindowMoveBegin)
+            }),
+            (DragAction::WindowResize, |a| {
+                matches!(a, Action::WindowResizeBegin)
+            }),
+        ] {
+            let cfg = rows_cfg(n, TouchMove, action);
+            let mut s = Seq::default();
+            let p = row(n, 60.0, 50.0);
+            s.still(&p, 60);
+            s.glide(&p, 20.0, 0.0, 400);
+            s.lift(0);
+            let out = s.run(&cfg);
+            assert_eq!(count(&out, pred), 1, "n={n} {action:?}");
+        }
+    }
+}
+
+#[test]
+fn only_a_touch_move_row_shadows_the_swipes() {
+    use config::{DragAction::Drag, DragStart};
+    let cfg = rows_cfg(4, DragStart::TapThenMove, Drag);
+    assert!(cfg.four.enabled);
+    let g = super::types::GestureCfg::from_config(&cfg, None);
+    let t = rows_cfg(4, DragStart::TouchMove, Drag);
+    let gt = super::types::GestureCfg::from_config(&t, None);
+    assert!(gt.touch_rows().any(|(n, _)| n == 4));
+    assert!(!g.touch_rows().any(|(n, _)| n == 4));
 }

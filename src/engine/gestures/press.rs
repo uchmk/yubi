@@ -244,7 +244,7 @@ impl PressState {
                 }
                 // The other fingers of a drag are still landing (or lifting): wait, do not fire.
                 if ctx.is_drag_transient(n) {
-                    if ctx.peak >= ctx.g.drag_n {
+                    if ctx.drag_reached_above(n) {
                         // Lifting from the drag's count: this press is over for now.
                         self.cancel();
                     } else {

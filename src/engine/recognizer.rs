@@ -39,8 +39,9 @@ struct Session {
     /// The long-hold action already ran in this touch session; it never runs twice (a count
     /// change such as 2 -> 3 -> 2 re-arms the timer, not the action).
     hold_acted: bool,
-    /// This touch began soon after a 3-finger tap, so it may become a window move.
-    win_candidate: bool,
+    /// This touch began soon after a tap of this many fingers, so a tap-then-move row of that
+    /// count may start.
+    armed: Option<usize>,
     /// The touch began while a drag was being kept after release.
     drag_was_held: bool,
 }
@@ -64,6 +65,10 @@ pub struct Recognizer {
     rebase: bool,
     drag: DragState,
     window: WindowState,
+    /// A tap whose action waits for the tap-then-move gap: it fires when the gap runs out, and
+    /// is dropped when a second touch of the same count arrives in time (that is the start of a
+    /// tap-then-move gesture, not a tap).
+    pending_tap: Option<(u64, MultiHit)>,
     multi: MultiState,
     edge: EdgeState,
     corner: CornerState,
@@ -213,7 +218,7 @@ impl Recognizer {
             return out;
         }
         if !active.is_empty() && self.session.is_none() {
-            self.start_session(t, cfg);
+            self.start_session(t, cfg, &mut out);
         }
         if let Some(s) = self.session.as_mut() {
             s.max_travel = s.max_travel.max(self.tracker.max_displacement());
@@ -232,6 +237,14 @@ impl Recognizer {
     pub fn tick(&mut self, now_us: u64) -> Vec<Action> {
         let mut out = Vec::new();
         self.scroll.glide_tick(now_us, &mut out);
+        if self
+            .pending_tap
+            .as_ref()
+            .is_some_and(|(due, _)| now_us >= *due)
+            && let Some((_, hit)) = self.pending_tap.take()
+        {
+            self.multi.commit(hit, &mut out);
+        }
         if self
             .tracker
             .stale_deadline(self.th.stale_us)
@@ -265,6 +278,7 @@ impl Recognizer {
             self.corner.deadline(&self.g, &self.th),
             self.clicks_off_at,
             self.drag.lift_deadline(&self.g),
+            self.pending_tap.as_ref().map(|(due, _)| *due),
             self.ring.deadline(&self.g),
             self.session
                 .as_ref()
@@ -288,19 +302,39 @@ impl Recognizer {
     }
 
     /// First raw touchdown: latch the settings and the environment for the whole session.
-    fn start_session(&mut self, t: u64, cfg: &Config) {
+    fn start_session(&mut self, t: u64, cfg: &Config, out: &mut Vec<Action>) {
         // A drag that outlives its touch keeps the settings it started with.
         if self.drag.phase == DragPhase::Idle {
             self.g = GestureCfg::from_config(cfg, self.env.exe.as_deref());
             self.th = Thresholds::from_sensitivity(&cfg.sensitivity);
             self.g.set_press(cfg, self.env.exe.as_deref());
         }
-        let win_candidate = self.g.window
-            && self
-                .window
-                .tap_at
-                .is_some_and(|at| t.saturating_sub(at) <= self.th.window_tap_gap_us);
-        self.window.tap_at = None;
+        let armed = self
+            .window
+            .tap
+            .filter(|&(at, n)| {
+                t.saturating_sub(at) <= self.th.window_tap_gap_us
+                    && self
+                        .g
+                        .drag_row(n)
+                        .is_some_and(|r| r.start == crate::config::DragStart::TapThenMove)
+            })
+            .map(|(_, n)| n);
+        self.window.tap = None;
+        if let Some((_, hit)) = self.pending_tap.take() {
+            if armed == Some(hit.fingers) {
+                // The tap was the first half of a tap-then-move: its own action stays quiet.
+            } else {
+                self.multi.commit(hit, out);
+            }
+        }
+        if let Some(n) = armed
+            && let Some(m) = n.checked_sub(3).and_then(|i| self.g.multi.get_mut(i))
+            && let Some(m) = m.as_mut()
+        {
+            // The swipes of this count belong to the armed row for this touch.
+            m.swipes = false;
+        }
         // A blocked app switches the edge sliders and the ring off like every other gesture.
         if self.env.app_blocked {
             self.g.edge = None;
@@ -324,7 +358,7 @@ impl Recognizer {
             hold_since: None,
             hold_fired: false,
             hold_acted: false,
-            win_candidate,
+            armed,
             drag_was_held: self.drag.phase == DragPhase::Held,
         });
     }
@@ -368,10 +402,11 @@ impl Recognizer {
         {
             let fingers = self.tracker.stable;
             // A lower count seen while the drag's fingers land or lift is no long hold.
-            let transient = self.g.drag
-                && fingers < self.g.drag_n
-                && (s.peak >= self.g.drag_n
-                    || now.saturating_sub(s.start_us) < super::types::LANDING_GRACE_US);
+            let transient = self.g.touch_rows().any(|(m, _)| {
+                fingers < m
+                    && (s.peak >= m
+                        || now.saturating_sub(s.start_us) < super::types::LANDING_GRACE_US)
+            });
             let fired = s.max_travel < self.g.hold_travel_limit(&self.th) && !transient;
             s.hold_fired = true;
             if fired {
@@ -460,7 +495,12 @@ impl Recognizer {
                 .multi
                 .tap(&self.g, s.peak, self.arb.is_free_for(Owner::Multi))
         {
-            self.multi.commit(hit, out);
+            if self.window.tap.is_some() {
+                // A tap-then-move row of this count: wait for the second touch before acting.
+                self.pending_tap = Some((t + self.th.window_tap_gap_us, hit));
+            } else {
+                self.multi.commit(hit, out);
+            }
         }
         self.drag.finish(&self.g, is_tap, s.drag_was_held, t, out);
         self.edge.release(out);
@@ -494,7 +534,7 @@ impl Recognizer {
             centroid: centroid(&self.cur),
             rebase: self.rebase,
             session_start_us: s.start_us,
-            win_candidate: s.win_candidate,
+            armed: s.armed,
             dims: self.latched.as_ref().and_then(|e| e.dims_mm),
             max_travel: s.max_travel,
             pressures: &self.pressures,
@@ -504,12 +544,18 @@ impl Recognizer {
         let mut proposals: Vec<Proposal> = Vec::new();
         let mut hit: Option<MultiHit> = None;
         let mut press_hit: Option<PressHit> = None;
-        if ctx.g.drag {
+        if ctx.g.any_drag() {
             self.drag.drive(&ctx, out);
             let free = self.arb.is_free_for(Owner::Drag);
             proposals.extend(self.drag.step(&ctx, free));
         }
-        if ctx.g.window && ctx.win_candidate {
+        if ctx
+            .g
+            .drag_rows
+            .iter()
+            .flatten()
+            .any(|r| r.action != crate::config::DragAction::Drag)
+        {
             let free = self.arb.is_free_for(Owner::Window);
             proposals.extend(self.window.step(&ctx, free, out));
         }
@@ -754,7 +800,7 @@ mod tests {
     #[test]
     fn stale_touch_is_cancelled_and_waits_for_all_up() {
         let mut cfg = Config::default();
-        cfg.drag.enabled = true;
+        cfg.drag.only(3);
         let mut r = Recognizer::default();
         for ms in (0..=140).step_by(11) {
             let x = 10.0 + ms as f32 * 0.1;
@@ -857,7 +903,7 @@ mod tests {
     #[test]
     fn foreground_change_during_a_drag_does_not_end_it() {
         let mut cfg = Config::default();
-        cfg.drag.enabled = true;
+        cfg.drag.only(3);
         let mut r = Recognizer::default();
         r.set_foreground(Some("a.exe"), false);
         let mut t = 0;

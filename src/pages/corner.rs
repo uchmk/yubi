@@ -81,61 +81,75 @@ pub fn corner(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
         if view.selected.is_some_and(|(_, s)| s.trigger() != tr) {
             view.selected = None;
         }
-        section_header(ui, t, "使い方");
-        group(ui, t, |g| g.wrapped_row(|ui| guide(ui, t, cfg, tr)));
-        ui.add_space(t.space_md);
-        group(ui, t, |g| {
-            g.toggle_row(
-                None,
-                &format!("四隅の{}を使う", tr.label()),
-                "オフのあいだは、どの角でも、この操作に反応しません。",
-                cfg.corner.trigger_enabled_mut(tr),
-            );
-            g.wrapped_row(|ui| {
-                ui.vertical(|ui| {
-                    for (i, line) in explanation(tr, cfg.sensitivity.tap_ms, cfg.sensitivity.hold_ms)
-                        .into_iter()
-                        .enumerate()
-                    {
-                        ui.label(RichText::new(line).size(t.fs_small).color(if i == 0 {
-                            t.text
-                        } else {
-                            t.text_muted
-                        }));
-                    }
+        crate::widgets::sections2(ui, t, 2, 3, |ui, i| match i {
+            0 => {
+            section_header(ui, t, "使い方");
+            group(ui, t, |g| g.wrapped_row(|ui| guide(ui, t, cfg, tr)));
+            ui.add_space(t.space_md);
+            group(ui, t, |g| {
+                g.toggle_row(
+                    None,
+                    &format!("四隅の{}を使う", tr.label()),
+                    "オフのあいだは、どの角でも、この操作に反応しません。",
+                    cfg.corner.trigger_enabled_mut(tr),
+                );
+                g.wrapped_row(|ui| {
+                    ui.vertical(|ui| {
+                        for (i, line) in explanation(tr, cfg.sensitivity.tap_ms, cfg.sensitivity.hold_ms)
+                            .into_iter()
+                            .enumerate()
+                        {
+                            ui.label(RichText::new(line).size(t.fs_small).color(if i == 0 {
+                                t.text
+                            } else {
+                                t.text_muted
+                            }));
+                        }
+                    });
                 });
             });
-        });
-        section_header(ui, t, "割り当て");
-        let active = cfg.corner.trigger_enabled(tr);
-        ui.add_enabled_ui(active, |ui| {
-            layout(ui, t, cfg, tr, &mut view);
-        });
-        if !active {
-            ui.add_space(t.space_xs);
-            ui.label(
-                RichText::new(format!(
-                    "「四隅の{}を使う」がオフのため、上の割り当ては使われません。",
-                    tr.label()
-                ))
-                .size(t.fs_small)
-                .color(t.text_muted),
-            );
-        }
-        section_header(ui, t, "反応する範囲");
-        group(ui, t, |g| {
-            g.slider_row(
-                "角の大きさ",
-                "この四角の中から始めた操作だけが、コーナー操作になります。操作を割り当てた角では、端のスライダーは始まりません。",
-                SliderSpec {
-                    min: f64::from(Corners::SIZE.min),
-                    max: f64::from(Corners::SIZE.max),
-                    step: 1.0,
-                    decimals: 0,
-                    suffix: " mm",
-                },
-                &mut cfg.corner.size_mm,
-            );
+            }
+            1 => {
+            section_header(ui, t, "反応する範囲");
+            group(ui, t, |g| {
+                g.slider_row(
+                    "角の大きさ",
+                    "この四角の中から始めた操作だけが、コーナー操作になります。操作を割り当てた角では、端のスライダーは始まりません。",
+                    SliderSpec {
+                        min: f64::from(Corners::SIZE.min),
+                        max: f64::from(Corners::SIZE.max),
+                        step: 1.0,
+                        decimals: 0,
+                        suffix: " mm",
+                    },
+                    &mut cfg.corner.size_mm,
+                );
+                g.toggle_row(
+                    None,
+                    "対角を固定してサイズ変更",
+                    "コーナーで「サイズ変更」を割り当てたとき、反対側の角を動かさずにウィンドウの大きさを変えます。",
+                    &mut cfg.window.corner_resize,
+                );
+            });
+            }
+            _ => {
+            section_header(ui, t, "割り当て");
+            let active = cfg.corner.trigger_enabled(tr);
+            ui.add_enabled_ui(active, |ui| {
+                layout(ui, t, cfg, tr, &mut view);
+            });
+            if !active {
+                ui.add_space(t.space_xs);
+                ui.label(
+                    RichText::new(format!(
+                        "「四隅の{}を使う」がオフのため、上の割り当ては使われません。",
+                        tr.label()
+                    ))
+                    .size(t.fs_small)
+                    .color(t.text_muted),
+                );
+            }
+            }
         });
     });
     if view != before {

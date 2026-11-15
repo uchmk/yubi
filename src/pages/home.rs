@@ -18,6 +18,9 @@ pub fn home(ui: &mut Ui, t: &Tokens, cfg: &mut Config, connected: bool) -> Optio
     header_row(ui, t, cfg, connected);
     ui.add_space(t.space_md);
 
+    // Quick access spans the full width; below it the saved assignments and the gesture switches
+    // sit side by side (their headers on one line), or stacked in a narrow window.
+    cmd = quick_access(ui, t).or(cmd);
     if ui.available_width() >= t.two_col_min {
         ui.columns(2, |cols| {
             cmd = left_column(&mut cols[0], t, cfg).or(cmd);
@@ -55,7 +58,7 @@ fn header_row(ui: &mut Ui, t: &Tokens, cfg: &Config, connected: bool) {
     });
 }
 
-fn left_column(ui: &mut Ui, t: &Tokens, cfg: &Config) -> Option<Cmd> {
+fn quick_access(ui: &mut Ui, t: &Tokens) -> Option<Cmd> {
     let mut cmd = None;
     section_header(ui, t, "クイックアクセス");
     group(ui, t, |g| {
@@ -82,6 +85,11 @@ fn left_column(ui: &mut Ui, t: &Tokens, cfg: &Config) -> Option<Cmd> {
             }
         });
     });
+    cmd
+}
+
+fn left_column(ui: &mut Ui, t: &Tokens, cfg: &Config) -> Option<Cmd> {
+    let cmd = None;
     section_header(ui, t, "保存された割り当て");
     group(ui, t, |g| {
         let list = cfg.assignments();
@@ -114,20 +122,27 @@ fn right_column(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
             // The ジェスチャー page carries two switches (4 and 5 fingers): one row each.
             let rows: Vec<(char, &str, &str, bool)> = if page == Page::Gesture {
                 vec![
-                    (icons::FOUR_FINGER, "4本指ジェスチャー", "", true),
-                    (icons::FIVE_FINGER, "5本指ジェスチャー", "", false),
+                    (
+                        icons::FOUR_FINGER,
+                        "4本指ジェスチャー",
+                        "4本指のタップ・スワイプ・ピンチに操作を割り当てます。",
+                        true,
+                    ),
+                    (
+                        icons::FIVE_FINGER,
+                        "5本指ジェスチャー",
+                        "5本指のタップ・スワイプ・ピンチに操作を割り当てます。",
+                        false,
+                    ),
                 ]
             } else {
                 vec![(page.icon(), page.label(), page.subtitle(), true)]
             };
             for (icon, label, desc, first) in rows {
-                let flag = if page == Page::Gesture && !first {
-                    &mut cfg.five.enabled
+                let mut on = if page == Page::Gesture && !first {
+                    cfg.five.enabled
                 } else {
-                    let Some(flag) = page.enabled_mut(cfg) else {
-                        continue;
-                    };
-                    flag
+                    page.is_on(cfg)
                 };
                 let desc = if desc.is_empty() {
                     page.subtitle()
@@ -138,7 +153,15 @@ fn right_column(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
                     if icon_button(ui, t, icons::CHEVRON_RIGHT, "開く").clicked() {
                         cmd = Some(Cmd::Goto(page));
                     }
-                    ui.add_enabled_ui(master, |ui| toggle(ui, t, flag));
+                    let was = on;
+                    ui.add_enabled_ui(master, |ui| toggle(ui, t, &mut on));
+                    if on != was {
+                        if page == Page::Gesture && !first {
+                            cfg.five.enabled = on;
+                        } else {
+                            page.set_on(cfg, on);
+                        }
+                    }
                 });
             }
         }

@@ -497,22 +497,6 @@ enum CountWire {
     Other(serde::de::IgnoredAny),
 }
 
-/// Read a finger count leniently: a number out of the `u8` range saturates (the range check is
-/// [`Config::normalize`]'s job), anything else falls back to `default` with a note.
-fn lenient_count<'de, D: Deserializer<'de>>(d: D, what: &str, default: u8) -> Result<u8, D::Error> {
-    Ok(match CountWire::deserialize(d)? {
-        CountWire::Int(n) => n.clamp(0, i64::from(u8::MAX)) as u8,
-        CountWire::Other(_) => {
-            scan_note(|s| {
-                s.bad.push(format!(
-                    "{what}の値が整数ではないため、既定値 {default} を使います"
-                ));
-            });
-            default
-        }
-    })
-}
-
 /// A cursor speed as written: `None` when absent or not an integer (then Windows' value is left
 /// alone, with a note); a number out of range saturates and `Config::normalize` clamps it.
 fn cursor_speed<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u8>, D::Error> {
@@ -533,10 +517,6 @@ fn cursor_speed<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u8>, D::Error>
             None
         }
     })
-}
-
-fn drag_fingers<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
-    lenient_count(d, "ドラッグの指の本数", Drag::default().fingers)
 }
 
 impl<'de> Deserialize<'de> for Action {
@@ -589,15 +569,59 @@ fn scan_note(f: impl FnOnce(&mut Scan)) {
     SCAN.with(|s| f(&mut s.borrow_mut()));
 }
 
+/// How a drag row starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DragStart {
+    /// Put the fingers down and move: the drag starts as soon as they travel.
+    #[default]
+    TouchMove,
+    /// Tap with the fingers, then touch down again within a short time and move.
+    TapThenMove,
+}
+
+/// What a drag row does while the fingers move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DragAction {
+    /// A normal mouse-style drag (button held while the fingers move).
+    #[default]
+    Drag,
+    /// Move the window under the cursor (a flick can snap it).
+    WindowMove,
+    /// Resize the window under the cursor from the 3x3 cell the drag started in.
+    WindowResize,
+}
+
+/// One drag row: the gesture for a fixed finger count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DragRow {
+    pub enabled: bool,
+    pub start: DragStart,
+    pub action: DragAction,
+}
+
+impl Default for DragRow {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            start: DragStart::TouchMove,
+            action: DragAction::Drag,
+        }
+    }
+}
+
+/// The drag page: one row per finger count (3, 4, 5) plus the shared hold behaviour.
+///
+/// Old files stored `enabled` + `fingers` (and the window move in `[window]`); see
+/// `migrate_drag_rows`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Drag {
-    /// M1 name: `three_finger_drag`.
-    #[serde(alias = "three_finger_drag")]
-    pub enabled: bool,
-    /// M1 name: `drag_fingers`.
-    #[serde(alias = "drag_fingers", deserialize_with = "drag_fingers")]
-    pub fingers: u8,
+    pub three: DragRow,
+    pub four: DragRow,
+    pub five: DragRow,
     pub lift_timeout_ms: u16,
     pub keep_drag_on_release: bool,
 }
@@ -605,10 +629,67 @@ pub struct Drag {
 impl Default for Drag {
     fn default() -> Self {
         Self {
-            enabled: false,
-            fingers: 3,
+            three: DragRow::default(),
+            four: DragRow::default(),
+            five: DragRow::default(),
             lift_timeout_ms: 300,
             keep_drag_on_release: false,
+        }
+    }
+}
+
+impl Drag {
+    /// The row for `n` fingers (3 to 5).
+    pub fn row(&self, n: usize) -> Option<&DragRow> {
+        match n {
+            3 => Some(&self.three),
+            4 => Some(&self.four),
+            5 => Some(&self.five),
+            _ => None,
+        }
+    }
+
+    pub fn row_mut(&mut self, n: usize) -> Option<&mut DragRow> {
+        match n {
+            3 => Some(&mut self.three),
+            4 => Some(&mut self.four),
+            5 => Some(&mut self.five),
+            _ => None,
+        }
+    }
+
+    /// Whether the `n`-finger row is on.
+    pub fn on(&self, n: usize) -> bool {
+        self.row(n).is_some_and(|r| r.enabled)
+    }
+
+    /// Whether any row is on.
+    pub fn any(&self) -> bool {
+        (3..=5).any(|n| self.on(n))
+    }
+
+    /// The enabled rows as (count, row).
+    pub fn active(&self) -> impl Iterator<Item = (usize, DragRow)> + '_ {
+        (3..=5).filter_map(|n| self.row(n).filter(|r| r.enabled).map(|r| (n, *r)))
+    }
+
+    /// Switch every row off.
+    pub fn disable_all(&mut self) {
+        for n in 3..=5 {
+            if let Some(r) = self.row_mut(n) {
+                r.enabled = false;
+            }
+        }
+    }
+
+    /// Only the `n`-finger row on, as a plain touch-and-move drag (the old single-drag setup).
+    pub fn only(&mut self, n: usize) {
+        self.disable_all();
+        if let Some(r) = self.row_mut(n) {
+            *r = DragRow {
+                enabled: true,
+                ..DragRow::default()
+            };
         }
     }
 }
@@ -1545,19 +1626,17 @@ impl Default for Edges {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowOps {
-    pub enabled: bool,
-    pub move_with_three_finger: bool,
+    /// A flick at the end of a window move snaps the window to that side.
     pub flick_snap: bool,
+    /// The corner page's swipe resizes the window around the opposite corner.
     pub corner_resize: bool,
 }
 
 impl Default for WindowOps {
     fn default() -> Self {
         Self {
-            enabled: false,
-            move_with_three_finger: true,
             flick_snap: true,
-            corner_resize: true,
+            corner_resize: false,
         }
     }
 }
@@ -2114,7 +2193,6 @@ fn clamp_edge(e: &mut EdgeTarget) {
 impl Config {
     /// Clamp values into their valid ranges (deep threshold stays above light).
     pub fn normalize(&mut self) {
-        self.drag.fingers = self.drag.fingers.clamp(3, 5);
         self.drag.lift_timeout_ms = self.drag.lift_timeout_ms.min(1000);
         // The ring needs 3 to 5 fingers: a ring menu on a 1 or 2 finger long hold cannot open
         // (`clamp_report` says so).
@@ -2285,7 +2363,7 @@ impl Config {
     /// The per-feature enable flags, in navigation order.
     pub fn feature_flags(&self) -> [bool; FEATURE_COUNT] {
         [
-            self.drag.enabled,
+            self.drag.any(),
             self.four.enabled,
             self.five.enabled,
             self.press.enabled,
@@ -2308,11 +2386,17 @@ impl Config {
     pub fn assignments(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
         let named = |a: &Action| a.kind() != ActionKind::None;
-        if self.drag.enabled {
-            out.push((
-                format!("{}本指ドラッグ", self.drag.fingers),
-                "ドラッグ".into(),
-            ));
+        for (n, row) in self.drag.active() {
+            let what = match row.action {
+                DragAction::Drag => "ドラッグ",
+                DragAction::WindowMove => "ウィンドウ移動",
+                DragAction::WindowResize => "ウィンドウのサイズ変更",
+            };
+            let how = match row.start {
+                DragStart::TouchMove => "",
+                DragStart::TapThenMove => "タップ後に",
+            };
+            out.push((format!("{n}本指で{how}動かす"), what.into()));
         }
         if self.four.enabled {
             let f = &self.four;
@@ -2456,11 +2540,6 @@ fn clamp_report(
         }
     };
     note(
-        "ドラッグの指の本数",
-        raw.drag.fingers.to_string(),
-        norm.drag.fingers.to_string(),
-    );
-    note(
         "ドラッグの持ち上げ猶予 (ms)",
         raw.drag.lift_timeout_ms.to_string(),
         norm.drag.lift_timeout_ms.to_string(),
@@ -2551,6 +2630,86 @@ pub fn default_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_default();
     base.join("yubi").join("config.toml")
+}
+
+/// Old files kept one drag count (`drag.enabled` + `drag.fingers`, M1: `three_finger_drag` +
+/// `drag_fingers`) and the three-finger window move in `[window]`. Turn them into the per-count
+/// rows: the old drag becomes that row (touch and move, plain drag); the old window move becomes
+/// the three-finger row (tap then move, window move) when that row is free, otherwise it is left
+/// off with a warning.
+fn migrate_drag_rows(root: &mut toml::Table, notes: &mut Vec<String>) {
+    use toml::Value;
+    let mut rows: [Option<(DragStart, DragAction)>; 3] = [None; 3];
+    let key = if root.contains_key("gestures") && !root.contains_key("drag") {
+        "gestures"
+    } else {
+        "drag"
+    };
+    if let Some(t) = root.get_mut(key).and_then(Value::as_table_mut) {
+        let enabled = t
+            .remove("enabled")
+            .or_else(|| t.remove("three_finger_drag"));
+        let fingers = t.remove("fingers").or_else(|| t.remove("drag_fingers"));
+        t.remove("three_finger_drag");
+        t.remove("drag_fingers");
+        if let Some(Value::Boolean(true)) = enabled {
+            let n = match fingers {
+                Some(Value::Integer(n)) => n.clamp(3, 5) as usize,
+                _ => 3,
+            };
+            rows[n - 3] = Some((DragStart::TouchMove, DragAction::Drag));
+        }
+    }
+    if let Some(w) = root.get_mut("window").and_then(Value::as_table_mut) {
+        let enabled = matches!(w.remove("enabled"), Some(Value::Boolean(true)));
+        let moves = !matches!(
+            w.remove("move_with_three_finger"),
+            Some(Value::Boolean(false))
+        );
+        if !enabled {
+            // The corner resize used to run only with the window switch on.
+            w.insert("corner_resize".into(), Value::Boolean(false));
+        }
+        if enabled && moves {
+            if rows[0].is_none() {
+                rows[0] = Some((DragStart::TapThenMove, DragAction::WindowMove));
+            } else {
+                notes.push(
+                    "3本指のドラッグと「3本指でウィンドウを移動」が重なっていたため、ウィンドウ移動はオフにしました。ドラッグ画面で 4 本指か 5 本指の行に設定できます".into(),
+                );
+            }
+        }
+    }
+    if rows.iter().any(Option::is_some) {
+        let drag = root
+            .entry(key)
+            .or_insert_with(|| Value::Table(toml::Table::new()));
+        if let Some(t) = drag.as_table_mut() {
+            for (i, name) in ["three", "four", "five"].into_iter().enumerate() {
+                if let Some((start, action)) = rows[i] {
+                    let mut r = toml::Table::new();
+                    r.insert("enabled".into(), Value::Boolean(true));
+                    let s = |v: &str| Value::String(v.into());
+                    r.insert(
+                        "start".into(),
+                        s(match start {
+                            DragStart::TouchMove => "touch_move",
+                            DragStart::TapThenMove => "tap_then_move",
+                        }),
+                    );
+                    r.insert(
+                        "action".into(),
+                        s(match action {
+                            DragAction::Drag => "drag",
+                            DragAction::WindowMove => "window_move",
+                            DragAction::WindowResize => "window_resize",
+                        }),
+                    );
+                    t.entry(name).or_insert(Value::Table(r));
+                }
+            }
+        }
+    }
 }
 
 /// Why a config text could not be used.
@@ -2853,6 +3012,7 @@ pub fn parse_text(text: &str) -> Result<Parsed, ParseError> {
         migrate_v1(&mut root, &mut warnings);
     }
     let hold_moved = migrate_hold_ring(&mut root, &mut warnings);
+    migrate_drag_rows(&mut root, &mut warnings);
     scan_note(|s| *s = Scan::default());
     let result = toml::Value::Table(root).try_into::<Config>();
     let scan = SCAN.with(|s| std::mem::take(&mut *s.borrow_mut()));
@@ -3189,8 +3349,7 @@ mod tests {
             ..Config::default()
         };
         cfg.general.theme = ThemeChoice::Light;
-        cfg.drag.enabled = true;
-        cfg.drag.fingers = 4;
+        cfg.drag.only(4);
         cfg.four.swipe_left = Action::Keys("Ctrl+Alt+Right".into());
         cfg.four.tap = Action::VolumeStep(-4);
         cfg.four.pinch_in = Action::ToggleMute;
@@ -3499,8 +3658,16 @@ swipe = \"find\"
         assert!(p.rewrite);
         assert!(!c.gestures_enabled);
         assert_eq!(c.general.theme, ThemeChoice::Light);
-        assert!(c.drag.enabled);
-        assert_eq!(c.drag.fingers, 4);
+        assert!(c.drag.on(4));
+        // The old window move (window.enabled, on by default) became the three-finger row.
+        assert_eq!(
+            c.drag.three,
+            DragRow {
+                enabled: true,
+                start: DragStart::TapThenMove,
+                action: DragAction::WindowMove
+            }
+        );
         assert_eq!(c.drag.lift_timeout_ms, 250);
         assert!(c.drag.keep_drag_on_release);
         // Ambiguous legacy tokens are dropped and reported once.
@@ -3831,11 +3998,147 @@ enabled = true
         }
     }
 
+    fn migrated(text: &str) -> Parsed {
+        parse_text(text).unwrap()
+    }
+
+    #[test]
+    fn old_drag_becomes_a_touch_move_row() {
+        let p = migrated(
+            "schema_version = 2
+[drag]
+enabled = true
+fingers = 5
+",
+        );
+        assert_eq!(
+            p.config.drag.five,
+            DragRow {
+                enabled: true,
+                start: DragStart::TouchMove,
+                action: DragAction::Drag
+            }
+        );
+        assert!(!p.config.drag.on(3) && !p.config.drag.on(4));
+        // Off stays off, and a missing count means three fingers.
+        assert!(
+            !migrated(
+                "schema_version = 2
+[drag]
+fingers = 5
+"
+            )
+            .config
+            .drag
+            .any()
+        );
+        assert!(
+            migrated(
+                "schema_version = 2
+[drag]
+enabled = true
+"
+            )
+            .config
+            .drag
+            .on(3)
+        );
+    }
+
+    #[test]
+    fn old_window_move_becomes_a_tap_then_move_row() {
+        let p = migrated(
+            "schema_version = 2
+[window]
+enabled = true
+",
+        );
+        assert_eq!(
+            p.config.drag.three,
+            DragRow {
+                enabled: true,
+                start: DragStart::TapThenMove,
+                action: DragAction::WindowMove
+            }
+        );
+        // Window move was switched off: nothing, and the corner resize stays off.
+        let off = migrated(
+            "schema_version = 2
+[window]
+enabled = false
+",
+        );
+        assert!(!off.config.drag.any() && !off.config.window.corner_resize);
+        let no_move = migrated(
+            "schema_version = 2
+[window]
+enabled = true
+move_with_three_finger = false
+",
+        );
+        assert!(!no_move.config.drag.any());
+    }
+
+    #[test]
+    fn old_drag_and_window_move_on_three_fingers_warn() {
+        let p = migrated(
+            "schema_version = 2
+[drag]
+enabled = true
+fingers = 3
+[window]
+enabled = true
+",
+        );
+        assert_eq!(p.config.drag.three.action, DragAction::Drag);
+        assert!(
+            p.warnings.iter().any(|w| w.contains("ウィンドウ移動")),
+            "{:?}",
+            p.warnings
+        );
+        // On different counts both survive.
+        let q = migrated(
+            "schema_version = 2
+[drag]
+enabled = true
+fingers = 4
+[window]
+enabled = true
+",
+        );
+        assert!(q.config.drag.on(3) && q.config.drag.on(4));
+    }
+
+    #[test]
+    fn drag_rows_round_trip_and_feed_the_counts() {
+        let mut cfg = Config::default();
+        cfg.drag.three = DragRow {
+            enabled: true,
+            start: DragStart::TapThenMove,
+            action: DragAction::WindowResize,
+        };
+        cfg.drag.five.enabled = true;
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(text.contains("window_resize") && text.contains("tap_then_move"));
+        let back = parse_text(&text).unwrap().config;
+        assert_eq!(back.drag, cfg.drag);
+        assert!(back.feature_flags()[0]);
+        assert_eq!(back.drag.active().count(), 2);
+        let mut none = back;
+        none.drag.disable_all();
+        assert!(!none.feature_flags()[0]);
+    }
+
     #[test]
     fn partial_file_fills_defaults() {
-        let cfg: Config = toml::from_str("[drag]\nenabled = true\n").unwrap();
-        assert!(cfg.drag.enabled);
-        assert_eq!(cfg.drag.fingers, 3);
+        let cfg: Config = toml::from_str(
+            "[drag.three]
+enabled = true
+",
+        )
+        .unwrap();
+        assert!(cfg.drag.on(3));
+        assert_eq!(cfg.drag.three.start, DragStart::TouchMove);
         assert_eq!(cfg.press, Press::default());
         assert_eq!(cfg.sensitivity, Sensitivity::default());
     }
@@ -3856,7 +4159,6 @@ enabled = true
     #[test]
     fn ranges_are_clamped() {
         let mut cfg = Config::default();
-        cfg.drag.fingers = 9;
         cfg.drag.lift_timeout_ms = 5000;
         cfg.sensitivity.hold_ms = 5;
         cfg.press.fingers.clear();
@@ -3866,15 +4168,11 @@ enabled = true
             ..CustomEdge::default()
         });
         cfg.normalize();
-        assert_eq!(cfg.drag.fingers, 5);
         assert_eq!(cfg.drag.lift_timeout_ms, 1000);
         assert_eq!(cfg.sensitivity.hold_ms, 300);
         assert_eq!(cfg.press.fingers.len(), 5);
         assert_eq!(cfg.corner.corners.len(), 4);
         assert!(matches!(&cfg.edge.left, EdgeTarget::Custom(c) if c.step_mm == 2.0));
-        cfg.drag.fingers = 0;
-        cfg.normalize();
-        assert_eq!(cfg.drag.fingers, 3);
     }
 
     #[test]
@@ -3975,7 +4273,7 @@ enabled = true
         // Defaults: four-finger gestures, the long hold (it opens the ring) and the ring menu
         // are on; edge sliders are off.
         assert_eq!(cfg.enabled_count(), (3, FEATURE_COUNT));
-        cfg.drag.enabled = true;
+        cfg.drag.three.enabled = true;
         cfg.edge.enabled = true;
         assert_eq!(cfg.enabled_count(), (5, FEATURE_COUNT));
     }
@@ -4132,11 +4430,11 @@ fingers = [1]
         assert_eq!(c.four.swipe_down, Action::Find);
         assert_eq!(c.edge.left, EdgeTarget::None);
         assert_eq!(c.edge.right, EdgeTarget::Volume);
-        assert_eq!(c.drag.fingers, Drag::default().fingers);
+        assert_eq!(c.drag, Drag::default());
         // Non-integer old finger counts fall back to the old defaults (long hold 2, ring 5).
         assert_eq!(c.ring_counts(), vec![5]);
         assert!(p.unknown_tokens.is_empty());
-        assert_eq!(p.warnings.len(), 6, "{:?}", p.warnings);
+        assert_eq!(p.warnings.len(), 5, "{:?}", p.warnings);
     }
 
     #[test]

@@ -50,6 +50,10 @@ pub enum Fixture {
     GestureTab(u8),
     /// The first action picker on the page is open: 0 unfiltered, 1 filtered, 2 nothing matches.
     Picker(u8),
+    /// The ドラッグ page on tab `tab` (0: 開始と動作, 1: 保持と一時停止) with `rows` rows on:
+    /// 0 none, 1 only the three-finger touch-and-move drag, 2 only a four-finger tap-then-move
+    /// window move, 3 all three rows, 4 only a five-finger window resize.
+    DragTab { tab: u8, rows: u8 },
 }
 
 impl Fixture {
@@ -95,8 +99,7 @@ impl Fixture {
             }
             Self::OverlapDemo => {
                 Self::DemoProfiles.apply(cfg);
-                cfg.drag.enabled = true;
-                cfg.drag.fingers = 3;
+                cfg.drag.only(3);
                 cfg.long_hold.enabled = true;
                 cfg.ring.enabled = true;
                 *cfg.long_hold.actions.get_mut(3) = Action::RingMenu;
@@ -129,8 +132,27 @@ impl Fixture {
                 cfg.five.swipe_right = Action::DesktopNext;
                 cfg.five.swipe_up = Action::TaskView;
                 cfg.five.pinch_in = Action::ShowDesktop;
-                cfg.drag.fingers = 3;
                 crate::pages::features::force_gesture_tab(usize::from(tab));
+            }
+            Self::DragTab { tab, rows } => {
+                use crate::config::{DragAction, DragRow, DragStart};
+                cfg.gestures_enabled = true;
+                cfg.drag.disable_all();
+                let row = |start, action| DragRow {
+                    enabled: true,
+                    start,
+                    action,
+                };
+                if matches!(rows, 1 | 3) {
+                    cfg.drag.three = row(DragStart::TouchMove, DragAction::Drag);
+                }
+                if matches!(rows, 2 | 3) {
+                    cfg.drag.four = row(DragStart::TapThenMove, DragAction::WindowMove);
+                }
+                if matches!(rows, 3 | 4) {
+                    cfg.drag.five = row(DragStart::TouchMove, DragAction::WindowResize);
+                }
+                crate::pages::features::force_drag_tab(usize::from(tab));
             }
             Self::RingFull => {
                 use crate::config::RingItem;
@@ -172,8 +194,7 @@ impl Fixture {
                 cfg.four.tap = Action::MiddleClick;
                 cfg.five.enabled = false;
                 cfg.five.pinch_in = Action::ShowDesktop;
-                cfg.drag.enabled = true;
-                cfg.drag.fingers = 4;
+                cfg.drag.only(4);
                 cfg.edge.enabled = true;
                 cfg.edge.left = EdgeTarget::Volume;
                 let mut code = Profile {
@@ -233,12 +254,39 @@ pub struct Shot {
     pub reduced: bool,
 }
 
+impl Shot {
+    /// A plain shot of `page` (dark or light), the usual defaults elsewhere.
+    fn plain(name: String, page: Page, theme: ThemeChoice, size: Vec2, fixture: Fixture) -> Self {
+        Self {
+            name,
+            page,
+            theme,
+            size,
+            fixture,
+            profile: None,
+            fake: false,
+            practice: false,
+            anim_t: None,
+            reduced: false,
+        }
+    }
+}
+
+/// `WxH` from an environment variable, in logical points.
+fn env_size(name: &str) -> Option<Vec2> {
+    let v = std::env::var(name).ok()?;
+    let (w, h) = v.split_once('x')?;
+    Some(Vec2::new(w.trim().parse().ok()?, h.trim().parse().ok()?))
+}
+
 pub struct DevShot {
     dir: PathBuf,
     shots: Vec<Shot>,
     index: usize,
     frames: u32,
     requested: bool,
+    /// The last measured (content height, visible height) of the page, in points.
+    fit: Option<(f32, f32)>,
     tx: Sender<Arc<ColorImage>>,
     rx: Receiver<Arc<ColorImage>>,
 }
@@ -791,6 +839,89 @@ impl DevShot {
             );
             shots = list;
         }
+        if std::env::var_os("YUBI_SHOT_DRAG").is_some() {
+            // The ドラッグ page: both tabs, wide and narrow, dark and light, with rows on.
+            let mut list = Vec::new();
+            for (sn, size) in [
+                ("wide", Vec2::new(WIDE.x, 1250.0)),
+                ("narrow", Vec2::new(NARROW.x, 1700.0)),
+            ] {
+                for (tn, theme) in [("dark", ThemeChoice::Black), ("light", ThemeChoice::Light)] {
+                    for (name, fixture) in [
+                        ("tab0-off", Fixture::DragTab { tab: 0, rows: 0 }),
+                        ("tab0-one", Fixture::DragTab { tab: 0, rows: 1 }),
+                        ("tab0-all", Fixture::DragTab { tab: 0, rows: 3 }),
+                        ("tab1", Fixture::DragTab { tab: 1, rows: 3 }),
+                    ] {
+                        list.push(Shot::plain(
+                            format!("drag-{name}-{sn}-{tn}"),
+                            Page::Drag,
+                            theme,
+                            size,
+                            fixture,
+                        ));
+                    }
+                }
+            }
+            // The scene at a few times, for each kind of row.
+            for (rows, rn) in [(1u8, "drag"), (2, "tapmove"), (4, "resize")] {
+                for (i, t) in [0.3f32, 1.2, 2.6, 3.8].into_iter().enumerate() {
+                    let mut sh = Shot::plain(
+                        format!("scene-{rn}-{i}"),
+                        Page::Drag,
+                        ThemeChoice::Black,
+                        Vec2::new(WIDE.x, 760.0),
+                        Fixture::DragTab { tab: 0, rows },
+                    );
+                    sh.anim_t = Some(t);
+                    list.push(sh);
+                }
+            }
+            shots = list;
+        }
+        if let Some(size) = env_size("YUBI_SHOT_FIT") {
+            // One shot per page and tab at `size` (logical points; the scale is YUBI_SHOT_PPP),
+            // dark. The fit log (fit.txt) says whether each page needed scrolling.
+            let tag = format!("{}x{}", size.x, size.y);
+            let mut list = Vec::new();
+            let mut add = |name: String, page: Page, fixture: Fixture| {
+                list.push(Shot::plain(
+                    format!("fit-{tag}-{name}"),
+                    page,
+                    ThemeChoice::Black,
+                    size,
+                    fixture,
+                ));
+            };
+            for &(n, page) in &all {
+                match page {
+                    Page::Drag => {
+                        add("drag-t0".into(), page, Fixture::DragTab { tab: 0, rows: 3 });
+                        add("drag-t1".into(), page, Fixture::DragTab { tab: 1, rows: 3 });
+                    }
+                    Page::Gesture => {
+                        add("gesture-t0".into(), page, Fixture::GestureTab(0));
+                        add("gesture-t1".into(), page, Fixture::GestureTab(1));
+                    }
+                    Page::Corner => {
+                        for tab in 0..4u8 {
+                            add(
+                                format!("corner-t{tab}"),
+                                page,
+                                Fixture::CornerView {
+                                    tab,
+                                    sel: 0,
+                                    off: false,
+                                },
+                            );
+                        }
+                    }
+                    Page::Profiles => add(n.into(), page, Fixture::DemoProfiles),
+                    _ => add(n.into(), page, Fixture::Keep),
+                }
+            }
+            shots = list;
+        }
         let _ = fs::create_dir_all(&dir);
         let (tx, rx) = channel();
         Some(Self {
@@ -801,7 +932,13 @@ impl DevShot {
             index: 0,
             frames: 0,
             requested: false,
+            fit: None,
         })
+    }
+
+    /// The content and visible heights of this frame (for the fit log).
+    pub fn note_fit(&mut self, content: f32, visible: f32) {
+        self.fit = Some((content, visible));
     }
 
     /// The shot currently being prepared, if any.
@@ -818,6 +955,12 @@ impl DevShot {
         };
         if self.frames == 0 {
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(shot.size));
+            if let Some(ppp) = std::env::var("YUBI_SHOT_PPP")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+            {
+                ctx.set_pixels_per_point(ppp);
+            }
         }
         self.frames += 1;
         let settle = if matches!(shot.fixture, Fixture::Picker(_)) {
@@ -840,6 +983,25 @@ impl DevShot {
             let path = self.dir.join(format!("{}.bmp", shot.name));
             if let Err(e) = write_bmp(&path, &image) {
                 eprintln!("yubi: cannot write {}: {e}", path.display());
+            }
+            if let Some((content, visible)) = self.fit.take() {
+                let verdict = if content <= visible + 1.0 {
+                    "fits"
+                } else {
+                    "overflows"
+                };
+                let line = format!(
+                    "{}\t{verdict}\tcontent {content:.0}\tvisible {visible:.0}\n",
+                    shot.name
+                );
+                use std::io::Write;
+                if let Ok(mut f) = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(self.dir.join("fit.txt"))
+                {
+                    let _ = f.write_all(line.as_bytes());
+                }
             }
             self.index += 1;
             self.frames = 0;

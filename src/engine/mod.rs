@@ -4,11 +4,15 @@
 //! "latest state" for the UI (monitor, diagnostics). It also lets go of every held key and
 //! button when the situation changes (see `Worker::release_everything`).
 
+pub mod arbitration;
 pub mod dispatch;
 pub mod executor;
+pub mod gestures;
 pub mod recognizer;
 pub mod replay;
 pub mod session;
+pub mod tracking;
+pub mod types;
 
 #[cfg(test)]
 mod gesture_tests;
@@ -357,6 +361,7 @@ impl Worker {
         }
         let first = self.seen_generation == u64::MAX;
         self.seen_generation = generation;
+        self.recognizer.set_config_generation(generation);
         if !first && (self.recognizer.active() || !self.executor.held().is_empty()) {
             self.release_everything();
         }
@@ -459,6 +464,7 @@ impl Worker {
         let exe = crate::os::window::foreground().and_then(crate::os::process::exe_name_of);
         let blocked = dispatch::app_blocked(&self.cfg.profiles, exe.as_deref());
         self.dispatch.set_blocked(blocked);
+        self.recognizer.set_app_blocked(blocked);
         let changed = self
             .state
             .lock()

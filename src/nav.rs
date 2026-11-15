@@ -7,6 +7,7 @@ use crate::icons;
 pub enum Page {
     Home,
     Drag,
+    Four,
     Five,
     CustomPress,
     LongHold,
@@ -38,6 +39,7 @@ pub const NAV: [Node; 6] = [
         label: "操作の割り当て",
         pages: &[
             Page::Drag,
+            Page::Four,
             Page::Five,
             Page::CustomPress,
             Page::LongHold,
@@ -58,8 +60,9 @@ pub const NAV: [Node; 6] = [
 ];
 
 /// The feature pages with an enable toggle, in the order of `Config::feature_flags`.
-pub const FEATURES: [Page; 10] = [
+pub const FEATURES: [Page; 11] = [
     Page::Drag,
+    Page::Four,
     Page::Five,
     Page::CustomPress,
     Page::LongHold,
@@ -88,6 +91,7 @@ impl Page {
         match self {
             Self::Home => "ホーム",
             Self::Drag => "ドラッグ",
+            Self::Four => "4本指ジェスチャー",
             Self::Five => "5本指ジェスチャー",
             Self::CustomPress => "カスタムプレス",
             Self::LongHold => "ロングホールド",
@@ -110,6 +114,7 @@ impl Page {
         match self {
             Self::Home => "Magic Trackpad の状態と設定を確認します。",
             Self::Drag => "複数本指でウィンドウや項目をドラッグします。",
+            Self::Four => "4本指のタップ・スワイプ・ピンチに操作を割り当てます。",
             Self::Five => "5本指のピンチとスワイプに操作を割り当てます。",
             Self::CustomPress => "指の本数と押し込みの深さごとに操作を割り当てます。",
             Self::LongHold => "指を置き続けたときの操作を設定します。",
@@ -131,6 +136,7 @@ impl Page {
         match self {
             Self::Home => icons::HOME,
             Self::Drag => icons::DRAG,
+            Self::Four => icons::FOUR_FINGER,
             Self::Five => icons::FIVE_FINGER,
             Self::CustomPress => icons::PRESS,
             Self::LongHold => icons::LONG_HOLD,
@@ -152,6 +158,7 @@ impl Page {
     pub fn enabled_mut(self, cfg: &mut Config) -> Option<&mut bool> {
         Some(match self {
             Self::Drag => &mut cfg.drag.enabled,
+            Self::Four => &mut cfg.four.enabled,
             Self::Five => &mut cfg.five.enabled,
             Self::CustomPress => &mut cfg.press.enabled,
             Self::LongHold => &mut cfg.long_hold.enabled,
@@ -183,7 +190,7 @@ mod tests {
     #[test]
     fn every_page_is_in_the_nav() {
         let pages = all_pages();
-        assert_eq!(pages.len(), 16);
+        assert_eq!(pages.len(), 17);
         assert!(pages.contains(&Page::Home) && pages.contains(&Page::General));
     }
 }

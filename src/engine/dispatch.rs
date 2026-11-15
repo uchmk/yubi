@@ -8,7 +8,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
 use super::executor::{Executor, InputSink, Key, MouseButton};
-use super::recognizer::{Action, FiveKind, GestureEvent, SnapDir, Thresholds};
+use super::recognizer::{Action, GestureEvent, SnapDir, Thresholds};
+use super::types::MultiKind;
 use crate::config::{self, Profile};
 use crate::os::keys::KeyCombo;
 
@@ -80,11 +81,18 @@ fn keys_plan(text: &str) -> Plan {
     }
 }
 
+/// Name of a multi-finger gesture for the note shown after it fires.
+pub fn multi_label(fingers: usize, kind: MultiKind) -> String {
+    kind.label(fingers)
+}
+
 pub fn plan_for(action: &config::Action) -> Plan {
     use config::Action as A;
     match action {
         A::TaskView => keys_plan("Win+Tab"),
         A::ShowDesktop => keys_plan("Win+D"),
+        A::DesktopPrev => keys_plan("Ctrl+Win+Left"),
+        A::DesktopNext => keys_plan("Ctrl+Win+Right"),
         A::AppSwitch => keys_plan("Alt+Tab"),
         A::TabSwitch => keys_plan("Ctrl+Tab"),
         A::Find => keys_plan("Ctrl+F"),
@@ -131,7 +139,7 @@ pub struct Dispatcher {
     win_join: Option<JoinHandle<()>>,
     /// A window move was accepted and not yet ended.
     win_active: bool,
-    last_five: Option<FiveKind>,
+    last_multi: Option<(usize, MultiKind)>,
 }
 
 impl Dispatcher {
@@ -170,7 +178,7 @@ impl Dispatcher {
             win_tx,
             win_join: None,
             win_active: false,
-            last_five: None,
+            last_multi: None,
         }
     }
 
@@ -235,8 +243,8 @@ impl Dispatcher {
                 self.press_tried = false;
                 None
             }
-            Action::Debug(GestureEvent::Five(k)) => {
-                self.last_five = Some(*k);
+            Action::Debug(GestureEvent::Multi { fingers, kind }) => {
+                self.last_multi = Some((*fingers, *kind));
                 None
             }
             Action::Debug(_) => None,
@@ -321,12 +329,9 @@ impl Dispatcher {
         action: &config::Action,
         ex: &mut Executor<S>,
     ) -> Option<String> {
-        let source = match self.last_five.take() {
-            Some(FiveKind::PinchIn) => "5本指ピンチイン",
-            Some(FiveKind::PinchOut) => "5本指ピンチアウト",
-            Some(FiveKind::SwipeUp) => "5本指で上にスワイプ",
-            Some(FiveKind::SwipeDown) => "5本指で下にスワイプ",
-            None => "ジェスチャー",
+        let source = match self.last_multi.take() {
+            Some((n, kind)) => multi_label(n, kind),
+            None => "ジェスチャー".to_owned(),
         };
         let label = action.label();
         match plan_for(action) {
@@ -507,6 +512,14 @@ mod tests {
             Plan::Keys(vec![Key::Vk(0x5B), Key::Vk(0x44)])
         );
         assert_eq!(
+            plan_for(&A::DesktopPrev),
+            Plan::Keys(vec![Key::Vk(0x11), Key::Vk(0x5B), Key::Vk(0x25)])
+        );
+        assert_eq!(
+            plan_for(&A::DesktopNext),
+            Plan::Keys(vec![Key::Vk(0x11), Key::Vk(0x5B), Key::Vk(0x27)])
+        );
+        assert_eq!(
             plan_for(&A::AppSwitch),
             Plan::Keys(vec![Key::Vk(0x12), Key::Vk(0x09)])
         );
@@ -614,7 +627,10 @@ mod tests {
         let mut f = Fake::default();
         let mut ex = Executor::new(&mut f);
         d.handle(
-            &Action::Debug(GestureEvent::Five(FiveKind::PinchIn)),
+            &Action::Debug(GestureEvent::Multi {
+                fingers: 5,
+                kind: MultiKind::PinchIn,
+            }),
             &mut ex,
             &th,
             CURSOR,

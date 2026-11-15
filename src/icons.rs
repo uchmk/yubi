@@ -12,6 +12,7 @@ pub const CHEVRON_RIGHT: char = '\u{E76C}';
 pub const DELETE: char = '\u{E74D}';
 pub const FOLDER: char = '\u{E8B7}';
 pub const DRAG: char = '\u{E7C9}';
+pub const FOUR_FINGER: char = '\u{E8F2}';
 pub const FIVE_FINGER: char = '\u{E8F1}';
 pub const PRESS: char = '\u{E8AD}';
 pub const LONG_HOLD: char = '\u{E81C}';

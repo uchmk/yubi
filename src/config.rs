@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// Smallest allowed distance between the light and deep press thresholds.
 pub const MIN_THRESHOLD_GAP: f32 = 0.05;
 /// Number of feature toggles counted by [`Config::enabled_count`].
-pub const FEATURE_COUNT: usize = 10;
+pub const FEATURE_COUNT: usize = 11;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -21,6 +21,7 @@ pub struct Config {
     /// M1 stored this table as `[gestures]`.
     #[serde(alias = "gestures")]
     pub drag: Drag,
+    pub four: Four,
     pub five: Five,
     pub press: Press,
     pub long_hold: LongHold,
@@ -39,6 +40,7 @@ impl Default for Config {
             gestures_enabled: true,
             general: General::default(),
             drag: Drag::default(),
+            four: Four::default(),
             five: Five::default(),
             press: Press::default(),
             long_hold: LongHold::default(),
@@ -98,6 +100,8 @@ pub enum Action {
     RingMenu,
     Volume,
     Brightness,
+    DesktopPrev,
+    DesktopNext,
     Keys(String),
 }
 
@@ -115,11 +119,13 @@ pub enum ActionKind {
     RingMenu,
     Volume,
     Brightness,
+    DesktopPrev,
+    DesktopNext,
     Keys,
 }
 
 impl ActionKind {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::None,
         Self::TaskView,
         Self::ShowDesktop,
@@ -131,6 +137,8 @@ impl ActionKind {
         Self::RingMenu,
         Self::Volume,
         Self::Brightness,
+        Self::DesktopPrev,
+        Self::DesktopNext,
         Self::Keys,
     ];
 
@@ -147,6 +155,8 @@ impl ActionKind {
             Self::RingMenu => "リングメニュー",
             Self::Volume => "音量",
             Self::Brightness => "明るさ",
+            Self::DesktopPrev => "前のデスクトップ",
+            Self::DesktopNext => "次のデスクトップ",
             Self::Keys => "キー入力",
         }
     }
@@ -166,6 +176,8 @@ impl Action {
             Self::RingMenu => ActionKind::RingMenu,
             Self::Volume => ActionKind::Volume,
             Self::Brightness => ActionKind::Brightness,
+            Self::DesktopPrev => ActionKind::DesktopPrev,
+            Self::DesktopNext => ActionKind::DesktopNext,
             Self::Keys(_) => ActionKind::Keys,
         }
     }
@@ -187,6 +199,8 @@ impl Action {
             ActionKind::RingMenu => Self::RingMenu,
             ActionKind::Volume => Self::Volume,
             ActionKind::Brightness => Self::Brightness,
+            ActionKind::DesktopPrev => Self::DesktopPrev,
+            ActionKind::DesktopNext => Self::DesktopNext,
             ActionKind::Keys => Self::Keys(String::new()),
         };
     }
@@ -212,6 +226,8 @@ impl Action {
             Self::RingMenu => "ring_menu".into(),
             Self::Volume => "volume".into(),
             Self::Brightness => "brightness".into(),
+            Self::DesktopPrev => "desktop_prev".into(),
+            Self::DesktopNext => "desktop_next".into(),
             Self::Keys(k) => format!("keys:{k}"),
         }
     }
@@ -229,6 +245,8 @@ impl Action {
             "ring_menu" => Self::RingMenu,
             "volume" => Self::Volume,
             "brightness" => Self::Brightness,
+            "desktop_prev" => Self::DesktopPrev,
+            "desktop_next" => Self::DesktopNext,
             other => match other.strip_prefix("keys:") {
                 Some(k) => Self::Keys(k.to_owned()),
                 None => Self::None,
@@ -269,6 +287,36 @@ impl Default for Drag {
             fingers: 3,
             lift_timeout_ms: 300,
             keep_drag_on_release: false,
+        }
+    }
+}
+
+/// Four-finger gestures. On by default; the swipes follow Windows' own four-finger gestures
+/// (content follows the fingers: swipe left shows the next desktop).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Four {
+    pub enabled: bool,
+    pub tap: Action,
+    pub swipe_left: Action,
+    pub swipe_right: Action,
+    pub swipe_up: Action,
+    pub swipe_down: Action,
+    pub pinch_in: Action,
+    pub pinch_out: Action,
+}
+
+impl Default for Four {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tap: Action::None,
+            swipe_left: Action::DesktopNext,
+            swipe_right: Action::DesktopPrev,
+            swipe_up: Action::TaskView,
+            swipe_down: Action::ShowDesktop,
+            pinch_in: Action::None,
+            pinch_out: Action::None,
         }
     }
 }
@@ -563,6 +611,7 @@ impl Config {
     pub fn feature_flags(&self) -> [bool; FEATURE_COUNT] {
         [
             self.drag.enabled,
+            self.four.enabled,
             self.five.enabled,
             self.press.enabled,
             self.long_hold.enabled,
@@ -590,6 +639,22 @@ impl Config {
                 format!("{}本指ドラッグ", self.drag.fingers),
                 "ドラッグ".into(),
             ));
+        }
+        if self.four.enabled {
+            let f = &self.four;
+            for (name, a) in [
+                ("4本指でタップ", &f.tap),
+                ("4本指で左にスワイプ", &f.swipe_left),
+                ("4本指で右にスワイプ", &f.swipe_right),
+                ("4本指で上にスワイプ", &f.swipe_up),
+                ("4本指で下にスワイプ", &f.swipe_down),
+                ("4本指でピンチイン", &f.pinch_in),
+                ("4本指でピンチアウト", &f.pinch_out),
+            ] {
+                if named(a) {
+                    out.push((name.into(), a.label()));
+                }
+            }
         }
         if self.five.enabled {
             let f = &self.five;
@@ -752,6 +817,7 @@ mod tests {
         cfg.general.theme = ThemeChoice::Light;
         cfg.drag.enabled = true;
         cfg.drag.fingers = 4;
+        cfg.four.swipe_left = Action::Keys("Ctrl+Alt+Right".into());
         cfg.five.pinch_in = Action::TaskView;
         cfg.five.swipe_up = Action::Keys("Win+Tab".into());
         cfg.press.haptic_strength = HapticStrength::Firm;
@@ -886,11 +952,11 @@ items = [{ label = "コピー", command = "ctrl+c" }]
     #[test]
     fn enabled_count_counts_feature_toggles() {
         let mut cfg = Config::default();
-        // Defaults: edge sliders and ring menu are on.
-        assert_eq!(cfg.enabled_count(), (2, FEATURE_COUNT));
+        // Defaults: four-finger gestures, edge sliders and ring menu are on.
+        assert_eq!(cfg.enabled_count(), (3, FEATURE_COUNT));
         cfg.drag.enabled = true;
         cfg.window.enabled = true;
-        assert_eq!(cfg.enabled_count(), (4, FEATURE_COUNT));
+        assert_eq!(cfg.enabled_count(), (5, FEATURE_COUNT));
     }
 
     #[test]
@@ -899,9 +965,48 @@ items = [{ label = "コピー", command = "ctrl+c" }]
         let list = cfg.assignments();
         assert!(list.contains(&("5本指の長押し".into(), "リングメニュー".into())));
         assert!(list.contains(&("左端をスライド".into(), "明るさ".into())));
+        assert!(list.contains(&("4本指で左にスワイプ".into(), "次のデスクトップ".into())));
         cfg.ring.enabled = false;
         cfg.edge.enabled = false;
+        cfg.four.enabled = false;
         assert!(cfg.assignments().is_empty());
+    }
+
+    #[test]
+    fn four_defaults_and_old_files() {
+        // A file from before `[four]` existed gets the four-finger defaults.
+        let cfg: Config = toml::from_str(
+            "[five]
+enabled = true
+",
+        )
+        .unwrap();
+        assert_eq!(cfg.four, Four::default());
+        assert!(cfg.four.enabled);
+        assert_eq!(cfg.four.swipe_left, Action::DesktopNext);
+        assert_eq!(cfg.four.swipe_right, Action::DesktopPrev);
+        assert_eq!(cfg.four.swipe_up, Action::TaskView);
+        assert_eq!(cfg.four.swipe_down, Action::ShowDesktop);
+        assert_eq!(cfg.four.tap, Action::None);
+        assert_eq!(cfg.four.pinch_in, Action::None);
+        assert_eq!(cfg.four.pinch_out, Action::None);
+        // A partial `[four]` keeps the other defaults.
+        let cfg: Config = toml::from_str(
+            "[four]
+swipe_up = \"none\"
+",
+        )
+        .unwrap();
+        assert_eq!(cfg.four.swipe_up, Action::None);
+        assert_eq!(cfg.four.swipe_left, Action::DesktopNext);
+    }
+
+    #[test]
+    fn desktop_actions_have_tokens_and_labels() {
+        assert_eq!(Action::DesktopPrev.to_token(), "desktop_prev");
+        assert_eq!(Action::from_token("desktop_next"), Action::DesktopNext);
+        assert_eq!(Action::DesktopPrev.label(), "前のデスクトップ");
+        assert_eq!(Action::DesktopNext.label(), "次のデスクトップ");
     }
 
     fn temp_dir(name: &str) -> PathBuf {

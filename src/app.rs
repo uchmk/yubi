@@ -396,6 +396,7 @@ impl App {
         match self.page {
             Page::Home => return home::home(ui, t, cfg, self.diagnostics.connected()),
             Page::Drag => return features::drag(ui, t, cfg, &self.win_values),
+            Page::Four => return features::four(ui, t, cfg, &self.win_values),
             Page::Five => features::five(ui, t, cfg),
             Page::CustomPress => features::custom_press(ui, t, cfg),
             Page::LongHold => features::long_hold(ui, t, cfg),

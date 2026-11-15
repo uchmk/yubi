@@ -40,6 +40,7 @@ impl DevShot {
         let all = [
             ("home", Page::Home),
             ("drag", Page::Drag),
+            ("four", Page::Four),
             ("five", Page::Five),
             ("press", Page::CustomPress),
             ("longhold", Page::LongHold),
@@ -74,6 +75,8 @@ impl DevShot {
         }
         for &(n, page) in &[
             ("home", Page::Home),
+            ("four", Page::Four),
+            ("five", Page::Five),
             ("fingerhold", Page::FingerHold),
             ("diagnostics", Page::Diagnostics),
             ("monitor", Page::Monitor),

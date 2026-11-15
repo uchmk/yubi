@@ -282,6 +282,8 @@ fn drag_does_not_jump_when_three_fingers_become_two_and_back() {
     assert_eq!(count(&out, |a| matches!(a, Action::DragEnd)), 1);
     let sum: f32 = drag_moves(&out).iter().map(|m| m.0).sum();
     assert!(sum < 11.0, "moved {sum} mm, the cursor jumped");
+    // The 4 mm after the finger came back must move the cursor too (the drag really resumed).
+    assert!(sum > 6.0, "moved only {sum} mm, the drag did not resume");
     for (dx, dy) in drag_moves(&out) {
         assert!(dx.abs() < 2.5 && dy.abs() < 2.5, "jump of ({dx}, {dy}) mm");
     }
@@ -498,6 +500,114 @@ fn five_off_by_default() {
     s.scale_ring(0.6, 200);
     s.lift(0);
     assert!(real(&s.run(&Config::default())).is_empty());
+}
+
+// ---- four fingers ----
+
+/// `n` fingers on a ring of radius 20 mm * `scale`.
+fn ring_n(n: usize, scale: f32) -> Pts {
+    (0..n)
+        .map(|k| {
+            let a = (90.0 + 360.0 / n as f32 * k as f32).to_radians();
+            (80.0 + 20.0 * scale * a.cos(), 57.0 + 20.0 * scale * a.sin())
+        })
+        .collect()
+}
+
+fn four_run(cfg: &Config, then: impl Fn(&mut Seq, &[(f32, f32)])) -> Vec<config::Action> {
+    let mut s = Seq::default();
+    let p = ring_n(4, 1.0);
+    s.still(&p, 100);
+    then(&mut s, &p);
+    s.lift(0);
+    triggers(&s.run(cfg))
+}
+
+fn four_swipe(dx: f32, dy: f32) -> Vec<config::Action> {
+    four_run(&Config::default(), |s, p| {
+        s.glide(p, dx, dy, 250);
+    })
+}
+
+#[test]
+fn four_swipes_use_the_default_bindings() {
+    assert_eq!(four_swipe(-25.0, 0.0), vec![config::Action::DesktopNext]);
+    assert_eq!(four_swipe(25.0, 0.0), vec![config::Action::DesktopPrev]);
+    assert_eq!(four_swipe(0.0, -25.0), vec![config::Action::TaskView]);
+    assert_eq!(four_swipe(0.0, 25.0), vec![config::Action::ShowDesktop]);
+}
+
+#[test]
+fn four_default_swipes_dispatch_to_ctrl_win_arrows() {
+    use super::dispatch::{Plan, plan_for};
+    let left = four_swipe(-25.0, 0.0);
+    assert!(matches!(plan_for(&left[0]), Plan::Keys(k) if k.len() == 3));
+    assert_eq!(left, vec![config::Action::DesktopNext]);
+}
+
+#[test]
+fn four_pinch_in_and_out() {
+    let mut cfg = Config::default();
+    cfg.four.pinch_in = config::Action::AppSwitch;
+    cfg.four.pinch_out = config::Action::Find;
+    let pinch = |scale: f32| {
+        let mut s = Seq::default();
+        s.still(&ring_n(4, 1.0), 100);
+        for i in 1..=18u64 {
+            let k = 1.0 + (scale - 1.0) * i as f32 / 18.0;
+            s.frames.push(frame(s.t, &ring_n(4, k)));
+            s.t += STEP;
+        }
+        s.lift(0);
+        triggers(&s.run(&cfg))
+    };
+    assert_eq!(pinch(0.6), vec![config::Action::AppSwitch]);
+    assert_eq!(pinch(1.5), vec![config::Action::Find]);
+}
+
+#[test]
+fn four_tap_fires_when_bound() {
+    let mut cfg = Config::default();
+    cfg.four.tap = config::Action::Find;
+    let mut s = Seq::default();
+    s.still(&ring_n(4, 1.0), 60);
+    s.lift(0);
+    assert_eq!(triggers(&s.run(&cfg)), vec![config::Action::Find]);
+    // Unbound by default: a tap does nothing.
+    assert!(triggers(&s.run(&Config::default())).is_empty());
+}
+
+#[test]
+fn four_still_hold_fires_nothing() {
+    let mut cfg = Config::default();
+    cfg.four.tap = config::Action::Find;
+    assert!(four_run(&cfg, |s, p| s.still(p, 1500)).is_empty());
+}
+
+#[test]
+fn four_swipes_yield_to_a_four_finger_drag() {
+    let mut cfg = drag_cfg(4);
+    cfg.four.pinch_in = config::Action::None;
+    let mut s = Seq::default();
+    let p = ring_n(4, 1.0);
+    s.still(&p, 100);
+    s.glide(&p, -25.0, 0.0, 250);
+    s.lift(0);
+    let out = s.run(&cfg);
+    assert!(triggers(&out).is_empty());
+    assert_eq!(count(&out, |a| matches!(a, Action::DragBegin)), 1);
+}
+
+#[test]
+fn four_off_gives_nothing() {
+    let mut cfg = Config::default();
+    cfg.four.enabled = false;
+    assert!(
+        four_run(&cfg, |s, p| {
+            s.glide(p, -25.0, 0.0, 250);
+        })
+        .is_empty()
+    );
 }
 
 // ---- per-app filter and thresholds ----

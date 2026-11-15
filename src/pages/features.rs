@@ -95,6 +95,76 @@ pub fn drag(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win: &win_gestures::Value
     cmd
 }
 
+/// The 4-finger page: tap, four swipe directions and pinch, plus the notes about what overlaps.
+pub fn four(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win: &win_gestures::Values) -> Option<Cmd> {
+    let on = feature_top(ui, t, cfg, Page::Four);
+    let mut cmd = windows_conflict(ui, t, win, 4, on);
+    if on && cfg.drag.enabled && cfg.drag.fingers == 4 {
+        group(ui, t, |g| {
+            g.wrapped_row(|ui| {
+                ui.label(
+                    RichText::new("ドラッグに 4 本指を使っているため、スワイプは使えません")
+                        .size(t.fs_small)
+                        .color(t.accent),
+                );
+                if widgets::button(ui, t, "ドラッグを開く").clicked() {
+                    cmd = Some(Cmd::Goto(Page::Drag));
+                }
+            });
+        });
+    }
+    ui.add_enabled_ui(on, |ui| {
+        let f = &mut cfg.four;
+        section_header(ui, t, "タップ");
+        group(ui, t, |g| {
+            g.action_row("タップ", "4本指で軽く触れたとき", "four-tap", &mut f.tap);
+        });
+        section_header(ui, t, "スワイプ");
+        group(ui, t, |g| {
+            g.action_row(
+                "左にスワイプ",
+                "4本指で左へなぞったとき",
+                "four-left",
+                &mut f.swipe_left,
+            );
+            g.action_row(
+                "右にスワイプ",
+                "4本指で右へなぞったとき",
+                "four-right",
+                &mut f.swipe_right,
+            );
+            g.action_row(
+                "上にスワイプ",
+                "4本指で上へなぞったとき",
+                "four-up",
+                &mut f.swipe_up,
+            );
+            g.action_row(
+                "下にスワイプ",
+                "4本指で下へなぞったとき",
+                "four-down",
+                &mut f.swipe_down,
+            );
+        });
+        section_header(ui, t, "ピンチ");
+        group(ui, t, |g| {
+            g.action_row(
+                "ピンチイン",
+                "4本指で指を寄せたとき",
+                "four-in",
+                &mut f.pinch_in,
+            );
+            g.action_row(
+                "ピンチアウト",
+                "4本指で指を広げたとき",
+                "four-out",
+                &mut f.pinch_out,
+            );
+        });
+    });
+    cmd
+}
+
 pub fn five(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
     let on = feature_top(ui, t, cfg, Page::Five);
     ui.add_enabled_ui(on, |ui| {

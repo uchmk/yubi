@@ -15,6 +15,7 @@ use crate::engine::Engine;
 use crate::icons;
 use crate::nav::{NAV, Node, Page};
 use crate::pages::{Cmd, diagnostics::Diagnostics, features, general, home};
+use crate::resident::{self, Resident};
 use crate::search::{self, Entry};
 use crate::theme::{self, Tokens};
 use crate::widgets::{device_status, icon_button, nav_group_header, nav_item, paint_icon};
@@ -45,6 +46,12 @@ pub struct App {
     search_open: bool,
     search_index: Vec<Entry>,
     devshot: Option<crate::devshot::DevShot>,
+    resident: Option<Resident>,
+    quitting: bool,
+    /// Frames left in which to keep the window hidden (`--background`; eframe shows it after the first frame).
+    hide_frames: u8,
+    /// `--background` without an icon after this time: show the window instead of staying invisible.
+    icon_deadline: Option<Instant>,
 }
 
 impl App {
@@ -72,7 +79,79 @@ impl App {
             search_open: false,
             search_index: search::index(),
             devshot: crate::devshot::DevShot::from_env(),
+            resident: None,
+            quitting: false,
+            hide_frames: 0,
+            icon_deadline: None,
         }
+    }
+
+    /// Attach the tray: closing the window then hides it instead of exiting.
+    pub fn set_resident(&mut self, resident: Option<Resident>, background: bool) {
+        self.hide_frames = if background && resident.is_some() {
+            3
+        } else {
+            0
+        };
+        self.icon_deadline =
+            (background && resident.is_some()).then(|| Instant::now() + Duration::from_secs(35));
+        self.resident = resident;
+    }
+
+    /// Apply tray requests and turn a window close into hide (unless the tray asked to quit).
+    fn resident_tick(&mut self, ctx: &egui::Context) {
+        let Some(r) = &self.resident else {
+            return;
+        };
+        r.set_paused(!self.cfg.gestures_enabled);
+        if self.hide_frames > 0 {
+            self.hide_frames -= 1;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            ctx.request_repaint();
+        }
+        let events = r.poll();
+        if let Some(deadline) = self.icon_deadline {
+            if r.icon_ready() {
+                self.icon_deadline = None;
+            } else if Instant::now() >= deadline {
+                // No tray icon after all the retries: do not stay invisible.
+                self.icon_deadline = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            } else {
+                ctx.request_repaint_after(Duration::from_secs(1));
+            }
+        }
+        let close = ctx.input(|i| i.viewport().close_requested());
+        if close && !self.quitting {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            r.on_hidden();
+        }
+        let mut ack = false;
+        for ev in events {
+            match ev {
+                resident::Event::ToggleGestures => {
+                    self.cfg.gestures_enabled = !self.cfg.gestures_enabled;
+                }
+                resident::Event::EndSession => {
+                    // Logoff/shutdown: flush the config and release held keys now.
+                    self.save_if_due(ctx, true);
+                    self.engine.shutdown();
+                    ack = true;
+                }
+                resident::Event::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        if ack && let Some(r) = &self.resident {
+            r.ack_end_session();
+        }
+        // `ui` does not run while the window is hidden, so publish and save here too.
+        self.engine.config.publish(&self.cfg);
+        self.save_if_due(ctx, false);
     }
 
     /// Hand the config and window focus to the engine and take its latest state.
@@ -350,6 +429,11 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Runs every frame, and also while the window is hidden (when `ui` does not).
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.resident_tick(ctx);
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         if let Some(shot) = self.devshot.as_ref().and_then(|d| d.current()) {
             // Keep `saved` in step so the capture run never writes the config file.
@@ -432,6 +516,9 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         self.engine.shutdown();
+        if let Some(r) = self.resident.as_mut() {
+            r.shutdown();
+        }
         if self.devshot.is_none() && self.cfg != self.saved {
             let _ = config::save(&self.config_path, &self.cfg);
         }

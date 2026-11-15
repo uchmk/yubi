@@ -1,4 +1,4 @@
-//! 全般: theme, start with Windows (placeholder), config folder and version.
+//! 全般: theme, start with Windows, config folder and version.
 
 use std::path::Path;
 
@@ -44,12 +44,31 @@ pub fn general(
     });
     section_header(ui, t, "起動");
     group(ui, t, |g| {
+        let before = cfg.general.start_with_windows;
+        let st = crate::resident::autostart::status(before);
+        let desc = if let Some(e) = &st.error {
+            format!("自動起動を登録できませんでした: {e}")
+        } else if st.not_registered {
+            "自動起動を登録できませんでした（登録が見つかりません）。".to_string()
+        } else if st.ram_disk_build {
+            "開発用のビルドです。再起動で消えるため、自動起動には使えません".to_string()
+        } else if st.target_missing {
+            "登録された起動先が見つかりません。yubi を起動し直すと更新されます。".to_string()
+        } else {
+            "サインイン時にタスクトレイで開始します。".to_string()
+        };
         g.toggle_row(
             None,
             "Windows の起動時に開始",
-            "この設定はまだ反映されません。",
+            &desc,
             &mut cfg.general.start_with_windows,
         );
+        if cfg.general.start_with_windows != before
+            && crate::resident::autostart::apply(cfg.general.start_with_windows).is_err()
+        {
+            // Keep the toggle honest: it stays as it was; the error shows on the next frame.
+            cfg.general.start_with_windows = before;
+        }
     });
     section_header(ui, t, "Windows のジェスチャーとの競合");
     group(ui, t, |g| {

@@ -1,16 +1,17 @@
 //! 入力モニター (live contact view) and 診断 (device info, ranges, counters).
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui::{
     self, Align2, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
 };
 
-use crate::input::{Contact, DeviceInfo, FpsCounter, InputEvent, TouchFrame};
+use crate::engine::MonitorState;
+use crate::engine::recognizer::GestureEvent;
+use crate::input::{Contact, DeviceInfo, now_us};
 use crate::nav::Page;
 use crate::theme::Tokens;
-use crate::widgets::{self, group};
+use crate::widgets::{self, group, section_header};
 
 /// Tallest the pad drawing may get, so the page stays usable in small windows.
 const PAD_MAX_HEIGHT: f32 = 360.0;
@@ -21,107 +22,148 @@ const HOVER_STROKE: f32 = 2.0;
 const PRESSED_STROKE: f32 = 3.0;
 const CONTACT_FILL_ALPHA: f32 = 0.55;
 
+/// Frames older than this no longer count towards the live rate.
+const STALE_US: u64 = 1_000_000;
+
 #[derive(Default)]
 pub struct Diagnostics {
-    device: Option<Arc<DeviceInfo>>,
-    frame: Option<TouchFrame>,
-    fps: FpsCounter,
-    peak_contacts: usize,
-    frames_total: u64,
+    /// Copy of the engine's latest state, refreshed once per UI frame.
+    state: MonitorState,
 }
 
 impl Diagnostics {
-    pub fn ingest(&mut self, ev: InputEvent, now: f64) {
-        match ev {
-            InputEvent::Frame(f) => {
-                self.fps.record(now);
-                self.frames_total += 1;
-                self.peak_contacts = self.peak_contacts.max(f.contacts.len());
-                self.device = Some(f.device.clone());
-                self.frame = Some(f);
-            }
-            InputEvent::DeviceArrived(d) => self.device = Some(d),
-            InputEvent::DeviceRemoved(name) => {
-                if self.device.as_ref().is_some_and(|d| d.name == name) {
-                    self.device = None;
-                    self.frame = None;
-                }
-            }
-        }
+    pub fn update(&mut self, state: MonitorState) {
+        self.state = state;
     }
 
     /// True once a trackpad was seen and not removed since.
     pub fn connected(&self) -> bool {
-        self.device.is_some()
+        self.state.device.is_some()
+    }
+
+    /// Frames per second, 0 once the stream has stopped.
+    fn rate(&self) -> usize {
+        if now_us().saturating_sub(self.state.last_frame_us) > STALE_US {
+            0
+        } else {
+            self.state.fps
+        }
     }
 
     pub fn monitor(&mut self, ui: &mut Ui, t: &Tokens) {
         widgets::page_header(ui, t, Page::Monitor.label(), Page::Monitor.subtitle());
-        let Some(device) = self.device.clone() else {
+        let Some(device) = self.state.device.clone() else {
             empty_state(ui, t);
             return;
         };
         self.pad(ui, t, &device);
-        let rate = self.fps.rate(ui.input(|i| i.time));
-        if rate > 0 {
+        if self.rate() > 0 {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
     }
 
-    pub fn info(&mut self, ui: &mut Ui, t: &Tokens, now: f64) {
+    pub fn info(&mut self, ui: &mut Ui, t: &Tokens, _now: f64) {
         widgets::page_header(
             ui,
             t,
             Page::Diagnostics.label(),
             Page::Diagnostics.subtitle(),
         );
-        let Some(device) = self.device.clone() else {
-            empty_state(ui, t);
-            return;
-        };
-        let rate = self.fps.rate(now);
+        let rate = self.rate();
         if rate > 0 {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
-        let frame = self.frame.as_ref();
-        let contacts = frame.map_or(0, |f| f.contacts.len());
-        let pressures = frame
-            .map(|f| {
-                f.contacts
-                    .iter()
-                    .filter_map(|c| c.pressure.map(|p| format!("#{} {p:.2}", c.id)))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let pressure_text = if device.pressure_range.is_none() {
-            "非対応".to_owned()
-        } else if pressures.is_empty() {
-            "—".to_owned()
+        if let Some(device) = self.state.device.clone() {
+            let frame = self.state.frame.as_ref();
+            let contacts = frame.map_or(0, |f| f.contacts.len());
+            let pressures = frame
+                .map(|f| {
+                    f.contacts
+                        .iter()
+                        .filter_map(|c| c.pressure.map(|p| format!("#{} {p:.2}", c.id)))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let pressure_text = if device.pressure_range.is_none() {
+                "非対応".to_owned()
+            } else if pressures.is_empty() {
+                "—".to_owned()
+            } else {
+                pressures.join("  ")
+            };
+            let range = |r: (i32, i32)| format!("{} … {}", r.0, r.1);
+            let rows: Vec<(&str, String)> = vec![
+                ("デバイス", device.name.clone()),
+                ("デバイス ID", device.id.clone()),
+                (
+                    "接触数",
+                    format!("{contacts}（最大 {}）", self.state.peak_contacts),
+                ),
+                (
+                    "スキャン時間",
+                    frame.map_or("—".into(), |f| f.scan_time.to_string()),
+                ),
+                ("レポートレート", format!("{rate} フレーム/秒")),
+                ("圧力", pressure_text),
+                ("X の範囲", range(device.x_range)),
+                ("Y の範囲", range(device.y_range)),
+                (
+                    "圧力の範囲",
+                    device.pressure_range.map_or("—".into(), range),
+                ),
+                (
+                    "物理サイズ",
+                    format!("{:.1} × {:.1} mm", device.size_mm.0, device.size_mm.1),
+                ),
+                ("指スロット数", device.finger_slots.to_string()),
+            ];
+            group(ui, t, |g| {
+                for (label, value) in &rows {
+                    g.info_row(label, value);
+                }
+            });
         } else {
-            pressures.join("  ")
-        };
-        let range = |r: (i32, i32)| format!("{} … {}", r.0, r.1);
-        let rows: Vec<(&str, String)> = vec![
-            ("デバイス", device.name.clone()),
+            empty_state(ui, t);
+        }
+
+        section_header(ui, t, "入力とエンジン");
+        let s = &self.state;
+        let mut rows: Vec<(&str, String)> = vec![
             (
-                "接触数",
-                format!("{contacts}（最大 {}）", self.peak_contacts),
+                "エンジン",
+                if s.gestures_enabled {
+                    "動作中".to_owned()
+                } else {
+                    "停止中（ジェスチャーが無効）".to_owned()
+                },
+            ),
+            ("認識中の指の本数", s.finger_count.to_string()),
+            (
+                "最後のジェスチャー",
+                s.last_event.map_or("—".into(), event_label),
+            ),
+            ("受信フレーム合計", s.frames_total.to_string()),
+            ("破棄した部分フレーム", s.partial_frames.to_string()),
+            ("破棄した接触", s.dropped_contacts.to_string()),
+            (
+                "前回のフレーム間隔",
+                s.last_delta_ms
+                    .map_or("—".into(), |ms| format!("{ms:.1} ms")),
             ),
             (
-                "スキャン時間",
-                frame.map_or("—".into(), |f| f.scan_time.to_string()),
+                "非フォーカス中に受信したフレーム",
+                s.frames_background.to_string(),
             ),
-            ("レポートレート", format!("{rate} フレーム/秒")),
-            ("圧力", pressure_text),
-            ("X の範囲", range(device.x_range)),
-            ("Y の範囲", range(device.y_range)),
-            (
-                "圧力の範囲",
-                device.pressure_range.map_or("—".into(), range),
-            ),
-            ("指スロット数", device.finger_slots.to_string()),
-            ("受信フレーム合計", self.frames_total.to_string()),
         ];
+        if let Some(e) = &s.failed {
+            rows.push(("入力スレッドのエラー", e.clone()));
+        }
+        if let Some(e) = &s.session_error {
+            rows.push(("セッションの監視", e.clone()));
+        }
+        if let Some(e) = &s.record_error {
+            rows.push(("記録のエラー", e.clone()));
+        }
         group(ui, t, |g| {
             for (label, value) in &rows {
                 g.info_row(label, value);
@@ -133,7 +175,7 @@ impl Diagnostics {
         let aspect = device.aspect();
         let width = ui.available_width().min(PAD_MAX_HEIGHT * aspect).max(1.0);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(width, width / aspect), Sense::hover());
-        let pressed = self.frame.as_ref().is_some_and(|f| f.button);
+        let pressed = self.state.frame.as_ref().is_some_and(|f| f.button);
         let painter = ui.painter_at(rect.expand(t.space_xs));
         let radius = egui::CornerRadius::same(t.radius_lg);
         painter.rect_filled(rect, radius, t.card);
@@ -144,7 +186,12 @@ impl Diagnostics {
         };
         painter.rect_stroke(rect, radius, outline, StrokeKind::Inside);
 
-        if self.frame.as_ref().is_none_or(|f| f.contacts.is_empty()) {
+        if self
+            .state
+            .frame
+            .as_ref()
+            .is_none_or(|f| f.contacts.is_empty())
+        {
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
@@ -153,7 +200,9 @@ impl Diagnostics {
                 t.text_muted,
             );
         }
-        let Some(frame) = &self.frame else { return };
+        let Some(frame) = &self.state.frame else {
+            return;
+        };
         for c in &frame.contacts {
             draw_contact(&painter, t, rect, c);
         }
@@ -190,6 +239,20 @@ fn draw_contact(painter: &egui::Painter, t: &Tokens, pad: Rect, c: &Contact) {
         FontId::monospace(t.fs_small),
         t.text,
     );
+}
+
+/// Short Japanese description of a recognizer event.
+fn event_label(e: GestureEvent) -> String {
+    match e {
+        GestureEvent::FingerCount(n) => format!("指の本数 {n}"),
+        GestureEvent::TouchStart { fingers } => format!("タッチ開始（{fingers} 本）"),
+        GestureEvent::TouchEnd {
+            fingers,
+            duration_us,
+        } => format!("タッチ終了（{fingers} 本、{} ms）", duration_us / 1000),
+        GestureEvent::Tap { fingers } => format!("タップ（{fingers} 本）"),
+        GestureEvent::LongHold { fingers } => format!("長押し（{fingers} 本）"),
+    }
 }
 
 fn empty_state(ui: &mut Ui, t: &Tokens) {

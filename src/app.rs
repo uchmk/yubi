@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::mpsc::Receiver;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
@@ -11,13 +11,14 @@ use eframe::egui::{
 };
 
 use crate::config::{self, Config};
+use crate::engine::Engine;
 use crate::icons;
-use crate::input::InputEvent;
 use crate::nav::{NAV, Node, Page};
 use crate::pages::{Cmd, diagnostics::Diagnostics, features, general, home};
 use crate::search::{self, Entry};
 use crate::theme::{self, Tokens};
 use crate::widgets::{device_status, icon_button, nav_group_header, nav_item, paint_icon};
+use crate::win_gestures;
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
@@ -27,8 +28,13 @@ pub struct App {
     saved: Config,
     config_path: PathBuf,
     dirty_since: Option<Instant>,
-    rx: Receiver<InputEvent>,
+    engine: Engine,
     diagnostics: Diagnostics,
+    /// Windows gesture registry values, read when the 全般 page opens and after each change.
+    win_values: win_gestures::Values,
+    win_read_error: Option<String>,
+    win_message: Option<String>,
+    win_page_was_open: bool,
     applied_theme: config::ThemeChoice,
     /// User preference for the nav pane when the window is wide.
     nav_collapsed: bool,
@@ -42,7 +48,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(ctx: &egui::Context, rx: Receiver<InputEvent>) -> Self {
+    pub fn new(ctx: &egui::Context, engine: Engine) -> Self {
         let config_path = config::default_path();
         let cfg = config::load(&config_path);
         theme::apply(ctx, cfg.general.theme);
@@ -53,8 +59,12 @@ impl App {
             cfg,
             config_path,
             dirty_since: None,
-            rx,
+            engine,
             diagnostics: Diagnostics::default(),
+            win_values: [None; 4],
+            win_read_error: None,
+            win_message: None,
+            win_page_was_open: false,
             nav_collapsed: false,
             nav_expanded_narrow: false,
             group_open: [true; NAV.len()],
@@ -65,10 +75,39 @@ impl App {
         }
     }
 
-    fn drain_input(&mut self, now: f64) {
-        while let Ok(ev) = self.rx.try_recv() {
-            self.diagnostics.ingest(ev, now);
+    /// Hand the config and window focus to the engine and take its latest state.
+    fn sync_engine(&mut self, ctx: &egui::Context) {
+        self.engine.config.publish(&self.cfg);
+        let focused = ctx.input(|i| i.focused);
+        self.engine.focused.store(focused, Ordering::Relaxed);
+        self.diagnostics.update(self.engine.snapshot());
+    }
+
+    fn backup_path(&self) -> PathBuf {
+        self.config_path.with_file_name(win_gestures::BACKUP_FILE)
+    }
+
+    fn refresh_win_values(&mut self) {
+        match win_gestures::read_values() {
+            Ok(v) => {
+                self.win_values = v;
+                self.win_read_error = None;
+            }
+            Err(e) => {
+                // The shown values may be stale; say so instead of keeping them silently.
+                self.win_read_error = Some(format!(
+                    "Windows の設定を読めません（表示は最新ではない可能性があります）: {e}"
+                ));
+            }
         }
+    }
+
+    fn report(&mut self, what: &str, r: Result<(), String>) {
+        self.win_message = Some(match r {
+            Ok(()) => format!("{what}しました。"),
+            Err(e) => e,
+        });
+        self.refresh_win_values();
     }
 
     /// Save at most once per `SAVE_DEBOUNCE` while the config has unsaved changes (throttle, so a long
@@ -92,6 +131,14 @@ impl App {
     fn run(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Goto(p) => self.page = p,
+            Cmd::DisableWindowsGestures => {
+                let r = win_gestures::disable(&self.backup_path());
+                self.report("無効に", r);
+            }
+            Cmd::RestoreWindowsGestures => {
+                let r = win_gestures::restore(&self.backup_path());
+                self.report("元に戻", r);
+            }
             Cmd::OpenConfigFolder => {
                 if let Some(dir) = self.config_path.parent() {
                     let _ = std::fs::create_dir_all(dir);
@@ -283,7 +330,20 @@ impl App {
             Page::Haptic => features::haptic(ui, t, cfg),
             Page::Monitor => self.diagnostics.monitor(ui, t),
             Page::Diagnostics => self.diagnostics.info(ui, t, now),
-            Page::General => return general::general(ui, t, cfg, &self.config_path),
+            Page::General => {
+                let view = general::WinGestureView {
+                    values: &self.win_values,
+                    backup_exists: self
+                        .config_path
+                        .with_file_name(win_gestures::BACKUP_FILE)
+                        .exists(),
+                    message: self
+                        .win_read_error
+                        .as_deref()
+                        .or(self.win_message.as_deref()),
+                };
+                return general::general(ui, t, cfg, &self.config_path, &view);
+            }
         }
         None
     }
@@ -303,7 +363,13 @@ impl eframe::App for App {
         }
         let t = Tokens::of(ui.ctx());
         let now = ui.input(|i| i.time);
-        self.drain_input(now);
+        let ctx_now = ui.ctx().clone();
+        self.sync_engine(&ctx_now);
+        let general_open = self.page == Page::General;
+        if general_open && !self.win_page_was_open {
+            self.refresh_win_values();
+        }
+        self.win_page_was_open = general_open;
         let narrow = ui.ctx().content_rect().width() < t.nav_auto_collapse_w;
         let collapsed = if narrow {
             !self.nav_expanded_narrow
@@ -364,6 +430,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self) {
+        self.engine.shutdown();
         if self.devshot.is_none() && self.cfg != self.saved {
             let _ = config::save(&self.config_path, &self.cfg);
         }

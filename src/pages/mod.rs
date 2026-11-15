@@ -10,4 +10,6 @@ use crate::nav::Page;
 pub enum Cmd {
     Goto(Page),
     OpenConfigFolder,
+    DisableWindowsGestures,
+    RestoreWindowsGestures,
 }

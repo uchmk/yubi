@@ -1,0 +1,6 @@
+# Two fingers land together, barely move, lift after 120 ms: a 2-finger tap.
+{"t_us":0,"contacts":[{"id":1,"x_mm":60.0,"y_mm":50.0},{"id":2,"x_mm":80.0,"y_mm":52.0}]}
+{"t_us":20000,"contacts":[{"id":1,"x_mm":60.1,"y_mm":50.0},{"id":2,"x_mm":80.0,"y_mm":52.1}]}
+{"t_us":60000,"contacts":[{"id":1,"x_mm":60.3,"y_mm":50.2},{"id":2,"x_mm":80.2,"y_mm":52.1}]}
+{"t_us":100000,"contacts":[{"id":1,"x_mm":60.3,"y_mm":50.2},{"id":2,"x_mm":80.2,"y_mm":52.1}]}
+{"t_us":120000,"contacts":[]}

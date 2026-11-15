@@ -6,8 +6,9 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::mpsc::{Sender, channel};
+use std::sync::{Arc, Mutex};
 
 use windows::Win32::Devices::HumanInterfaceDevice::*;
 use windows::Win32::Foundation::*;
@@ -17,7 +18,10 @@ use windows::Win32::UI::Input::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
-use super::{Contact, DeviceInfo, FrameAccumulator, InputEvent, TouchFrame, normalize};
+use super::{
+    Contact, DEFAULT_SIZE_MM, DeviceInfo, FrameAccumulator, InputCounters, InputEvent, InputHandle,
+    Scan, TouchFrame, extent_mm, normalize, now_us,
+};
 
 const PAGE_GENERIC_DESKTOP: u16 = 0x01;
 const PAGE_BUTTON: u16 = 0x09;
@@ -40,6 +44,8 @@ struct Axis {
     min: i32,
     max: i32,
     bits: u16,
+    /// Physical length in millimetres, when the descriptor declares usable units.
+    extent_mm: Option<f32>,
 }
 
 impl Axis {
@@ -48,6 +54,7 @@ impl Axis {
             min: c.LogicalMin,
             max: c.LogicalMax,
             bits: c.BitSize,
+            extent_mm: extent_mm(c.PhysicalMin, c.PhysicalMax, c.Units, c.UnitsExp),
         }
     }
 
@@ -79,6 +86,8 @@ struct Device {
     layout: Layout,
     info: Arc<DeviceInfo>,
     acc: FrameAccumulator,
+    /// Last button state that was read successfully (kept when a read fails).
+    last_button: bool,
 }
 
 impl Device {
@@ -91,6 +100,7 @@ struct State {
     tx: Sender<InputEvent>,
     wake: Box<dyn Fn() + Send>,
     devices: HashMap<usize, Option<Device>>,
+    counters: Arc<InputCounters>,
     log: bool,
 }
 
@@ -98,32 +108,108 @@ thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
-pub fn spawn(wake: impl Fn() + Send + 'static) -> Receiver<InputEvent> {
-    let (tx, rx) = channel();
-    let wake: Box<dyn Fn() + Send> = Box::new(wake);
-    let spawned = std::thread::Builder::new()
-        .name("yubi-rawinput".into())
-        .spawn(move || {
-            if let Err(e) = run(tx, wake) {
-                eprintln!("yubi: raw input thread failed: {e}");
-            }
-        });
-    if let Err(e) = spawned {
-        eprintln!("yubi: cannot start raw input thread: {e}");
-    }
-    rx
+/// HWND of the input window (0 until created); `stop` posts WM_CLOSE to it.
+struct Shared {
+    hwnd: AtomicIsize,
+    stop: AtomicBool,
 }
 
-fn run(tx: Sender<InputEvent>, wake: Box<dyn Fn() + Send>) -> windows::core::Result<()> {
+type Wake = Arc<Mutex<Box<dyn Fn() + Send>>>;
+
+pub fn spawn(wake: impl Fn() + Send + 'static) -> InputHandle {
+    let (tx, rx) = channel();
+    let counters = Arc::new(InputCounters::default());
+    let shared = Arc::new(Shared {
+        hwnd: AtomicIsize::new(0),
+        stop: AtomicBool::new(false),
+    });
+    let wake: Wake = Arc::new(Mutex::new(Box::new(wake)));
+    let spawned = {
+        let (tx, counters, shared, wake) =
+            (tx.clone(), counters.clone(), shared.clone(), wake.clone());
+        std::thread::Builder::new()
+            .name("yubi-rawinput".into())
+            .spawn(move || {
+                let fail_tx = tx.clone();
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run(tx, counters, &shared, &wake)
+                }));
+                let failure = match outcome {
+                    Ok(Ok(())) => None,
+                    Ok(Err(e)) => {
+                        eprintln!("yubi: raw input thread failed: {e}");
+                        Some(format!("入力スレッド: {e}"))
+                    }
+                    Err(_) => {
+                        eprintln!("yubi: raw input thread panicked");
+                        Some("入力スレッドが停止しました".to_string())
+                    }
+                };
+                if let Some(msg) = failure {
+                    let _ = fail_tx.send(InputEvent::Failed(msg));
+                    if let Ok(w) = wake.lock() {
+                        w();
+                    }
+                }
+            })
+    };
+    let join = match spawned {
+        Ok(j) => Some(j),
+        Err(e) => {
+            eprintln!("yubi: cannot start raw input thread: {e}");
+            let _ = tx.send(InputEvent::Failed(format!(
+                "入力スレッドを開始できません: {e}"
+            )));
+            if let Ok(w) = wake.lock() {
+                w();
+            }
+            None
+        }
+    };
+    InputHandle {
+        rx: Some(rx),
+        counters,
+        stopper: Box::new(move || {
+            shared.stop.store(true, Ordering::SeqCst);
+            let h = shared.hwnd.load(Ordering::SeqCst);
+            if h != 0 {
+                unsafe {
+                    let _ = PostMessageW(Some(HWND(h as *mut _)), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
+        }),
+        join,
+        _keep: Some(tx),
+    }
+}
+
+fn run(
+    tx: Sender<InputEvent>,
+    counters: Arc<InputCounters>,
+    shared: &Shared,
+    wake: &Wake,
+) -> windows::core::Result<()> {
     let log = std::env::var_os("YUBI_LOG_INPUT").is_some();
+    let wake_state = wake.clone();
     STATE.with(|s| {
         *s.borrow_mut() = Some(State {
             tx,
-            wake,
+            wake: Box::new(move || {
+                if let Ok(w) = wake_state.lock() {
+                    w();
+                }
+            }),
             devices: HashMap::new(),
+            counters,
             log,
         });
     });
+    let result = unsafe { message_loop(shared) };
+    STATE.with(|s| *s.borrow_mut() = None);
+    result
+}
+
+unsafe fn message_loop(shared: &Shared) -> windows::core::Result<()> {
     unsafe {
         let hinstance = GetModuleHandleW(None)?.into();
         let class = w!("YubiRawInputWindow");
@@ -150,6 +236,11 @@ fn run(tx: Sender<InputEvent>, wake: Box<dyn Fn() + Send>) -> windows::core::Res
             Some(hinstance),
             None,
         )?;
+        shared.hwnd.store(hwnd.0 as isize, Ordering::SeqCst);
+        if shared.stop.load(Ordering::SeqCst) {
+            let _ = DestroyWindow(hwnd);
+            return Ok(());
+        }
         let rid = [RAWINPUTDEVICE {
             usUsagePage: PAGE_DIGITIZER,
             usUsage: USAGE_TOUCH_PAD,
@@ -164,6 +255,14 @@ fn run(tx: Sender<InputEvent>, wake: Box<dyn Fn() + Send>) -> windows::core::Res
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        // Stop receiving before the window goes away.
+        let off = [RAWINPUTDEVICE {
+            usUsagePage: PAGE_DIGITIZER,
+            usUsage: USAGE_TOUCH_PAD,
+            dwFlags: RIDEV_REMOVE,
+            hwndTarget: HWND::default(),
+        }];
+        let _ = RegisterRawInputDevices(&off, size_of::<RAWINPUTDEVICE>() as u32);
     }
     Ok(())
 }
@@ -182,11 +281,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }),
                 GIDC_REMOVAL => with_state(|st| {
                     if let Some(Some(dev)) = st.devices.remove(&(handle.0 as usize)) {
-                        st.emit(InputEvent::DeviceRemoved(dev.info.name.clone()));
+                        st.emit(InputEvent::DeviceRemoved(dev.info.id.clone()));
                     }
                 }),
                 _ => {}
             }
+        }
+        WM_DESTROY => {
+            unsafe { PostQuitMessage(0) };
         }
         _ => {}
     }
@@ -324,10 +426,21 @@ unsafe fn build_device(handle: HANDLE, log: bool) -> Option<Device> {
             eprintln!("yubi: hid device {handle:?} has no finger collections");
         }
         let layout = layout?;
-        let name = read_device_name(handle)
+        let path = read_device_name(handle);
+        let id = path.as_deref().map_or_else(
+            || format!("handle-{:?}", handle.0),
+            String::from_utf16_lossy,
+        );
+        let name = path
             .map(|p| product_name(&p))
             .unwrap_or_else(|| "HID touch pad".to_string());
+        let size_mm = match (layout.x.extent_mm, layout.y.extent_mm) {
+            (Some(w), Some(h)) => (w, h),
+            _ => DEFAULT_SIZE_MM,
+        };
         let info = Arc::new(DeviceInfo {
+            id,
+            size_mm,
             name,
             x_range: (layout.x.min, layout.x.max),
             y_range: (layout.y.min, layout.y.max),
@@ -339,6 +452,7 @@ unsafe fn build_device(handle: HANDLE, log: bool) -> Option<Device> {
             layout,
             info,
             acc: FrameAccumulator::default(),
+            last_button: false,
         })
     }
 }
@@ -492,9 +606,10 @@ fn get_flag(pd: PHIDP_PREPARSED_DATA, link: u16, usage: u16, report: &mut [u8]) 
     get_usages(pd, PAGE_DIGITIZER, link, report).map(|set| set.contains(&usage))
 }
 
-fn decode_report(dev: &mut Device, report: &mut [u8]) -> Option<TouchFrame> {
+fn decode_report(dev: &mut Device, report: &mut [u8], t_us: u64) -> Option<TouchFrame> {
     let pd = dev.pd();
     let lay = &dev.layout;
+    let (w_mm, h_mm) = dev.info.size_mm;
 
     // A report without a Contact ID for the first finger is not a touch report.
     get_value(pd, PAGE_DIGITIZER, lay.fingers[0], USAGE_CONTACT_ID, report)?;
@@ -503,55 +618,83 @@ fn decode_report(dev: &mut Device, report: &mut [u8]) -> Option<TouchFrame> {
         .count_link
         .and_then(|l| get_value(pd, PAGE_DIGITIZER, l, USAGE_CONTACT_COUNT, report))
         .unwrap_or(0) as usize;
-    let scan_time = lay
-        .scan_link
-        .and_then(|l| get_value(pd, PAGE_DIGITIZER, l, USAGE_SCAN_TIME, report))
-        .unwrap_or(0);
+    let scan = match lay.scan_link {
+        None => Scan::Absent,
+        Some(l) => get_value(pd, PAGE_DIGITIZER, l, USAGE_SCAN_TIME, report)
+            .map_or(Scan::Unreadable, Scan::At),
+    };
+    let scan_time = match scan {
+        Scan::At(t) => t,
+        _ => 0,
+    };
+    // A failed read keeps the previous state instead of reporting "released".
     let mut button = false;
+    let mut button_ok = !lay.button_links.is_empty();
     for &l in &lay.button_links {
-        if let Some(set) = get_usages(pd, PAGE_BUTTON, l, report) {
-            button |= set.contains(&1);
+        match get_usages(pd, PAGE_BUTTON, l, report) {
+            Some(set) => button |= set.contains(&1),
+            None => button_ok = false,
         }
     }
 
     let mut slots = Vec::with_capacity(lay.fingers.len());
     for &link in &lay.fingers {
-        let Some(id) = get_value(pd, PAGE_DIGITIZER, link, USAGE_CONTACT_ID, report) else {
-            continue;
-        };
-        let rx = get_value(pd, PAGE_GENERIC_DESKTOP, link, USAGE_X, report).unwrap_or(0);
-        let ry = get_value(pd, PAGE_GENERIC_DESKTOP, link, USAGE_Y, report).unwrap_or(0);
-        let pressure = lay.pressure.and_then(|a| {
-            get_value(pd, PAGE_DIGITIZER, link, USAGE_TIP_PRESSURE, report)
-                .map(|v| normalize(a.decode(v), a.min, a.max))
-        });
-        slots.push(Contact {
-            id,
-            x: normalize(lay.x.decode(rx), lay.x.min, lay.x.max),
-            y: normalize(lay.y.decode(ry), lay.y.min, lay.y.max),
-            tip: get_flag(pd, link, USAGE_TIP_SWITCH, report).unwrap_or(false),
-            confidence: get_flag(pd, link, USAGE_CONFIDENCE, report).unwrap_or(true),
-            pressure,
-        });
+        // Any of these failing drops the contact; nothing is replaced by 0 / false.
+        let contact = (|| {
+            let id = get_value(pd, PAGE_DIGITIZER, link, USAGE_CONTACT_ID, report)?;
+            let rx = get_value(pd, PAGE_GENERIC_DESKTOP, link, USAGE_X, report)?;
+            let ry = get_value(pd, PAGE_GENERIC_DESKTOP, link, USAGE_Y, report)?;
+            let tip = get_flag(pd, link, USAGE_TIP_SWITCH, report)?;
+            let pressure = lay.pressure.and_then(|a| {
+                get_value(pd, PAGE_DIGITIZER, link, USAGE_TIP_PRESSURE, report)
+                    .map(|v| normalize(a.decode(v), a.min, a.max))
+            });
+            let x = normalize(lay.x.decode(rx), lay.x.min, lay.x.max);
+            let y = normalize(lay.y.decode(ry), lay.y.min, lay.y.max);
+            Some(Contact {
+                id,
+                x,
+                y,
+                x_mm: x * w_mm,
+                y_mm: y * h_mm,
+                tip,
+                // Pads without a Confidence usage report every contact as confident.
+                confidence: get_flag(pd, link, USAGE_CONFIDENCE, report).unwrap_or(true),
+                pressure,
+            })
+        })();
+        slots.push(contact);
     }
     // Pads that do not report Contact Count: treat every active slot as the frame.
     let (slots, announced) = if lay.count_link.is_none() {
-        let active: Vec<Contact> = slots.into_iter().filter(|c| c.tip).collect();
+        // Unreadable slots are filtered out below; count them first.
+        dev.acc
+            .note_unreadable(slots.iter().filter(|c| c.is_none()).count());
+        let active: Vec<Option<Contact>> = slots
+            .into_iter()
+            .filter(|c| c.as_ref().is_some_and(|c| c.tip))
+            .collect();
         let n = active.len();
         (active, n)
     } else {
         (slots, announced)
     };
-    let contacts = dev.acc.push(slots, announced)?;
+    if button_ok {
+        dev.last_button = button;
+    }
+    let contacts = dev.acc.push(slots, announced, scan)?;
     Some(TouchFrame {
         contacts,
-        button,
+        button: dev.last_button,
         scan_time,
+        t_us,
         device: dev.info.clone(),
     })
 }
 
 fn handle_input(hraw: HRAWINPUT) {
+    // Stamp on arrival, before any parsing.
+    let t_us = now_us();
     unsafe {
         let mut size = 0u32;
         let header = size_of::<RAWINPUTHEADER>() as u32;
@@ -588,6 +731,7 @@ fn handle_input(hraw: HRAWINPUT) {
         let handle = hdr.hDevice;
         with_state(|st| {
             let log = st.log;
+            let counters = st.counters.clone();
             let mut frames = Vec::new();
             let Some(dev) = ensure_device(st, handle) else {
                 if log {
@@ -600,7 +744,17 @@ fn handle_input(hraw: HRAWINPUT) {
             };
             for i in 0..count {
                 let mut report = data[i * size_hid..(i + 1) * size_hid].to_vec();
-                match decode_report(dev, &mut report) {
+                let decoded = decode_report(dev, &mut report, t_us);
+                let (partial, contacts) = dev.acc.take_dropped();
+                if partial > 0 {
+                    counters
+                        .partial_frames
+                        .fetch_add(partial, Ordering::Relaxed);
+                }
+                if contacts > 0 {
+                    counters.contacts.fetch_add(contacts, Ordering::Relaxed);
+                }
+                match decoded {
                     Some(f) => frames.push(f),
                     None if log => eprintln!("yubi: report skipped ({} bytes)", report.len()),
                     None => {}

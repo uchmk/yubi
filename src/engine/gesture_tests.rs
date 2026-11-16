@@ -1786,3 +1786,142 @@ fn a_tap_survives_a_same_count_touch_that_never_moves() {
     assert_eq!(triggers(&out), vec![config::Action::Find]);
     assert_eq!(count(&out, |a| matches!(a, Action::WindowMoveBegin)), 0);
 }
+
+// ---- title-bar flick at the end of a drag ----
+
+/// A drag that glides (`dx`, `dy`) in `ms` and lifts; returns the actions.
+fn drag_flick_run(cfg: &Config, dx: f32, dy: f32, ms: u64) -> Vec<(u64, Action)> {
+    let mut s = Seq::default();
+    let p = row(3, 60.0, 50.0);
+    s.still(&p, 100);
+    s.glide(&p, dx, dy, ms);
+    s.lift(0);
+    s.run(cfg)
+}
+
+fn flicks(out: &[(u64, Action)]) -> Vec<config::Action> {
+    out.iter()
+        .filter_map(|(_, a)| match a {
+            Action::DragFlick(x) => Some(x.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_flick_ends_the_drag_at_once_and_runs_the_direction_action() {
+    let cfg = drag_cfg(3);
+    for (dx, dy, want) in [
+        (-30.0, 0.0, config::Action::AppSwitch),
+        (30.0, 0.0, config::Action::AppSwitch),
+        (0.0, -30.0, config::Action::TaskView),
+        (0.0, 30.0, config::Action::ShowDesktop),
+    ] {
+        let out = drag_flick_run(&cfg, dx, dy, 66);
+        assert_eq!(flicks(&out), vec![want], "{dx},{dy}");
+        // DragEnd comes right before the flick, at the lift: no lift timeout to wait for.
+        let end = time_of(&out, |a| matches!(a, Action::DragEnd)).expect("drag ends");
+        let flick = time_of(&out, |a| matches!(a, Action::DragFlick(_))).unwrap();
+        assert_eq!(end, flick);
+        assert_eq!(count(&out, |a| matches!(a, Action::DragEnd)), 1);
+        let pos = |f: &dyn Fn(&Action) -> bool| out.iter().position(|(_, a)| f(a)).unwrap();
+        assert_eq!(
+            pos(&|a| matches!(a, Action::DragFlick(_))),
+            pos(&|a| matches!(a, Action::DragEnd)) + 1
+        );
+    }
+}
+
+#[test]
+fn a_flick_with_fingers_leaving_one_by_one_still_counts() {
+    let mut s = Seq::default();
+    let p = row(3, 60.0, 50.0);
+    s.still(&p, 100);
+    let p = s.glide(&p, 0.0, -30.0, 66);
+    // Two fingers stay a moment after the third left.
+    s.still(&p[..2], 100);
+    s.lift(0);
+    let out = s.run(&drag_cfg(3));
+    assert_eq!(flicks(&out), vec![config::Action::TaskView]);
+    assert_eq!(count(&out, |a| matches!(a, Action::DragEnd)), 1);
+}
+
+#[test]
+fn a_slow_lift_keeps_the_lift_timeout() {
+    let out = drag_flick_run(&drag_cfg(3), 30.0, 0.0, 800);
+    assert!(flicks(&out).is_empty());
+    let end = time_of(&out, |a| matches!(a, Action::DragEnd)).expect("drag ends");
+    let lift = out
+        .iter()
+        .rev()
+        .find_map(|(t, a)| matches!(a, Action::DragMove { .. }).then_some(*t))
+        .unwrap();
+    assert!(end >= lift + 300_000, "ended {end}, last move {lift}");
+}
+
+#[test]
+fn a_diagonal_flick_is_not_a_flick() {
+    let out = drag_flick_run(&drag_cfg(3), 25.0, 25.0, 66);
+    assert!(flicks(&out).is_empty());
+}
+
+#[test]
+fn flick_off_or_unassigned_leaves_the_drag_alone() {
+    let mut cfg = drag_cfg(3);
+    cfg.drag.flick.enabled = false;
+    let out = drag_flick_run(&cfg, 30.0, 0.0, 66);
+    assert!(flicks(&out).is_empty());
+    let end = time_of(&out, |a| matches!(a, Action::DragEnd)).unwrap();
+    let last = out.last().unwrap().0;
+    assert_eq!(end, last, "ended by the lift timeout");
+    // Only the unassigned direction falls back to the normal end.
+    let mut cfg = drag_cfg(3);
+    cfg.drag.flick.right = config::Action::None;
+    assert!(flicks(&drag_flick_run(&cfg, 30.0, 0.0, 66)).is_empty());
+    assert_eq!(
+        flicks(&drag_flick_run(&cfg, -30.0, 0.0, 66)),
+        vec![config::Action::AppSwitch]
+    );
+}
+
+#[test]
+fn a_flick_ends_a_kept_drag_too() {
+    let mut cfg = drag_cfg(3);
+    cfg.drag.keep_drag_on_release = true;
+    let out = drag_flick_run(&cfg, 0.0, 30.0, 66);
+    assert_eq!(flicks(&out), vec![config::Action::ShowDesktop]);
+    assert_eq!(count(&out, |a| matches!(a, Action::DragEnd)), 1);
+}
+
+#[test]
+fn window_move_rows_do_not_flick() {
+    let mut s = Seq::default();
+    let p = tap_then_touch(&mut s, 100);
+    s.glide(&p, 30.0, 0.0, 66);
+    s.lift(0);
+    let out = s.run(&window_cfg());
+    assert!(flicks(&out).is_empty());
+    assert_eq!(
+        count(&out, |a| matches!(a, Action::WindowMoveEnd { .. })),
+        1
+    );
+}
+
+#[test]
+fn a_per_app_override_changes_the_flick_action() {
+    let mut cfg = drag_cfg(3);
+    let mut p = Profile {
+        exe_name: "a.exe".to_owned(),
+        enabled: true,
+        ..Profile::default()
+    };
+    p.overrides
+        .insert("drag.flick.up".to_owned(), config::Action::Find);
+    cfg.profiles.push(p);
+    let g = super::types::GestureCfg::from_config(&cfg, Some("A.exe"));
+    let f = g.drag_flick.expect("flick on");
+    assert_eq!(f.up, config::Action::Find);
+    assert_eq!(f.down, config::Action::ShowDesktop);
+    let g = super::types::GestureCfg::from_config(&cfg, Some("b.exe"));
+    assert_eq!(g.drag_flick.unwrap().up, config::Action::TaskView);
+}

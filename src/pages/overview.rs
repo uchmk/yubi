@@ -42,6 +42,13 @@ pub fn gesture_name(key: &str) -> String {
                 .map_or(*d, |(_, j)| *j);
             format!("{}本指で{d}にスワイプ", n())
         }
+        ["drag", "flick", d] => {
+            let d = DIR_NAMES
+                .iter()
+                .find(|(t, _)| t == d)
+                .map_or(*d, |(_, j)| *j);
+            format!("タイトルバーを{d}に払う")
+        }
         ["pinch", _, "in"] => format!("{}本指でピンチイン", n()),
         ["pinch", _, "out"] => format!("{}本指でピンチアウト", n()),
         ["press", _, "light"] => format!("{}本指で軽く押し込む", n()),
@@ -91,6 +98,7 @@ pub fn page_of(key: &str) -> Page {
     let parts: Vec<&str> = key.split('.').collect();
     match parts.as_slice() {
         ["tap" | "swipe" | "pinch", ..] => Page::Gesture,
+        ["drag", ..] => Page::Drag,
         ["press", ..] => Page::CustomPress,
         ["hold", "long", _] => Page::LongHold,
         ["hold", "thumb", ..] => Page::ThumbHold,
@@ -118,6 +126,7 @@ pub fn feature_on(cfg: &Config, page: Page) -> bool {
 /// has one switch per finger count).
 pub fn feature_on_key(cfg: &Config, key: &str) -> bool {
     match key.split('.').collect::<Vec<_>>().as_slice() {
+        ["drag", "flick", _] => cfg.drag.flick.enabled,
         ["tap" | "swipe" | "pinch", "3", ..] => cfg.three.enabled,
         ["tap" | "swipe" | "pinch", "5", ..] => cfg.five.enabled,
         ["tap" | "swipe" | "pinch", ..] => cfg.four.enabled,

@@ -307,7 +307,49 @@ pub fn drag(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win: &win_gestures::Value
             }
         });
     });
+    flick_section(ui, t, cfg);
     cmd
+}
+
+/// 「タイトルバーで払う」: the action of each direction when a plain drag that began on a title
+/// bar ends with a flick.
+fn flick_section(ui: &mut Ui, t: &Tokens, cfg: &mut Config) {
+    section_header(ui, t, "タイトルバーで払う");
+    ui.label(
+        RichText::new(
+            "ドラッグでタイトルバーをつかみ、払うように指を離すと、その方向に割り当てた操作を実行します。文字の選択中は動きません。",
+        )
+        .size(t.fs_small)
+        .color(t.text_muted),
+    );
+    ui.add_space(t.space_sm);
+    let f = &mut cfg.drag.flick;
+    group(ui, t, |g| {
+        g.toggle_row(
+            None,
+            "タイトルバーで払う操作を使う",
+            "オフにすると、指を離したときは通常のドラッグ終了だけです。",
+            &mut f.enabled,
+        );
+    });
+    let on = f.enabled;
+    ui.add_enabled_ui(on, |ui| {
+        group(ui, t, |g| {
+            for (title, dir, id, slot) in [
+                ("左に払う", "左", "drag-flick-left", &mut f.left),
+                ("右に払う", "右", "drag-flick-right", &mut f.right),
+                ("上に払う", "上", "drag-flick-up", &mut f.up),
+                ("下に払う", "下", "drag-flick-down", &mut f.down),
+            ] {
+                g.action_row(
+                    title,
+                    &format!("タイトルバーを{dir}へ払って離したとき"),
+                    id,
+                    slot,
+                );
+            }
+        });
+    });
 }
 
 /// The tab of the ジェスチャー page (0: 3 fingers, 1: 4 fingers, 2: 5 fingers), kept between frames.

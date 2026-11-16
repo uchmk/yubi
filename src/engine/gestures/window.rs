@@ -2,10 +2,9 @@
 //! the window under the cursor, a flick on release snaps it; or resize it from the 3x3 cell the
 //! cursor is in. Also remembers the latest tap that arms a tap-then-move row.
 
-use std::collections::VecDeque;
-
 use super::super::arbitration::{Owner, Proposal};
-use super::super::types::{Action, Ctx, GestureCfg, Point, SnapDir, Thresholds, dist};
+use super::super::types::{Action, Ctx, GestureCfg, Point, Thresholds, dist};
+use super::flick::FlickTracker;
 use crate::config::{DragAction, DragStart};
 
 #[derive(Debug, Default)]
@@ -19,7 +18,7 @@ pub struct WindowState {
     origin: Option<Point>,
     last: Option<Point>,
     /// Recent (time, centroid) samples with exactly three fingers, for the flick speed.
-    samples: VecDeque<(u64, Point)>,
+    flick: FlickTracker,
 }
 
 impl WindowState {
@@ -92,14 +91,7 @@ impl WindowState {
     }
 
     fn sample(&mut self, ctx: &Ctx, c: Point) {
-        if !ctx.from_frame {
-            return;
-        }
-        let now = ctx.now;
-        self.samples.push_back((now, c));
-        while self.samples.front().is_some_and(|(t, _)| t + 200_000 < now) {
-            self.samples.pop_front();
-        }
+        self.flick.sample(ctx, c);
     }
 
     /// All fingers are up: close what was in flight and arm what follows a tap.
@@ -116,14 +108,14 @@ impl WindowState {
             if self.resize {
                 out.push(Action::WindowResizeEnd);
             } else {
-                let snap = if g.flick { self.flick_dir(th, t) } else { None };
+                let snap = if g.flick { self.flick.dir(th, t) } else { None };
                 out.push(Action::WindowMoveEnd { snap });
             }
             *self = Self::default();
         }
         self.origin = None;
         self.last = None;
-        self.samples.clear();
+        self.flick.clear();
         self.tap = None;
         if is_tap
             && g.drag_row(peak)
@@ -143,40 +135,5 @@ impl WindowState {
             });
         }
         *self = Self::default();
-    }
-
-    /// Direction of the flick that ended a window move, from the speed over the last
-    /// `flick_window_us` before the lift.
-    fn flick_dir(&self, th: &Thresholds, lift_us: u64) -> Option<SnapDir> {
-        let &(t_last, p_last) = self.samples.back()?;
-        if lift_us.saturating_sub(t_last) > th.flick_stale_us {
-            return None;
-        }
-        let &(t0, p0) = self
-            .samples
-            .iter()
-            .find(|(t, _)| t + th.flick_window_us >= t_last)?;
-        let span = t_last - t0;
-        if span < th.flick_min_span_us {
-            return None;
-        }
-        let secs = span as f32 / 1e6;
-        let (vx, vy) = ((p_last.0 - p0.0) / secs, (p_last.1 - p0.1) / secs);
-        let (ax, ay) = (vx.abs(), vy.abs());
-        if ax.hypot(ay) < th.flick_speed_mm_s {
-            return None;
-        }
-        let ratio = th.flick_axis_ratio;
-        if ax >= ratio * ay {
-            Some(if vx > 0.0 {
-                SnapDir::Right
-            } else {
-                SnapDir::Left
-            })
-        } else if ay >= ratio * ax {
-            Some(if vy > 0.0 { SnapDir::Down } else { SnapDir::Up })
-        } else {
-            None
-        }
     }
 }

@@ -733,6 +733,32 @@ pub struct Drag {
     pub five: DragRow,
     pub lift_timeout_ms: u16,
     pub keep_drag_on_release: bool,
+    /// A flick at the end of a title-bar drag runs an action.
+    pub flick: DragFlick,
+}
+
+/// `[drag.flick]`: the flick that ends a plain drag begun on a window's title bar. Defaults follow
+/// Windows' own three-finger swipes (up: task view, down: desktop, sideways: app switcher).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DragFlick {
+    pub enabled: bool,
+    pub left: Action,
+    pub right: Action,
+    pub up: Action,
+    pub down: Action,
+}
+
+impl Default for DragFlick {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            left: Action::AppSwitch,
+            right: Action::AppSwitch,
+            up: Action::TaskView,
+            down: Action::ShowDesktop,
+        }
+    }
 }
 
 impl Default for Drag {
@@ -743,6 +769,7 @@ impl Default for Drag {
             five: DragRow::default(),
             lift_timeout_ms: 300,
             keep_drag_on_release: false,
+            flick: DragFlick::default(),
         }
     }
 }
@@ -2095,7 +2122,7 @@ pub struct SensRange {
 impl Sensitivity {
     pub const DRAG_GAIN: SensRange = SensRange {
         min: 2.0,
-        max: 40.0,
+        max: 60.0,
     };
     pub const DRAG_START: SensRange = SensRange { min: 0.8, max: 5.0 };
     pub const WINDOW_START: SensRange = SensRange {
@@ -2236,6 +2263,10 @@ macro_rules! slot_of {
             "swipe.5.down" => Some(&$($m)* $cfg.five.swipe_down),
             "pinch.5.in" => Some(&$($m)* $cfg.five.pinch_in),
             "pinch.5.out" => Some(&$($m)* $cfg.five.pinch_out),
+            "drag.flick.left" => Some(&$($m)* $cfg.drag.flick.left),
+            "drag.flick.right" => Some(&$($m)* $cfg.drag.flick.right),
+            "drag.flick.up" => Some(&$($m)* $cfg.drag.flick.up),
+            "drag.flick.down" => Some(&$($m)* $cfg.drag.flick.down),
             "hold.long.1" => Some(&$($m)* $cfg.long_hold.actions.one),
             "hold.long.2" => Some(&$($m)* $cfg.long_hold.actions.two),
             "hold.long.3" => Some(&$($m)* $cfg.long_hold.actions.three),
@@ -2528,6 +2559,25 @@ impl Config {
                 DragStart::TapThenMove => "タップ後に",
             };
             out.push((format!("{n}本指で{how}動かす"), what.into()));
+        }
+        // The flick only exists for a plain drag row.
+        let f = &self.drag.flick;
+        if f.enabled
+            && self
+                .drag
+                .active()
+                .any(|(_, r)| r.action == DragAction::Drag)
+        {
+            for (name, a) in [
+                ("タイトルバーを左に払う", &f.left),
+                ("タイトルバーを右に払う", &f.right),
+                ("タイトルバーを上に払う", &f.up),
+                ("タイトルバーを下に払う", &f.down),
+            ] {
+                if named(a) {
+                    out.push((name.into(), a.label()));
+                }
+            }
         }
         if self.three.enabled {
             let f = &self.three;
@@ -4117,7 +4167,7 @@ enabled = true
         )
         .unwrap();
         let s = &p.config.sensitivity;
-        assert_eq!(s.drag_gain, 40.0);
+        assert_eq!(s.drag_gain, 60.0);
         assert_eq!(s.drag_start_mm, 1.5);
         assert_eq!(s.swipe_mm, 8.0);
         assert_eq!(s.tap_ms, 120);
@@ -4544,6 +4594,69 @@ enabled = true
                 .iter()
                 .any(|(n, _)| n.starts_with("3本指で左"))
         );
+    }
+
+    #[test]
+    fn drag_flick_defaults_round_trip_and_old_files() {
+        // A file from before `[drag.flick]` existed gets the defaults (Windows' 3-finger swipes).
+        let cfg: Config = toml::from_str(
+            "[drag.three]
+enabled = true
+",
+        )
+        .unwrap();
+        assert_eq!(cfg.drag.flick, DragFlick::default());
+        let f = &cfg.drag.flick;
+        assert!(f.enabled);
+        assert_eq!(
+            (&f.left, &f.right, &f.up, &f.down),
+            (
+                &Action::AppSwitch,
+                &Action::AppSwitch,
+                &Action::TaskView,
+                &Action::ShowDesktop
+            )
+        );
+        // A partial table fills in the rest.
+        let cfg: Config = toml::from_str(
+            "[drag.flick]
+up = \"find\"
+",
+        )
+        .unwrap();
+        assert_eq!(cfg.drag.flick.up, Action::Find);
+        assert_eq!(cfg.drag.flick.down, Action::ShowDesktop);
+        // Round trip, and the id slots reach the fields.
+        let mut cfg = Config::default();
+        cfg.drag.flick.enabled = false;
+        cfg.drag.flick.left = Action::None;
+        cfg.drag.flick.down = Action::Find;
+        let back: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.drag.flick, cfg.drag.flick);
+        let id = GestureId::parse("drag.flick.down").unwrap();
+        assert_eq!(cfg.binding(&id), Some(Action::Find));
+        assert!(cfg.set_binding(&id, Action::TaskView));
+        assert_eq!(cfg.drag.flick.down, Action::TaskView);
+    }
+
+    #[test]
+    fn drag_flick_assignments_follow_the_switch_and_a_plain_drag_row() {
+        let mut cfg = Config::default();
+        cfg.drag.only(3);
+        let has = |c: &Config| {
+            c.assignments()
+                .iter()
+                .any(|(n, _)| n == "タイトルバーを上に払う")
+        };
+        assert!(has(&cfg));
+        cfg.drag.flick.enabled = false;
+        assert!(!has(&cfg));
+        cfg.drag.flick.enabled = true;
+        cfg.drag.three.action = DragAction::WindowMove;
+        assert!(!has(&cfg));
+        cfg.drag.three.action = DragAction::Drag;
+        cfg.drag.flick.up = Action::None;
+        assert!(!has(&cfg));
     }
 
     #[test]
@@ -5112,7 +5225,7 @@ command = 5
         tokens.sort();
         tokens.dedup();
         assert_eq!(tokens.len(), n, "ids are unique");
-        assert_eq!(n, 3 + 3 * 6 + 10 + 5 + 24 + 20);
+        assert_eq!(n, 3 + 3 * 6 + 4 + 10 + 5 + 24 + 20);
         for id in &all {
             assert_eq!(GestureId::parse(id.as_str()).as_ref(), Some(id));
             assert_eq!(id.to_string(), id.as_str());
@@ -5146,8 +5259,8 @@ command = 5
                 assert_eq!(cfg.binding(id), Some(sentinel), "{id}");
             }
         }
-        // 7 (three) + 7 (four) + 7 (five) + 10 (press) + 5 (long hold) + 24 (corners) + 20 (hold combos).
-        assert_eq!(bound, 80);
+        // 7 (three) + 7 (four) + 7 (five) + 4 (drag flick) + 10 (press) + 5 (long hold) + 24 (corners) + 20 (hold combos).
+        assert_eq!(bound, 84);
         // Every id of the config is bindable now; an unknown token is not an id at all.
         assert_eq!(bound, GestureId::all().len());
         // Walk the saved file: every action-valued entry (outside [edge]) is a sentinel.
@@ -5182,7 +5295,7 @@ command = 5
                 );
             }
         }
-        assert_eq!(sentinels, 80);
+        assert_eq!(sentinels, 84);
     }
 
     #[test]

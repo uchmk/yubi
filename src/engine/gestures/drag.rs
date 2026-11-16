@@ -1,7 +1,8 @@
 //! Drag: N fingers move the cursor with the left button held.
 
 use super::super::arbitration::{Owner, Proposal};
-use super::super::types::{Action, Ctx, GestureCfg, Point, dist};
+use super::super::types::{Action, Ctx, GestureCfg, Point, Thresholds, dist};
+use super::flick::FlickTracker;
 use crate::config::DragAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -24,6 +25,8 @@ pub struct DragState {
     last: Option<Point>,
     /// The finger count of the row that started (or is about to start) the drag.
     n: usize,
+    /// Centroid samples while the full finger count moves the drag, for the title-bar flick.
+    flick: FlickTracker,
 }
 
 impl DragState {
@@ -102,6 +105,7 @@ impl DragState {
         }
         self.phase = DragPhase::Active;
         self.last = Some(c);
+        self.flick.sample(ctx, c);
     }
 
     /// Emit the movement of an active drag (the drag owns the session).
@@ -123,11 +127,15 @@ impl DragState {
                     }
                 }
                 self.last = Some(c);
+                self.flick.sample(ctx, c);
             }
             _ => {
                 // The count changed: re-base so the cursor does not jump.
                 self.last = None;
                 if ctx.stable < n {
+                    if self.flick_end(ctx.g, ctx.th, ctx.now, out) {
+                        return;
+                    }
                     self.phase = if ctx.g.keep_drag {
                         DragPhase::Held
                     } else {
@@ -142,13 +150,22 @@ impl DragState {
     pub fn finish(
         &mut self,
         g: &GestureCfg,
+        th: &Thresholds,
         is_tap: bool,
         drag_was_held: bool,
         t: u64,
         out: &mut Vec<Action>,
     ) {
+        // A flick ends the drag at once, whatever `keep_drag` says (a tap is not a flick).
+        let tap_ends =
+            matches!(self.phase, DragPhase::Active | DragPhase::Held) && is_tap && drag_was_held;
+        if !tap_ends && self.phase == DragPhase::Active && self.flick_end(g, th, t, out) {
+            self.origin = None;
+            self.last = None;
+            return;
+        }
         match self.phase {
-            DragPhase::Active | DragPhase::Held if is_tap && drag_was_held => {
+            DragPhase::Active | DragPhase::Held if tap_ends => {
                 out.push(Action::DragEnd);
                 *self = Self::default();
             }
@@ -163,6 +180,30 @@ impl DragState {
         }
         self.origin = None;
         self.last = None;
+        self.flick.clear();
+    }
+
+    /// The fingers lifted at `t`: when that was a flick and its direction has an action, end the
+    /// drag now and hand the action over (the title-bar check is the dispatcher's).
+    fn flick_end(
+        &mut self,
+        g: &GestureCfg,
+        th: &Thresholds,
+        t: u64,
+        out: &mut Vec<Action>,
+    ) -> bool {
+        let action = g
+            .drag_flick
+            .as_ref()
+            .zip(self.flick.dir(th, t))
+            .and_then(|(f, dir)| f.action(dir));
+        let Some(action) = action else {
+            return false;
+        };
+        out.push(Action::DragEnd);
+        out.push(Action::DragFlick(action.clone()));
+        *self = Self::default();
+        true
     }
 
     /// Close a drag that is still open (stale cancel). Emits the end so the button is released.

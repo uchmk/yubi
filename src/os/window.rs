@@ -8,8 +8,8 @@
 //!
 //! Threading: every function here may be called from any thread (no thread affinity), but one
 //! `WindowMover` must be driven from one thread at a time. Nothing waits on the target window's
-//! message loop except the single 50 ms `SendMessageTimeoutW` in `WindowMover::begin`
-//! (`WM_GETMINMAXINFO`); restores and moves are posted asynchronously (`ShowWindowAsync`,
+//! message loop except two 50 ms `SendMessageTimeoutW` calls: `WindowMover::begin`
+//! (`WM_GETMINMAXINFO`) and `caption_at` (`WM_NCHITTEST`); restores and moves are posted asynchronously (`ShowWindowAsync`,
 //! `SWP_ASYNCWINDOWPOS`), so a hung target cannot block the caller.
 //!
 //! Which rectangle? `SetWindowPos` works in `GetWindowRect` space, which on
@@ -46,10 +46,11 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP};
 use windows::Win32::UI::WindowsAndMessaging::{
     GA_ROOT, GetAncestor, GetClassNameW, GetCursorPos, GetDesktopWindow, GetForegroundWindow,
-    GetShellWindow, GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, IsWindow,
-    IsZoomed, MINMAXINFO, SMTO_ABORTIFHUNG, SW_MAXIMIZE, SW_RESTORE, SWP_ASYNCWINDOWPOS,
-    SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SendMessageTimeoutW, SetForegroundWindow,
-    SetWindowPos, ShowWindowAsync, WINDOWPLACEMENT, WM_GETMINMAXINFO, WindowFromPoint,
+    GetShellWindow, GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, HTCAPTION,
+    IsWindow, IsZoomed, MINMAXINFO, SMTO_ABORTIFHUNG, SMTO_BLOCK, SW_MAXIMIZE, SW_RESTORE,
+    SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SendMessageTimeoutW,
+    SetForegroundWindow, SetWindowPos, ShowWindowAsync, WINDOWPLACEMENT, WM_GETMINMAXINFO,
+    WM_NCHITTEST, WindowFromPoint,
 };
 
 use super::keys::{self, KeyCombo, VK_LWIN, Vk};
@@ -179,6 +180,41 @@ pub fn top_level_at(point: (i32, i32)) -> Option<Hwnd> {
         GetAncestor(h, GA_ROOT)
     };
     accept_top_level(root)
+}
+
+/// Whether the point (physical screen pixels) is on a window's title bar: the top-level window
+/// there answers `WM_NCHITTEST` with `HTCAPTION`. Any failure (no window, hung window, timeout)
+/// is `false`.
+pub fn caption_at(x: i32, y: i32) -> bool {
+    // SAFETY: plain queries; the message carries no pointers and the call times out.
+    unsafe {
+        let h = WindowFromPoint(POINT { x, y });
+        if h.0.is_null() {
+            return false;
+        }
+        let root = GetAncestor(h, GA_ROOT);
+        if root.0.is_null() {
+            return false;
+        }
+        // yubi's own windows (settings, overlays) are not something to flick away from.
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(root, Some(&mut pid));
+        if pid == std::process::id() {
+            return false;
+        }
+        let lparam = LPARAM(((y as i16 as u16 as isize) << 16) | (x as i16 as u16 as isize));
+        let mut result = 0usize;
+        let sent = SendMessageTimeoutW(
+            root,
+            WM_NCHITTEST,
+            WPARAM(0),
+            lparam,
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            50,
+            Some(&mut result),
+        );
+        sent.0 != 0 && result == HTCAPTION as usize
+    }
 }
 
 /// Cursor position in physical screen pixels.

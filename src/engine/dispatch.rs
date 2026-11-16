@@ -250,6 +250,10 @@ pub struct Dispatcher {
     level_step: Option<LevelStep>,
     /// Name shown instead of "ジェスチャー" for the next trigger (the ring's slot).
     source_override: Option<String>,
+    /// The drag in flight began on a window's title bar (decided at `DragBegin`).
+    drag_on_caption: bool,
+    /// Whether a point of the screen is a title bar (the OS call; tests swap it).
+    caption_at: fn(i32, i32) -> bool,
 }
 
 /// Cursor freeze for the edge slider and the ring, through the mouse hook (opened on first use;
@@ -617,6 +621,8 @@ impl Dispatcher {
             unavailable_shown: false,
             level_step: None,
             source_override: None,
+            drag_on_caption: false,
+            caption_at: crate::os::window::caption_at,
         }
     }
 
@@ -765,6 +771,7 @@ impl Dispatcher {
         self.resize_active = false;
         self.zoom_active = false;
         self.drag_open = false;
+        self.drag_on_caption = false;
         self.drag_px.clear();
         self.win_px.clear();
         self.resize_px.clear();
@@ -874,6 +881,8 @@ impl Dispatcher {
             Action::DragBegin => {
                 self.drag_open = true;
                 self.press_tried = true;
+                // Before the button goes down: what is under the cursor now is what is grabbed.
+                self.drag_on_caption = cursor().is_some_and(|(x, y)| (self.caption_at)(x, y));
                 // A left button still owned from an earlier refused release must not pass for a
                 // fresh down: let go first, then press for real. Either step refused = failure.
                 let ok = ex.release(LEFT) && ex.press(LEFT);
@@ -894,9 +903,13 @@ impl Dispatcher {
                     }
                 }
                 if ex.held().contains(&LEFT) {
-                    let (dx, dy) = self
-                        .drag_px
-                        .take(dx_mm * th.drag_px_per_mm, dy_mm * th.drag_px_per_mm);
+                    // A drag that took hold of a title bar moves a window: use the window speed.
+                    let gain = if self.drag_on_caption {
+                        th.window_px_per_mm
+                    } else {
+                        th.drag_px_per_mm
+                    };
+                    let (dx, dy) = self.drag_px.take(dx_mm * gain, dy_mm * gain);
                     ex.move_mouse(dx, dy);
                 }
                 note
@@ -979,6 +992,19 @@ impl Dispatcher {
             Action::Scroll { h, v } => {
                 // Sent as it comes; a refused wheel event is only worth a note, not a retry.
                 (!ex.wheel(*h, *v)).then(|| SEND_FAILED_NOTE.to_owned())
+            }
+            Action::DragFlick(a) => {
+                // The drag ended just before (`DragEnd` runs first), so the window's move loop is
+                // over. Only a drag that took hold of a title bar flicks; a text selection does not.
+                if !std::mem::take(&mut self.drag_on_caption) {
+                    return None;
+                }
+                // A refused release keeps the button down: do not fire keys over a held button.
+                if self.release_pending || ex.held().contains(&LEFT) {
+                    return None;
+                }
+                self.unavailable_shown = false;
+                self.run_plan(a, ex, "タイトルバーで払う")
             }
             Action::Trigger(a) => self.trigger(a, ex),
         }
@@ -2079,6 +2105,117 @@ mod tests {
         d.handle(&mv, &mut ex, &th, CURSOR);
         drop(ex);
         assert!(f.log.is_empty());
+    }
+
+    /// A drag that began where `caption` says, ended and flicked; returns the flick's note and
+    /// whether any key was sent for it.
+    fn flick_after_drag(
+        caption: fn(i32, i32) -> bool,
+        blocked: bool,
+        dry_run: bool,
+    ) -> (Option<String>, bool) {
+        let (mut d, _rx) = setup();
+        d.caption_at = caption;
+        d.set_blocked(blocked);
+        d.set_dry_run(dry_run);
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        d.handle(&START, &mut ex, &th, CURSOR);
+        d.handle(&Action::DragBegin, &mut ex, &th, CURSOR);
+        d.handle(&Action::DragEnd, &mut ex, &th, CURSOR);
+        let note = d.handle(
+            &Action::DragFlick(config::Action::TaskView),
+            &mut ex,
+            &th,
+            CURSOR,
+        );
+        let held = ex.held().len();
+        drop(ex);
+        assert_eq!(held, 0);
+        let keys = f
+            .log
+            .iter()
+            .any(|e| matches!(e, SynthEvent::Down(Key::Vk(0x09))));
+        (note, keys)
+    }
+
+    #[test]
+    fn a_flick_runs_only_when_the_drag_began_on_a_title_bar() {
+        let (note, keys) = flick_after_drag(|_, _| true, false, false);
+        assert_eq!(note.as_deref(), Some("タイトルバーで払う → タスクビュー"));
+        assert!(keys);
+        let (note, keys) = flick_after_drag(|_, _| false, false, false);
+        assert_eq!(note, None);
+        assert!(!keys);
+    }
+
+    #[test]
+    fn the_caption_is_asked_at_the_cursor_before_the_button_goes_down() {
+        let (mut d, _rx) = setup();
+        // Only the cursor point (100, 200) is a title bar.
+        d.caption_at = |x, y| (x, y) == (100, 200);
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        d.handle(&Action::DragBegin, &mut ex, &th, CURSOR);
+        assert!(d.drag_on_caption);
+        d.handle(&Action::DragEnd, &mut ex, &th, CURSOR);
+        d.handle(&Action::DragBegin, &mut ex, &th, || Some((1, 1)));
+        assert!(!d.drag_on_caption);
+        d.handle(&Action::DragBegin, &mut ex, &th, || None);
+        assert!(!d.drag_on_caption);
+    }
+
+    #[test]
+    fn a_flick_is_blocked_by_pause_and_practice() {
+        assert_eq!(flick_after_drag(|_, _| true, true, false), (None, false));
+        assert_eq!(flick_after_drag(|_, _| true, false, true), (None, false));
+    }
+
+    #[test]
+    fn a_title_bar_drag_moves_at_the_window_speed() {
+        let moved = |caption: fn(i32, i32) -> bool| {
+            let (mut d, _rx) = setup();
+            d.caption_at = caption;
+            let th = Thresholds {
+                drag_px_per_mm: 10.0,
+                window_px_per_mm: 50.0,
+                ..Thresholds::default()
+            };
+            let mut f = Fake::default();
+            let mut ex = Executor::new(&mut f);
+            d.handle(&Action::DragBegin, &mut ex, &th, CURSOR);
+            let mv = Action::DragMove {
+                dx_mm: 1.0,
+                dy_mm: 0.0,
+            };
+            d.handle(&mv, &mut ex, &th, CURSOR);
+            drop(ex);
+            f.log
+                .iter()
+                .find_map(|e| match e {
+                    SynthEvent::Move(dx, _) => Some(*dx),
+                    _ => None,
+                })
+                .unwrap_or(0)
+        };
+        assert_eq!(moved(|_, _| true), 50);
+        assert_eq!(moved(|_, _| false), 10);
+    }
+
+    #[test]
+    fn a_flick_is_used_up_by_one_run() {
+        let (mut d, _rx) = setup();
+        d.caption_at = |_, _| true;
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        d.handle(&Action::DragBegin, &mut ex, &th, CURSOR);
+        d.handle(&Action::DragEnd, &mut ex, &th, CURSOR);
+        let flick = Action::DragFlick(config::Action::ShowDesktop);
+        assert!(d.handle(&flick, &mut ex, &th, CURSOR).is_some());
+        assert!(d.handle(&flick, &mut ex, &th, CURSOR).is_none());
     }
 
     #[test]

@@ -57,6 +57,11 @@ impl GestureId {
         ))
     }
 
+    /// The flick at the end of a title-bar drag (`left`, `right`, `up`, `down`).
+    pub fn drag_flick(dir: &str) -> Self {
+        Self(format!("drag.flick.{dir}"))
+    }
+
     /// A finger-hold or thumb-hold combo (reserved).
     pub fn hold_combo(
         thumb_hold: bool,
@@ -87,6 +92,9 @@ impl GestureId {
             }
             out.push(Self::pinch(n, true));
             out.push(Self::pinch(n, false));
+        }
+        for d in SwipeDir::ALL {
+            out.push(Self::drag_flick(d.token()));
         }
         for n in 1..=5 {
             out.push(Self::press(n, false));
@@ -306,6 +314,9 @@ pub enum Action {
         dy_mm: f32,
     },
     DragEnd,
+    /// The drag ended with a flick: run this action if the drag began on a title bar. Always
+    /// follows a `DragEnd`; never `config::Action::None`.
+    DragFlick(config::Action),
     WindowMoveBegin,
     WindowMove {
         dx_mm: f32,
@@ -664,6 +675,45 @@ impl CornerGestureCfg {
     }
 }
 
+/// The action of each flick direction at the end of a drag, as resolved for the foreground app.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DragFlickCfg {
+    pub left: config::Action,
+    pub right: config::Action,
+    pub up: config::Action,
+    pub down: config::Action,
+}
+
+impl DragFlickCfg {
+    pub fn from_config(cfg: &Config, exe: Option<&str>) -> Option<Self> {
+        if !cfg.drag.flick.enabled {
+            return None;
+        }
+        let at = |d: &str| resolve(cfg, exe, &GestureId::drag_flick(d));
+        let c = Self {
+            left: at("left"),
+            right: at("right"),
+            up: at("up"),
+            down: at("down"),
+        };
+        [&c.left, &c.right, &c.up, &c.down]
+            .iter()
+            .any(|a| **a != config::Action::None)
+            .then_some(c)
+    }
+
+    /// What a flick toward `dir` runs (`None` for an unassigned direction).
+    pub fn action(&self, dir: SnapDir) -> Option<&config::Action> {
+        let a = match dir {
+            SnapDir::Left => &self.left,
+            SnapDir::Right => &self.right,
+            SnapDir::Up => &self.up,
+            SnapDir::Down => &self.down,
+        };
+        (*a != config::Action::None).then_some(a)
+    }
+}
+
 /// The ring menu as latched at touchdown.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RingCfg {
@@ -697,6 +747,8 @@ pub struct GestureCfg {
     pub lift_us: u64,
     pub keep_drag: bool,
     pub flick: bool,
+    /// The title-bar flick of a plain drag; `None` while it is off or no direction has an action.
+    pub drag_flick: Option<DragFlickCfg>,
     /// Indexed by `count - 3`; `None` while that count's gestures are off.
     pub multi: [Option<MultiCfg>; 3],
     /// `None` when edge sliders are off or none has a target.
@@ -828,6 +880,7 @@ impl GestureCfg {
             lift_us: u64::from(cfg.drag.lift_timeout_ms) * 1000,
             keep_drag: cfg.drag.keep_drag_on_release,
             flick: cfg.window.flick_snap,
+            drag_flick: DragFlickCfg::from_config(cfg, exe),
             multi: [
                 cfg.three.enabled.then(|| multi(3)),
                 cfg.four.enabled.then(|| multi(4)),

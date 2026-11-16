@@ -530,7 +530,8 @@ impl Recognizer {
                 self.multi.commit(hit, out);
             }
         }
-        self.drag.finish(&self.g, is_tap, s.drag_was_held, t, out);
+        self.drag
+            .finish(&self.g, &self.th, is_tap, s.drag_was_held, t, out);
         self.edge.release(out);
         self.corner.release(
             out,

@@ -4,6 +4,7 @@
 pub mod corner;
 pub mod drag;
 pub mod edge;
+pub mod flick;
 pub mod multi;
 pub mod press;
 pub mod ring;

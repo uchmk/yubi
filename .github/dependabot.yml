@@ -1,0 +1,21 @@
+version: 2
+
+# Version updates, which are not the same thing as the security alerts in the
+# repository's settings: alerts say a dependency is vulnerable, this opens the
+# pull request that moves off it. Monthly and grouped into one pull request.
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    groups:
+      cargo:
+        patterns: ["*"]
+    ignore:
+      # A new minor version of egui / eframe changes their API; moved by hand.
+      # Security updates still come through: this only stops the monthly bump.
+      - dependency-name: "egui*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "eframe"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]

@@ -25,6 +25,9 @@ Early development (version 0.1). Settings and behaviour may still change.
 
 ## Install and build
 
+Download the zip for Windows x64 from [Releases](https://github.com/uchmk/yubi/releases), unpack it anywhere and run
+`yubi.exe`. To build from source instead:
+
 ```
 cargo install --path . --locked
 ```
@@ -53,6 +56,10 @@ defined in the Apache-2.0 license, shall be dual licensed as above, without any 
 The licences of the libraries and fonts used in the Windows build are in
 [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt), including the bundled fonts under the SIL Open Font License 1.1
 and the Ubuntu Font Licence 1.0. The same text is shown in the app (General page, "ライセンス").
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability.
 
 ## Trademarks
 

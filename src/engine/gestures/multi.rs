@@ -39,11 +39,10 @@ const MAX_STEPS_PER_FRAME: i32 = 4;
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ScrubRun {
     fingers: usize,
-    /// The swipe was up / down (the centroid's Y is followed), else left / right (X).
+    /// The swipe was up / down (the centroid's Y is followed), else left / right (X). Forward
+    /// (the next window, Tab) is right or down whichever way the swipe opened the switcher, so
+    /// the selection follows the fingers across the switcher's row.
     vertical: bool,
-    /// +1 when the swipe's own direction is increasing coordinates, -1 otherwise, so that
-    /// "forward" is always positive.
-    sign: f32,
     /// Centroid coordinate when the scrub began.
     origin: f32,
     /// Position (forward positive, from `origin`) the step count is measured from.
@@ -60,7 +59,7 @@ impl ScrubRun {
     /// move `origin` so the centroid's jump is not counted as travel.
     fn rebase(&mut self, c: Point) {
         let pos = if self.vertical { c.1 } else { c.0 };
-        self.origin = pos - self.prev * self.sign;
+        self.origin = pos - self.prev;
     }
 
     /// The steps for a centroid now: positive = forward. The remainder of a step is kept while
@@ -69,7 +68,7 @@ impl ScrubRun {
     fn advance(&mut self, c: Point, step_mm: f32) -> i32 {
         let step = step_mm.max(1.0);
         let pos = if self.vertical { c.1 } else { c.0 };
-        let along = (pos - self.origin) * self.sign;
+        let along = pos - self.origin;
         self.prev = along;
         let d = along - self.last;
         if d.abs() >= REVERSE_MM {
@@ -250,11 +249,9 @@ impl MultiState {
                 out.push(Action::WindowZoomBegin);
             }
         } else if hit.action == config::Action::AppSwitchScrub
-            && let Some((vertical, sign)) = match hit.kind {
-                MultiKind::SwipeUp => Some((true, -1.0)),
-                MultiKind::SwipeDown => Some((true, 1.0)),
-                MultiKind::SwipeLeft => Some((false, -1.0)),
-                MultiKind::SwipeRight => Some((false, 1.0)),
+            && let Some(vertical) = match hit.kind {
+                MultiKind::SwipeUp | MultiKind::SwipeDown => Some(true),
+                MultiKind::SwipeLeft | MultiKind::SwipeRight => Some(false),
                 _ => None,
             }
         {
@@ -263,7 +260,6 @@ impl MultiState {
             self.scrub = Some(ScrubRun {
                 fingers: hit.fingers,
                 vertical,
-                sign,
                 origin: if vertical { hit.at.1 } else { hit.at.0 },
                 done: 0.0,
                 last: 0.0,
@@ -306,7 +302,6 @@ mod tests {
         ScrubRun {
             fingers: 3,
             vertical: false,
-            sign: 1.0,
             origin: 50.0,
             done: 0.0,
             last: 0.0,
@@ -327,14 +322,11 @@ mod tests {
     }
 
     #[test]
-    fn a_swap_on_a_leftward_scrub_keeps_the_position_too() {
-        let mut r = ScrubRun {
-            sign: -1.0,
-            ..run()
-        };
+    fn a_swap_while_moving_left_keeps_the_position_too() {
+        let mut r = run();
         assert_eq!(r.advance((42.0, 0.0), 10.0), 0);
         r.rebase((20.0, 0.0));
         assert_eq!(r.advance((20.0, 0.0), 10.0), 0);
-        assert_eq!(r.advance((17.0, 0.0), 10.0), 1);
+        assert_eq!(r.advance((17.0, 0.0), 10.0), -1);
     }
 }

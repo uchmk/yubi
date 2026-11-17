@@ -1965,8 +1965,16 @@ fn scrub_swipe(s: &mut Seq, dx: f32, dy: f32) -> Pts {
 }
 
 #[test]
-fn a_swipe_bound_to_the_scrub_begins_steps_forward_and_ends_at_the_lift() {
-    for (dx, dy) in [(60.0, 0.0), (-60.0, 0.0), (0.0, 40.0), (0.0, -40.0)] {
+fn a_swipe_bound_to_the_scrub_begins_steps_with_the_fingers_and_ends_at_the_lift() {
+    // Right and down are the next window (Tab), left and up the previous one, whichever way
+    // the swipe opened the switcher: the selection follows the fingers across its row.
+    for (dx, dy, step) in [
+        (60.0, 0.0, 'F'),
+        (-60.0, 0.0, 'R'),
+        (0.0, 40.0, 'F'),
+        (0.0, -40.0, 'R'),
+    ] {
+        let other = if step == 'F' { 'R' } else { 'F' };
         let mut s = Seq::default();
         scrub_swipe(&mut s, dx, dy);
         s.lift(0);
@@ -1976,11 +1984,11 @@ fn a_swipe_bound_to_the_scrub_begins_steps_forward_and_ends_at_the_lift() {
         assert!(log.ends_with('E'), "{dx},{dy}: {log}");
         assert_eq!(n_of(&log, 'B'), 1, "{log}");
         assert_eq!(n_of(&log, 'E'), 1, "{log}");
-        assert_eq!(n_of(&log, 'R') + n_of(&log, 'C'), 0, "{log}");
+        assert_eq!(n_of(&log, other) + n_of(&log, 'C'), 0, "{log}");
         // The first Tab comes with the Begin; the rest of the travel adds one step per 10 mm.
         let travel = dx.abs() + dy.abs() - 15.0;
         let want = (travel / 10.0) as usize;
-        let got = n_of(&log, 'F');
+        let got = n_of(&log, step);
         assert!(
             got + 1 >= want && got <= want + 1,
             "{dx},{dy}: {got} steps for ~{travel} mm: {log}"

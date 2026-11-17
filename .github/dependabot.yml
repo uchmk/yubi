@@ -19,3 +19,13 @@ updates:
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "eframe"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
+
+  # Moves the pinned major versions of the actions in .github/workflows.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    groups:
+      actions:
+        patterns: ["*"]

@@ -785,6 +785,7 @@ impl Dispatcher {
         if std::mem::take(&mut self.scrub_active) {
             ex.tap(&[SCRUB_ESC]);
             ex.release(SCRUB_ALT);
+            self.suppression.set(Suppress::Off);
         }
     }
 
@@ -796,7 +797,9 @@ impl Dispatcher {
         self.win_active = false;
         self.resize_active = false;
         self.zoom_active = false;
-        self.scrub_active = false;
+        if std::mem::take(&mut self.scrub_active) {
+            self.suppression.set(Suppress::Off);
+        }
         self.drag_open = false;
         self.drag_on_caption = false;
         self.drag_px.clear();
@@ -872,7 +875,9 @@ impl Dispatcher {
                     ex.tap(&[SCRUB_ESC]);
                 }
                 // A refused up stays owned by the executor; `retry_release` keeps trying.
-                if ex.release(SCRUB_ALT) {
+                let released = ex.release(SCRUB_ALT);
+                self.suppression.set(Suppress::Off);
+                if released {
                     None
                 } else {
                     self.release_pending = true;
@@ -1108,6 +1113,9 @@ impl Dispatcher {
             return Some(SEND_FAILED_NOTE.to_owned());
         }
         self.scrub_active = true;
+        // The switcher selects the window under the pointer: hold the pointer still while the
+        // fingers scrub, or the selection jumps between the steps and the pointer.
+        self.suppression.set(Suppress::Cursor);
         let label = config::Action::AppSwitchScrub.label();
         Some(if ex.tap(&[SCRUB_TAB]) {
             format!("{source} → {label}")
@@ -2788,6 +2796,33 @@ mod tests {
         refuse.set(false);
         assert!(d.retry_release(&mut ex).is_some());
         assert!(ex.held().is_empty());
+    }
+
+    #[test]
+    fn the_pointer_holds_still_while_a_scrub_runs_and_lets_go_on_every_end() {
+        let th = Thresholds::default();
+        for end in 0..3 {
+            let (mut d, _rx) = setup();
+            let mut f = Fake::default();
+            let mut ex = Executor::new(&mut f);
+            d.handle(&Action::AppSwitchBegin, &mut ex, &th, CURSOR);
+            assert_eq!(d.suppression.mode, Suppress::Cursor);
+            match end {
+                0 => {
+                    d.handle(
+                        &Action::AppSwitchEnd { cancel: false },
+                        &mut ex,
+                        &th,
+                        CURSOR,
+                    );
+                }
+                1 => {
+                    d.release_everything(&mut ex);
+                }
+                _ => d.cancel(),
+            }
+            assert_eq!(d.suppression.mode, Suppress::Off, "end {end}");
+        }
     }
 
     #[test]

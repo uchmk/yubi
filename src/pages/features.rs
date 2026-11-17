@@ -514,7 +514,8 @@ pub fn gesture(
                 );
             }
             // The step of 「アプリ切り替え (なぞって選ぶ)」, only while a swipe of this tab uses it.
-            if scrub {
+            // Not on the 3-finger tab: there Windows moves the selection itself.
+            if scrub && tab != 0 {
                 let r = crate::config::Sensitivity::APP_SWITCH_STEP;
                 g.slider_row(
                     "アプリ切り替えの送り幅",

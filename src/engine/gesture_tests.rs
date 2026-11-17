@@ -1930,11 +1930,11 @@ fn a_per_app_override_changes_the_flick_action() {
 
 fn scrub_cfg() -> Config {
     let mut cfg = Config::default();
-    cfg.three.enabled = true;
-    cfg.three.swipe_right = config::Action::AppSwitchScrub;
-    cfg.three.swipe_left = config::Action::AppSwitchScrub;
-    cfg.three.swipe_up = config::Action::AppSwitchScrub;
-    cfg.three.swipe_down = config::Action::AppSwitchScrub;
+    cfg.four.enabled = true;
+    cfg.four.swipe_right = config::Action::AppSwitchScrub;
+    cfg.four.swipe_left = config::Action::AppSwitchScrub;
+    cfg.four.swipe_up = config::Action::AppSwitchScrub;
+    cfg.four.swipe_down = config::Action::AppSwitchScrub;
     cfg
 }
 
@@ -1956,9 +1956,9 @@ fn n_of(log: &str, c: char) -> usize {
     log.chars().filter(|&x| x == c).count()
 }
 
-/// Three fingers rest, then glide by (dx, dy) in steps of at most 5 mm; returns the end positions.
+/// Four fingers rest, then glide by (dx, dy) in steps of at most 5 mm; returns the end positions.
 fn scrub_swipe(s: &mut Seq, dx: f32, dy: f32) -> Pts {
-    let p = row(3, 60.0, 50.0);
+    let p = row(4, 60.0, 50.0);
     s.still(&p, 100);
     let ms = ((dx.abs() + dy.abs()) * 6.0) as u64;
     s.glide(&p, dx, dy, ms)
@@ -2029,7 +2029,7 @@ fn going_back_steps_the_other_way_with_at_most_one_step_of_dead_travel() {
 fn a_slow_creep_adds_up_to_the_same_steps_as_a_fast_move() {
     let steps = |ms: u64| {
         let mut s = Seq::default();
-        let p = row(3, 60.0, 50.0);
+        let p = row(4, 60.0, 50.0);
         s.still(&p, 100);
         let p = s.glide(&p, 30.0, 0.0, 200);
         s.glide(&p, 40.0, 0.0, ms);
@@ -2057,8 +2057,8 @@ fn the_step_distance_follows_the_setting() {
 fn a_finger_lifting_early_ends_the_scrub_once_and_does_not_cancel() {
     let mut s = Seq::default();
     let p = scrub_swipe(&mut s, 40.0, 0.0);
-    // One finger leaves, the other two stay on a while, then they leave too.
-    s.still(&p[..2], 150);
+    // One finger leaves, the other three stay on a while, then they leave too.
+    s.still(&p[..3], 150);
     s.lift(0);
     let log = scrub_log(&s.run(&scrub_cfg()));
     assert_eq!(n_of(&log, 'E'), 1, "{log}");
@@ -2106,10 +2106,10 @@ fn every_begin_is_closed_exactly_once() {
 #[test]
 fn the_scrub_in_a_tap_or_pinch_slot_is_a_plain_trigger() {
     let mut cfg = scrub_cfg();
-    cfg.three.tap = config::Action::AppSwitchScrub;
-    cfg.three.pinch_in = config::Action::AppSwitchScrub;
+    cfg.four.tap = config::Action::AppSwitchScrub;
+    cfg.four.pinch_in = config::Action::AppSwitchScrub;
     let mut s = Seq::default();
-    s.still(&row(3, 60.0, 50.0), 60);
+    s.still(&row(4, 60.0, 50.0), 60);
     s.lift(0);
     let out = s.run(&cfg);
     assert_eq!(triggers(&out), vec![config::Action::AppSwitchScrub]);
@@ -2119,9 +2119,25 @@ fn the_scrub_in_a_tap_or_pinch_slot_is_a_plain_trigger() {
 #[test]
 fn an_unbound_direction_does_not_start_a_scrub() {
     let mut cfg = scrub_cfg();
-    cfg.three.swipe_right = config::Action::None;
+    cfg.four.swipe_right = config::Action::None;
     let mut s = Seq::default();
     scrub_swipe(&mut s, 60.0, 0.0);
     s.lift(0);
     assert_eq!(scrub_log(&s.run(&cfg)), "");
+}
+
+#[test]
+fn a_three_finger_scrub_sends_no_steps_because_windows_steps_it() {
+    for (dx, dy) in [(80.0, 0.0), (-80.0, 0.0)] {
+        let mut cfg = scrub_cfg();
+        cfg.three.enabled = true;
+        cfg.three.swipe_right = config::Action::AppSwitchScrub;
+        cfg.three.swipe_left = config::Action::AppSwitchScrub;
+        let mut s = Seq::default();
+        let p = row(3, 60.0, 50.0);
+        s.still(&p, 100);
+        s.glide(&p, dx, dy, 600);
+        s.lift(0);
+        assert_eq!(scrub_log(&s.run(&cfg)), "BE", "{dx}");
+    }
 }

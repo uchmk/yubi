@@ -34,8 +34,13 @@ struct ZoomRun {
 const REVERSE_MM: f32 = 0.5;
 /// Steps one frame may send at most (a glitch must not flood the window switcher).
 const MAX_STEPS_PER_FRAME: i32 = 4;
+/// Finger count at which Windows moves the open switcher's selection itself (it follows a
+/// three-finger movement on its own). Stepping as well would make the two fight, so the scrub
+/// sends no steps for this count; 4 and 5 fingers keep yubi's stepping.
+const WINDOWS_STEPS_FINGERS: usize = 3;
 
-/// An app switch scrub in progress: the swipe that started it keeps stepping while it moves.
+/// An app switch scrub in progress: the swipe that started it keeps stepping while it moves
+/// (except with `WINDOWS_STEPS_FINGERS` fingers, where Windows does the stepping).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ScrubRun {
     fingers: usize,
@@ -184,7 +189,8 @@ impl MultiState {
     }
 
     /// While an app switch scrub runs: one `AppSwitchStep` per step of travel along the swipe's
-    /// axis, and the scrub ends (Alt up) as soon as the finger count changes.
+    /// axis, and the scrub ends (Alt up) as soon as the finger count changes. With
+    /// `WINDOWS_STEPS_FINGERS` fingers no step is sent: Windows moves the selection itself.
     fn drive_scrub(&mut self, ctx: &Ctx, out: &mut Vec<Action>) {
         let Some(run) = self.scrub.as_mut() else {
             return;
@@ -194,7 +200,7 @@ impl MultiState {
             out.push(Action::AppSwitchEnd { cancel: false });
             return;
         }
-        if !ctx.from_frame {
+        if run.fingers == WINDOWS_STEPS_FINGERS || !ctx.from_frame {
             return;
         }
         let Some(c) = ctx.centroid else {

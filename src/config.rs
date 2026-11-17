@@ -2583,10 +2583,10 @@ impl Config {
             let f = &self.three;
             for (name, a) in [
                 ("3本指でタップ", &f.tap),
-                ("3本指で左にスワイプ", &f.swipe_left),
-                ("3本指で右にスワイプ", &f.swipe_right),
                 ("3本指で上にスワイプ", &f.swipe_up),
                 ("3本指で下にスワイプ", &f.swipe_down),
+                ("3本指で左にスワイプ", &f.swipe_left),
+                ("3本指で右にスワイプ", &f.swipe_right),
                 ("3本指でピンチイン", &f.pinch_in),
                 ("3本指でピンチアウト", &f.pinch_out),
             ] {
@@ -2599,10 +2599,10 @@ impl Config {
             let f = &self.four;
             for (name, a) in [
                 ("4本指でタップ", &f.tap),
-                ("4本指で左にスワイプ", &f.swipe_left),
-                ("4本指で右にスワイプ", &f.swipe_right),
                 ("4本指で上にスワイプ", &f.swipe_up),
                 ("4本指で下にスワイプ", &f.swipe_down),
+                ("4本指で左にスワイプ", &f.swipe_left),
+                ("4本指で右にスワイプ", &f.swipe_right),
                 ("4本指でピンチイン", &f.pinch_in),
                 ("4本指でピンチアウト", &f.pinch_out),
             ] {
@@ -2615,12 +2615,12 @@ impl Config {
             let f = &self.five;
             for (name, a) in [
                 ("5本指でタップ", &f.tap),
+                ("5本指で上にスワイプ", &f.swipe_up),
+                ("5本指で下にスワイプ", &f.swipe_down),
                 ("5本指で左にスワイプ", &f.swipe_left),
                 ("5本指で右にスワイプ", &f.swipe_right),
                 ("5本指でピンチイン", &f.pinch_in),
                 ("5本指でピンチアウト", &f.pinch_out),
-                ("5本指で上にスワイプ", &f.swipe_up),
-                ("5本指で下にスワイプ", &f.swipe_down),
             ] {
                 if named(a) {
                     out.push((name.into(), a.label()));

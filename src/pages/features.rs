@@ -404,9 +404,10 @@ pub fn gesture(
         }
     }
     let pinned = FORCE_TAB.lock().ok().and_then(|f| *f);
+    // First open shows 3 fingers.
     let mut tab: usize = pinned
         .or_else(|| ui.data(|d| d.get_temp(gesture_tab_id(ui))))
-        .unwrap_or(1)
+        .unwrap_or(0)
         .min(2);
     let before = tab;
     ui.add_space(t.space_sm);
@@ -477,28 +478,28 @@ pub fn gesture(
                 0 => {
                     let f = &mut cfg.three;
                     [
-                        ("左にスワイプ", "左", "three-left", &mut f.swipe_left),
-                        ("右にスワイプ", "右", "three-right", &mut f.swipe_right),
                         ("上にスワイプ", "上", "three-up", &mut f.swipe_up),
                         ("下にスワイプ", "下", "three-down", &mut f.swipe_down),
+                        ("左にスワイプ", "左", "three-left", &mut f.swipe_left),
+                        ("右にスワイプ", "右", "three-right", &mut f.swipe_right),
                     ]
                 }
                 1 => {
                     let f = &mut cfg.four;
                     [
-                        ("左にスワイプ", "左", "four-left", &mut f.swipe_left),
-                        ("右にスワイプ", "右", "four-right", &mut f.swipe_right),
                         ("上にスワイプ", "上", "four-up", &mut f.swipe_up),
                         ("下にスワイプ", "下", "four-down", &mut f.swipe_down),
+                        ("左にスワイプ", "左", "four-left", &mut f.swipe_left),
+                        ("右にスワイプ", "右", "four-right", &mut f.swipe_right),
                     ]
                 }
                 _ => {
                     let f = &mut cfg.five;
                     [
-                        ("左にスワイプ", "左", "five-left", &mut f.swipe_left),
-                        ("右にスワイプ", "右", "five-right", &mut f.swipe_right),
                         ("上にスワイプ", "上", "five-up", &mut f.swipe_up),
                         ("下にスワイプ", "下", "five-down", &mut f.swipe_down),
+                        ("左にスワイプ", "左", "five-left", &mut f.swipe_left),
+                        ("右にスワイプ", "右", "five-right", &mut f.swipe_right),
                     ]
                 }
             };

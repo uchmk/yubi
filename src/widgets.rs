@@ -19,6 +19,10 @@ use crate::theme::Tokens;
 
 /// Draw an icon glyph centered on `center`. Draws nothing when no icon font was found.
 pub fn paint_icon(painter: &Painter, center: Pos2, glyph: char, size: f32, color: Color32) {
+    if let Some(n) = icons::finger_count(glyph) {
+        paint_fingers(painter, center, n, size, color);
+        return;
+    }
     if fonts::icons_available() {
         painter.text(
             center,
@@ -27,6 +31,22 @@ pub fn paint_icon(painter: &Painter, center: Pos2, glyph: char, size: f32, color
             egui::FontId::new(size, fonts::icons()),
             color,
         );
+    }
+}
+
+/// `n` fingertip dots on a gentle upward arc, like fingertips resting on a pad. Fits the box a
+/// glyph of `size` occupies (the outermost dots may touch its edge).
+fn paint_fingers(painter: &Painter, center: Pos2, n: u8, size: f32, color: Color32) {
+    let radius = size * 0.14;
+    let step = size * 0.34;
+    let rise = size * 0.22;
+    let half = (n as f32 - 1.0) / 2.0;
+    for i in 0..n {
+        let u = (i as f32 - half) / half;
+        let x = center.x + (i as f32 - half) * step;
+        // The middle of the arc is highest; the whole mark is centred vertically.
+        let y = center.y + rise * (u * u - 0.5);
+        painter.circle_filled(Pos2::new(x, y), radius, color);
     }
 }
 
@@ -231,7 +251,9 @@ impl Group<'_> {
                 // A clear gap between the control and the (wrapping) description.
                 ui.add_space(t.space_lg);
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    if let Some(glyph) = icon.filter(|_| fonts::icons_available()) {
+                    if let Some(glyph) = icon
+                        .filter(|g| fonts::icons_available() || icons::finger_count(*g).is_some())
+                    {
                         let (rect, _) = ui.allocate_exact_size(
                             Vec2::new(t.row_icon_w, t.fs_icon_large),
                             Sense::hover(),

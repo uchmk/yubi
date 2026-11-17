@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod appicon;
 mod calibration;
 mod config;
 mod config_io;
@@ -51,6 +52,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("yubi")
+            .with_icon(std::sync::Arc::new(appicon::window_icon()))
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([640.0, 420.0])
             .with_visible(!background),

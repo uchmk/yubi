@@ -249,9 +249,9 @@ pub fn drag(ui: &mut Ui, t: &Tokens, cfg: &mut Config, win: &win_gestures::Value
             return;
         }
         let (n, icon) = [
-            (3usize, icons::DRAG),
-            (4, icons::FOUR_FINGER),
-            (5, icons::FIVE_FINGER),
+            (3usize, icons::FINGERS_3),
+            (4, icons::FINGERS_4),
+            (5, icons::FINGERS_5),
         ][i];
         let flick = &mut cfg.window.flick_snap;
         let Some(row) = cfg.drag.row_mut(n) else {
@@ -422,9 +422,9 @@ pub fn gesture(
     }
     let n: u8 = 3 + tab as u8;
     let (icon, title) = match tab {
-        0 => (icons::FOUR_FINGER, "3本指ジェスチャーを有効にする"),
-        1 => (icons::FOUR_FINGER, "4本指ジェスチャーを有効にする"),
-        _ => (icons::FIVE_FINGER, "5本指ジェスチャーを有効にする"),
+        0 => (icons::FINGERS_3, "3本指ジェスチャーを有効にする"),
+        1 => (icons::FINGERS_4, "4本指ジェスチャーを有効にする"),
+        _ => (icons::FINGERS_5, "5本指ジェスチャーを有効にする"),
     };
     let flag = match tab {
         0 => &mut cfg.three.enabled,

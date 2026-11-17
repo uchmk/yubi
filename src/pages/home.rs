@@ -122,19 +122,19 @@ fn right_column(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
             let rows: Vec<(char, &str, &str, usize)> = if page == Page::Gesture {
                 vec![
                     (
-                        icons::FOUR_FINGER,
+                        icons::FINGERS_3,
                         "3本指ジェスチャー",
                         "3本指のタップ・スワイプ・ピンチに操作を割り当てます。",
                         3,
                     ),
                     (
-                        icons::FOUR_FINGER,
+                        icons::FINGERS_4,
                         "4本指ジェスチャー",
                         "4本指のタップ・スワイプ・ピンチに操作を割り当てます。",
                         4,
                     ),
                     (
-                        icons::FIVE_FINGER,
+                        icons::FINGERS_5,
                         "5本指ジェスチャー",
                         "5本指のタップ・スワイプ・ピンチに操作を割り当てます。",
                         5,

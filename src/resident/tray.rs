@@ -392,37 +392,12 @@ fn destroy_icon() {
     }
 }
 
-/// Disc colour (B, G, R) of the icon: blue while running, grey while paused.
-fn disc_bgr(paused: bool) -> (f32, f32, f32) {
-    if paused {
-        (128.0, 128.0, 128.0)
-    } else {
-        (212.0, 120.0, 0.0)
-    }
-}
-
-/// A generated 32x32 icon: a blue (grey when paused) disc with a white ring (a fingertip),
-/// anti-aliased.
+/// The 32x32 tray icon (the app icon; grey when paused), as a BGRA bitmap.
 fn make_icon(paused: bool) -> HICON {
     const N: i32 = 32;
-    let mut px = vec![0u8; (N * N * 4) as usize];
-    let c = (N as f32 - 1.0) / 2.0;
-    for y in 0..N {
-        for x in 0..N {
-            let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
-            let disc = (15.5 - d + 0.5).clamp(0.0, 1.0);
-            let ring = (9.5 - d + 0.5).clamp(0.0, 1.0) - (6.5 - d + 0.5).clamp(0.0, 1.0);
-            // White over blue (BGRA, straight alpha).
-            let (db, dg, dr) = disc_bgr(paused);
-            let b = db * (1.0 - ring) + 255.0 * ring;
-            let g = dg * (1.0 - ring) + 255.0 * ring;
-            let r = dr * (1.0 - ring) + 255.0 * ring;
-            let i = ((y * N + x) * 4) as usize;
-            px[i] = b as u8;
-            px[i + 1] = g as u8;
-            px[i + 2] = r as u8;
-            px[i + 3] = (disc * 255.0) as u8;
-        }
+    let mut px = crate::appicon::render_rgba(N as u32, paused);
+    for p in px.as_chunks_mut::<4>().0 {
+        p.swap(0, 2);
     }
     let mask = vec![0u8; (N * 4) as usize];
     unsafe {
@@ -646,9 +621,14 @@ mod tests {
 
     #[test]
     fn the_paused_icon_is_grey_and_the_running_one_blue() {
-        let (b, g, r) = disc_bgr(true);
-        assert!(b == g && g == r);
-        let (b, _, r) = disc_bgr(false);
+        let body = |paused| {
+            let px = crate::appicon::render_rgba(32, paused);
+            let i = (28 * 32 + 16) * 4;
+            (px[i], px[i + 1], px[i + 2])
+        };
+        let (r, g, b) = body(true);
+        assert!(r == g && g == b);
+        let (r, _, b) = body(false);
         assert!(b > r);
     }
 }

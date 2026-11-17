@@ -143,7 +143,7 @@ impl Fixture {
                 cfg.three.enabled = true;
                 cfg.three.tap = Action::Find;
                 cfg.three.swipe_left = Action::DesktopPrev;
-                cfg.three.swipe_right = Action::DesktopNext;
+                cfg.three.swipe_right = Action::AppSwitchScrub;
                 cfg.four.enabled = true;
                 cfg.five.enabled = true;
                 cfg.five.tap = Action::Find;

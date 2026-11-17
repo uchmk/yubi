@@ -30,7 +30,7 @@ pub fn glyph_of(action: &Action) -> Option<char> {
         Action::ShowDesktop => DESKTOP,
         Action::DesktopPrev => PREV,
         Action::DesktopNext => NEXT,
-        Action::AppSwitch => APP_SWITCH,
+        Action::AppSwitch | Action::AppSwitchScrub => APP_SWITCH,
         Action::TabSwitch => TAB_SWITCH,
         Action::WindowArrange(_) => WINDOW_ARRANGE,
         Action::WindowZoom => WINDOW_ZOOM,

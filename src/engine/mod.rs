@@ -67,6 +67,7 @@ const FOREGROUND_POLL: Duration = Duration::from_millis(500);
 const ALIVE_FRAME_MAX_AGE: Duration = Duration::from_millis(200);
 /// Shown when the hook cancelled the cursor freeze by itself.
 const FREEZE_LOST_NOTE: &str = "安全のためカーソルの固定を解除しました";
+const SCRUB_LOST_NOTE: &str = "安全のため Alt を離しました";
 
 /// How often a refused button release is retried.
 const RELEASE_RETRY: Duration = Duration::from_millis(100);
@@ -407,6 +408,13 @@ impl Worker {
                 self.with_state(|s| s.last_action = Some(FREEZE_LOST_NOTE.to_owned()));
                 (self.wake)();
             }
+            // A scrub holds Alt only while the fingers are down. If it outlived the touch without
+            // an end (it should never), back out now rather than leave Alt stuck.
+            if self.dispatch.scrub_active() && !self.recognizer.active() {
+                self.dispatch.abort_scrub(&mut self.executor);
+                self.with_state(|s| s.last_action = Some(SCRUB_LOST_NOTE.to_owned()));
+                (self.wake)();
+            }
             self.poll_foreground(false);
             self.retry_release();
             // The brightness worker's answer to a step (a monitor that cannot be controlled).
@@ -692,6 +700,13 @@ impl Worker {
             let note =
                 self.dispatch
                     .handle(&a, &mut self.executor, &th, crate::os::window::cursor_pos);
+            if matches!(a, Action::AppSwitchBegin | Action::AppSwitchStep { .. })
+                && self.dispatch.scrub_active()
+                && !dry_run
+                && !self.dispatch.is_blocked()
+            {
+                self.step_tick(true);
+            }
             if let Some(note) = note {
                 self.with_state(|s| s.last_action = Some(note));
                 (self.wake)();
@@ -701,7 +716,7 @@ impl Worker {
                 && !dry_run
                 && !self.dispatch.is_blocked()
             {
-                self.step_tick();
+                self.step_tick(false);
             }
         }
         // The ring overlay could not be shown: close the ring rather than freeze blind.
@@ -736,9 +751,16 @@ impl Worker {
     }
 
     /// A light tick for an edge slider step that changed the level. At most one every 40 ms.
-    fn step_tick(&mut self) {
+    /// `scrub`: the step of the app switch scrub, which ticks with the press ticks' switch (it is
+    /// no edge slider) or the edge ticks'.
+    fn step_tick(&mut self, scrub: bool) {
         use crate::haptic::{HapticStatus, Haptics};
-        if !self.cfg.edge.haptic_ticks || !self.step_ticks.allow(Instant::now()) {
+        let on = if scrub {
+            self.cfg.press.haptic_ticks || self.cfg.edge.haptic_ticks
+        } else {
+            self.cfg.edge.haptic_ticks
+        };
+        if !on || !self.step_ticks.allow(Instant::now()) {
             return;
         }
         let h = self.haptics.get_or_insert_with(Haptics::new);

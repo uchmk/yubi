@@ -503,8 +503,31 @@ pub fn gesture(
                     ]
                 }
             };
+            let scrub = rows.iter().any(|r| *r.3 == Action::AppSwitchScrub);
             for (title, dir, id, slot) in rows {
-                g.action_row(title, &format!("{n}本指で{dir}へなぞったとき"), id, slot);
+                g.action_row_of(
+                    title,
+                    &format!("{n}本指で{dir}へなぞったとき"),
+                    id,
+                    slot,
+                    &ActionKind::SWIPE,
+                );
+            }
+            // The step of 「アプリ切り替え (なぞって選ぶ)」, only while a swipe of this tab uses it.
+            if scrub {
+                let r = crate::config::Sensitivity::APP_SWITCH_STEP;
+                g.slider_row(
+                    "アプリ切り替えの送り幅",
+                    "1 つ先のウィンドウに進むまでになぞる距離。長くするとゆっくり進みます。",
+                    SliderSpec {
+                        min: f64::from(r.min),
+                        max: f64::from(r.max),
+                        step: 0.5,
+                        decimals: 1,
+                        suffix: " mm",
+                    },
+                    &mut cfg.sensitivity.app_switch_step_mm,
+                );
             }
         });
         section_header(ui, t, "ピンチ");

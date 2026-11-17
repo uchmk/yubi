@@ -536,6 +536,8 @@ fn detail(ui: &mut Ui, t: &Tokens, cfg: &mut Config, st: &mut AppsState, i: usiz
                             Some(Choice::Inherit.label()),
                             if info.id.starts_with("pinch.") {
                                 &ActionKind::PINCH
+                            } else if info.id.starts_with("swipe.") {
+                                &ActionKind::SWIPE
                             } else {
                                 &ActionKind::ALL
                             },

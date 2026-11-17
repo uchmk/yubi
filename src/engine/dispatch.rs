@@ -124,6 +124,11 @@ fn opposite_corner(corner: usize) -> crate::os::window::Corner {
     }
 }
 
+const SCRUB_ALT: Key = Key::Vk(0x12);
+const SCRUB_TAB: Key = Key::Vk(0x09);
+const SCRUB_SHIFT: Key = Key::Vk(0x10);
+const SCRUB_ESC: Key = Key::Vk(0x1B);
+
 pub fn plan_for(action: &config::Action) -> Plan {
     use config::Action as A;
     match action {
@@ -131,7 +136,9 @@ pub fn plan_for(action: &config::Action) -> Plan {
         A::ShowDesktop => keys_plan("Win+D"),
         A::DesktopPrev => keys_plan("Ctrl+Win+Left"),
         A::DesktopNext => keys_plan("Ctrl+Win+Right"),
-        A::AppSwitch => keys_plan("Alt+Tab"),
+        // Anywhere but a swipe the scrubbing switch is one plain Alt+Tab (the swipe streams as
+        // `Action::AppSwitch*`, not as a plan).
+        A::AppSwitch | A::AppSwitchScrub => keys_plan("Alt+Tab"),
         A::TabSwitch => keys_plan("Ctrl+Tab"),
         A::Find => keys_plan("Ctrl+F"),
         A::MiddleClick => Plan::Click(MouseButton::Middle),
@@ -230,6 +237,8 @@ pub struct Dispatcher {
     resize_active: bool,
     /// A pinch zoom was accepted and not yet ended.
     zoom_active: bool,
+    /// The app switch scrub holds Alt (begun, not yet ended).
+    scrub_active: bool,
     /// The corner swipe whose action is about to trigger.
     last_corner: Option<(usize, config::CornerSlot)>,
     last_multi: Option<(usize, MultiKind)>,
@@ -610,6 +619,7 @@ impl Dispatcher {
             win_active: false,
             resize_active: false,
             zoom_active: false,
+            scrub_active: false,
             last_corner: None,
             last_multi: None,
             last_press: None,
@@ -741,7 +751,7 @@ impl Dispatcher {
     /// Try again to let go of buttons the executor still owns that no gesture holds (an up was
     /// refused earlier). Returns a note when the retry finally worked.
     pub fn retry_release<S: InputSink>(&mut self, ex: &mut Executor<S>) -> Option<String> {
-        if self.drag_open || ex.held().is_empty() {
+        if self.drag_open || self.scrub_active || ex.held().is_empty() {
             return None;
         }
         if ex.release_all() == 0 && self.release_pending {
@@ -754,12 +764,28 @@ impl Dispatcher {
     /// Let go of everything the executor holds and forget gestures in flight. Returns a note if
     /// some up was refused (`retry_release` keeps trying).
     pub fn release_everything<S: InputSink>(&mut self, ex: &mut Executor<S>) -> Option<String> {
+        // A scrub in flight backs out first (Esc while Alt is still down), so nothing switches.
+        self.abort_scrub(ex);
         let stuck = ex.release_all();
         self.cancel();
         (stuck > 0).then(|| {
             self.release_pending = true;
             RELEASE_FAILED_NOTE.to_owned()
         })
+    }
+
+    /// Whether the app switch scrub holds Alt right now.
+    pub fn scrub_active(&self) -> bool {
+        self.scrub_active
+    }
+
+    /// Back out of a scrub that is still open: Esc (closes the switcher without switching), then
+    /// Alt up. Does nothing when no scrub is open.
+    pub fn abort_scrub<S: InputSink>(&mut self, ex: &mut Executor<S>) {
+        if std::mem::take(&mut self.scrub_active) {
+            ex.tap(&[SCRUB_ESC]);
+            ex.release(SCRUB_ALT);
+        }
     }
 
     /// Forget a half-done gesture (the executor lets go of buttons and keys on its own).
@@ -770,6 +796,7 @@ impl Dispatcher {
         self.win_active = false;
         self.resize_active = false;
         self.zoom_active = false;
+        self.scrub_active = false;
         self.drag_open = false;
         self.drag_on_caption = false;
         self.drag_px.clear();
@@ -836,6 +863,21 @@ impl Dispatcher {
                 self.resize_active = false;
                 self.resize_px.clear();
                 (!self.win(WinCmd::EndResize)).then(|| WORKER_NOTE.to_owned())
+            }
+            Action::AppSwitchEnd { cancel } => {
+                if !std::mem::take(&mut self.scrub_active) {
+                    return None;
+                }
+                if *cancel {
+                    ex.tap(&[SCRUB_ESC]);
+                }
+                // A refused up stays owned by the executor; `retry_release` keeps trying.
+                if ex.release(SCRUB_ALT) {
+                    None
+                } else {
+                    self.release_pending = true;
+                    Some(RELEASE_FAILED_NOTE.to_owned())
+                }
             }
             Action::WindowZoomEnd => {
                 if !self.zoom_active {
@@ -976,6 +1018,25 @@ impl Dispatcher {
                 }
                 None
             }
+            Action::AppSwitchBegin => self.scrub_begin(ex),
+            Action::AppSwitchStep { forward } => {
+                if !self.scrub_active {
+                    return None;
+                }
+                let ok = if *forward {
+                    ex.tap(&[SCRUB_TAB])
+                } else {
+                    ex.tap(&[SCRUB_SHIFT, SCRUB_TAB])
+                };
+                if ok {
+                    None
+                } else {
+                    // A refused key (Shift or Tab left down) would turn the next steps around:
+                    // back out of the scrub and let go of everything.
+                    self.release_everything(ex);
+                    Some(SEND_FAILED_NOTE.to_owned())
+                }
+            }
             Action::WindowZoomBegin => {
                 let Some(cursor) = cursor() else {
                     return Some(NO_CURSOR_NOTE.to_owned());
@@ -1018,7 +1079,13 @@ impl Dispatcher {
         // A gesture or ring action is its own session: it may tell again that a monitor cannot
         // be controlled (no `Suppress::Off` comes for it).
         self.unavailable_shown = false;
-        let source = match (
+        let source = self.source_label();
+        self.run_plan(action, ex, &source)
+    }
+
+    /// Name of what started the action about to run ("3本指で右スワイプ", the ring slot, ...).
+    fn source_label(&mut self) -> String {
+        match (
             self.source_override.take(),
             self.last_corner.take(),
             self.last_press.take(),
@@ -1029,8 +1096,25 @@ impl Dispatcher {
             (None, None, Some((n, deep)), _) => press_label(n, deep),
             (None, None, None, Some((n, kind))) => multi_label(n, kind),
             (None, None, None, None) => "ジェスチャー".to_owned(),
-        };
-        self.run_plan(action, ex, &source)
+        }
+    }
+
+    /// Start of the app switch scrub: Alt goes down and is held (the executor owns it, so every
+    /// release path lets go), then one Tab opens the switcher.
+    fn scrub_begin<S: InputSink>(&mut self, ex: &mut Executor<S>) -> Option<String> {
+        let source = self.source_label();
+        if !ex.press(SCRUB_ALT) {
+            ex.release(SCRUB_ALT);
+            return Some(SEND_FAILED_NOTE.to_owned());
+        }
+        self.scrub_active = true;
+        let label = config::Action::AppSwitchScrub.label();
+        Some(if ex.tap(&[SCRUB_TAB]) {
+            format!("{source} → {label}")
+        } else {
+            self.release_everything(ex);
+            SEND_FAILED_NOTE.to_owned()
+        })
     }
 
     /// One detent of an edge slider.
@@ -2564,5 +2648,234 @@ mod tests {
             cmds,
             vec![WinCmd::Begin { cursor: (100, 200) }, WinCmd::Cancel]
         );
+    }
+
+    const ALT: Key = Key::Vk(0x12);
+    const TAB: Key = Key::Vk(0x09);
+    const SHIFT: Key = Key::Vk(0x10);
+    const ESC: Key = Key::Vk(0x1B);
+
+    fn down(k: Key) -> SynthEvent {
+        SynthEvent::Down(k)
+    }
+    fn up(k: Key) -> SynthEvent {
+        SynthEvent::Up(k)
+    }
+
+    #[test]
+    fn scrub_holds_alt_tabs_both_ways_and_lets_go_at_the_end() {
+        let (mut d, _rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        d.handle(&START, &mut ex, &th, CURSOR);
+        assert!(
+            d.handle(&Action::AppSwitchBegin, &mut ex, &th, CURSOR)
+                .is_some()
+        );
+        assert!(d.scrub_active());
+        assert_eq!(ex.held(), &[ALT]);
+        d.handle(
+            &Action::AppSwitchStep { forward: true },
+            &mut ex,
+            &th,
+            CURSOR,
+        );
+        d.handle(
+            &Action::AppSwitchStep { forward: false },
+            &mut ex,
+            &th,
+            CURSOR,
+        );
+        // The idle retry must not let go of the Alt a gesture is holding.
+        assert_eq!(d.retry_release(&mut ex), None);
+        assert_eq!(ex.held(), &[ALT]);
+        d.handle(
+            &Action::AppSwitchEnd { cancel: false },
+            &mut ex,
+            &th,
+            CURSOR,
+        );
+        assert!(!d.scrub_active() && ex.held().is_empty());
+        drop(ex);
+        assert_eq!(
+            f.log,
+            vec![
+                down(ALT),
+                down(TAB),
+                up(TAB),
+                down(TAB),
+                up(TAB),
+                down(SHIFT),
+                down(TAB),
+                up(TAB),
+                up(SHIFT),
+                up(ALT),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cancelled_scrub_sends_esc_before_alt_goes_up() {
+        let (mut d, _rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        d.handle(&Action::AppSwitchBegin, &mut ex, &th, CURSOR);
+        d.handle(&Action::AppSwitchEnd { cancel: true }, &mut ex, &th, CURSOR);
+        assert!(ex.held().is_empty());
+        drop(ex);
+        assert_eq!(
+            f.log,
+            vec![down(ALT), down(TAB), up(TAB), down(ESC), up(ESC), up(ALT)]
+        );
+    }
+
+    #[test]
+    fn release_everything_backs_a_scrub_out_with_esc_and_lets_go_of_alt() {
+        // Pause, config change, disable, device removed and shutdown all end here.
+        let (mut d, _rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        d.handle(&Action::AppSwitchBegin, &mut ex, &th, CURSOR);
+        assert_eq!(d.release_everything(&mut ex), None);
+        assert!(!d.scrub_active() && ex.held().is_empty());
+        // The end that may still arrive later does nothing.
+        d.handle(
+            &Action::AppSwitchEnd { cancel: false },
+            &mut ex,
+            &th,
+            CURSOR,
+        );
+        drop(ex);
+        assert_eq!(f.log.last(), Some(&up(ALT)));
+        assert!(f.log.contains(&down(ESC)));
+        assert_eq!(f.log.iter().filter(|e| **e == up(ALT)).count(), 1);
+    }
+
+    #[test]
+    fn dropping_the_executor_lets_go_of_a_held_alt() {
+        let (mut d, _rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        d.handle(&Action::AppSwitchBegin, &mut ex, &th, CURSOR);
+        // A panic unwinds through here.
+        drop(ex);
+        assert_eq!(f.log.last(), Some(&up(ALT)));
+    }
+
+    #[test]
+    fn a_refused_alt_up_is_retried_after_the_scrub_ended() {
+        let (mut d, _rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let refuse = f.refuse_up.clone();
+        let mut ex = Executor::new(&mut f);
+        d.handle(&Action::AppSwitchBegin, &mut ex, &th, CURSOR);
+        refuse.set(true);
+        assert!(
+            d.handle(
+                &Action::AppSwitchEnd { cancel: false },
+                &mut ex,
+                &th,
+                CURSOR
+            )
+            .is_some()
+        );
+        assert_eq!(ex.held(), &[ALT]);
+        refuse.set(false);
+        assert!(d.retry_release(&mut ex).is_some());
+        assert!(ex.held().is_empty());
+    }
+
+    #[test]
+    fn a_refused_key_during_a_step_ends_the_scrub_instead_of_turning_it_around() {
+        let (mut d, _rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let refuse = f.refuse_up.clone();
+        let mut ex = Executor::new(&mut f);
+        d.handle(&Action::AppSwitchBegin, &mut ex, &th, CURSOR);
+        refuse.set(true);
+        assert!(
+            d.handle(
+                &Action::AppSwitchStep { forward: false },
+                &mut ex,
+                &th,
+                CURSOR
+            )
+            .is_some()
+        );
+        assert!(!d.scrub_active());
+        refuse.set(false);
+        d.retry_release(&mut ex);
+        assert!(ex.held().is_empty());
+        // Later steps of the same touch send nothing.
+        let before = ex.held().len();
+        d.handle(
+            &Action::AppSwitchStep { forward: true },
+            &mut ex,
+            &th,
+            CURSOR,
+        );
+        assert_eq!(ex.held().len(), before);
+        drop(ex);
+        // The begin's Tab and the refused step's Tab, nothing after.
+        assert_eq!(f.log.iter().filter(|e| **e == down(TAB)).count(), 2);
+    }
+
+    #[test]
+    fn practice_and_blocked_apps_send_no_key_for_a_scrub() {
+        let th = Thresholds::default();
+        for blocked in [false, true] {
+            let (mut d, _rx) = setup();
+            let mut f = Fake::default();
+            let mut ex = Executor::new(&mut f);
+            if blocked {
+                d.set_blocked(true);
+            } else {
+                d.set_dry_run(true);
+            }
+            d.handle(&START, &mut ex, &th, CURSOR);
+            d.handle(&Action::AppSwitchBegin, &mut ex, &th, CURSOR);
+            d.handle(
+                &Action::AppSwitchStep { forward: true },
+                &mut ex,
+                &th,
+                CURSOR,
+            );
+            d.handle(
+                &Action::AppSwitchEnd { cancel: false },
+                &mut ex,
+                &th,
+                CURSOR,
+            );
+            assert!(!d.scrub_active());
+            drop(ex);
+            assert!(f.log.is_empty(), "blocked={blocked}: {:?}", f.log);
+        }
+    }
+
+    #[test]
+    fn the_scrub_action_outside_a_swipe_is_one_alt_tab() {
+        assert_eq!(
+            plan_for(&config::Action::AppSwitchScrub),
+            plan_for(&config::Action::AppSwitch)
+        );
+        let (mut d, _rx) = setup();
+        let th = Thresholds::default();
+        let mut f = Fake::default();
+        let mut ex = Executor::new(&mut f);
+        d.handle(
+            &Action::Trigger(config::Action::AppSwitchScrub),
+            &mut ex,
+            &th,
+            CURSOR,
+        );
+        assert!(ex.held().is_empty());
+        drop(ex);
+        assert_eq!(f.log, vec![down(ALT), down(TAB), up(TAB), up(ALT)]);
     }
 }

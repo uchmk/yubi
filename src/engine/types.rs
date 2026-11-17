@@ -341,6 +341,19 @@ pub enum Action {
         ratio: f32,
     },
     WindowZoomEnd,
+    /// A swipe bound to 「アプリ切り替え (なぞって選ぶ)」 was recognised: Alt goes down and stays
+    /// down, and Tab is sent once. Every `AppSwitchStep` until `AppSwitchEnd` moves the selection.
+    AppSwitchBegin,
+    /// The fingers travelled one more step: Tab (`forward`, the swipe's own direction) or
+    /// Shift+Tab.
+    AppSwitchStep {
+        forward: bool,
+    },
+    /// The scrub is over: Alt goes up (the selected window opens). `cancel` sends Esc first, so
+    /// nothing is switched.
+    AppSwitchEnd {
+        cancel: bool,
+    },
     /// Two-finger scroll output in `WHEEL_DELTA` units (120 = one notch), at most one per input
     /// frame. Positive `v` scrolls up and positive `h` scrolls right (the Win32 wheel convention).
     Scroll {
@@ -451,6 +464,8 @@ pub struct Thresholds {
     pub edge_strip_mm: f32,
     /// Edge slider: travel per step (mm); a custom slider has its own.
     pub edge_detent_mm: f32,
+    /// Travel of the fingers per window step of the scrubbing app switch (mm).
+    pub app_switch_step_mm: f32,
     /// Press: the calibrated pressure must stay past a threshold this long.
     pub press_persist_us: u64,
     /// Press: after it fires, pressure must stay below light-off this long before it can fire again.
@@ -506,6 +521,7 @@ impl Default for Thresholds {
             multi_swipe_band: (0.85, 1.15),
             edge_strip_mm: 6.0,
             edge_detent_mm: 2.0,
+            app_switch_step_mm: 10.0,
             press_persist_us: 22_000,
             press_rearm_us: 50_000,
             press_move_mm: 3.0,
@@ -543,6 +559,7 @@ impl Thresholds {
             multi_swipe_mm: s.swipe_mm,
             edge_strip_mm: s.edge_strip_mm,
             edge_detent_mm: s.edge_detent_mm,
+            app_switch_step_mm: s.app_switch_step_mm,
             ..Self::default()
         }
     }

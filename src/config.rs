@@ -139,6 +139,10 @@ pub enum Action {
     TaskView,
     ShowDesktop,
     AppSwitch,
+    /// Swipe slots only: hold Alt, open the switcher and keep stepping through the windows
+    /// while the fingers keep moving (like Windows' own touchpad app switching). Anywhere else
+    /// it behaves like [`Action::AppSwitch`].
+    AppSwitchScrub,
     TabSwitch,
     Find,
     MiddleClick,
@@ -237,6 +241,8 @@ pub enum ActionKind {
     TaskView,
     ShowDesktop,
     AppSwitch,
+    /// Offered by the swipe slots only; see [`ActionKind::SWIPE`].
+    AppSwitchScrub,
     TabSwitch,
     Find,
     MiddleClick,
@@ -262,6 +268,28 @@ impl ActionKind {
         Self::TaskView,
         Self::ShowDesktop,
         Self::AppSwitch,
+        Self::TabSwitch,
+        Self::WindowArrange,
+        Self::Find,
+        Self::MiddleClick,
+        Self::RightClick,
+        Self::RingMenu,
+        Self::VolumeStep,
+        Self::BrightnessStep,
+        Self::ToggleMute,
+        Self::DesktopPrev,
+        Self::DesktopNext,
+        Self::Keys,
+        Self::Launch,
+    ];
+
+    /// [`ALL`](Self::ALL) plus the scrubbing app switch, for the swipe slots of 3 to 5 fingers.
+    pub const SWIPE: [Self; 18] = [
+        Self::None,
+        Self::TaskView,
+        Self::ShowDesktop,
+        Self::AppSwitch,
+        Self::AppSwitchScrub,
         Self::TabSwitch,
         Self::WindowArrange,
         Self::Find,
@@ -328,6 +356,7 @@ impl ActionKind {
             Self::TaskView => "タスクビュー",
             Self::ShowDesktop => "デスクトップ表示",
             Self::AppSwitch => "アプリ切り替え (Alt+Tab)",
+            Self::AppSwitchScrub => "アプリ切り替え (なぞって選ぶ)",
             Self::TabSwitch => "タブ切り替え (Ctrl+Tab)",
             Self::Find => "検索 (Ctrl+F)",
             Self::MiddleClick => "中クリック",
@@ -390,6 +419,7 @@ impl ActionKind {
             Self::TaskView
             | Self::ShowDesktop
             | Self::AppSwitch
+            | Self::AppSwitchScrub
             | Self::TabSwitch
             | Self::WindowZoom
             | Self::WindowArrange
@@ -418,6 +448,7 @@ impl Action {
             Self::TaskView => ActionKind::TaskView,
             Self::ShowDesktop => ActionKind::ShowDesktop,
             Self::AppSwitch => ActionKind::AppSwitch,
+            Self::AppSwitchScrub => ActionKind::AppSwitchScrub,
             Self::TabSwitch => ActionKind::TabSwitch,
             Self::Find => ActionKind::Find,
             Self::MiddleClick => ActionKind::MiddleClick,
@@ -446,6 +477,7 @@ impl Action {
             ActionKind::TaskView => Self::TaskView,
             ActionKind::ShowDesktop => Self::ShowDesktop,
             ActionKind::AppSwitch => Self::AppSwitch,
+            ActionKind::AppSwitchScrub => Self::AppSwitchScrub,
             ActionKind::TabSwitch => Self::TabSwitch,
             ActionKind::Find => Self::Find,
             ActionKind::MiddleClick => Self::MiddleClick,
@@ -485,6 +517,7 @@ impl Action {
             Self::TaskView => "task_view".into(),
             Self::ShowDesktop => "show_desktop".into(),
             Self::AppSwitch => "app_switch".into(),
+            Self::AppSwitchScrub => "app_switch_scrub".into(),
             Self::TabSwitch => "tab_switch".into(),
             Self::Find => "find".into(),
             Self::MiddleClick => "middle_click".into(),
@@ -525,6 +558,7 @@ impl Action {
             "task_view" => Self::TaskView,
             "show_desktop" => Self::ShowDesktop,
             "app_switch" => Self::AppSwitch,
+            "app_switch_scrub" => Self::AppSwitchScrub,
             "tab_switch" => Self::TabSwitch,
             "find" => Self::Find,
             "middle_click" => Self::MiddleClick,
@@ -2021,6 +2055,8 @@ pub struct Sensitivity {
     pub edge_strip_mm: f32,
     /// Travel along an edge that makes one step (mm).
     pub edge_detent_mm: f32,
+    /// Travel of the fingers that moves 「アプリ切り替え (なぞって選ぶ)」 on by one window (mm).
+    pub app_switch_step_mm: f32,
 }
 
 impl Default for Sensitivity {
@@ -2042,6 +2078,7 @@ impl Default for Sensitivity {
             flick_mm_s: 400.0,
             edge_strip_mm: 6.0,
             edge_detent_mm: 2.0,
+            app_switch_step_mm: 10.0,
         }
     }
 }
@@ -2108,6 +2145,7 @@ impl<'de> Deserialize<'de> for Sensitivity {
         f("flick_mm_s", &mut out.flick_mm_s);
         f("edge_strip_mm", &mut out.edge_strip_mm);
         f("edge_detent_mm", &mut out.edge_detent_mm);
+        f("app_switch_step_mm", &mut out.app_switch_step_mm);
         Ok(out)
     }
 }
@@ -2164,9 +2202,13 @@ impl Sensitivity {
         max: 10.0,
     };
     pub const EDGE_DETENT: SensRange = SensRange { min: 1.0, max: 6.0 };
+    pub const APP_SWITCH_STEP: SensRange = SensRange {
+        min: 4.0,
+        max: 25.0,
+    };
 
     /// Every value with its Japanese name, in a fixed order (used to report what was clamped).
-    pub fn values(&self) -> [(&'static str, f32); 16] {
+    pub fn values(&self) -> [(&'static str, f32); 17] {
         [
             ("ドラッグの速さ", self.drag_gain),
             ("ウィンドウ移動の速さ", self.window_gain),
@@ -2184,11 +2226,12 @@ impl Sensitivity {
             ("フリックの速さ", self.flick_mm_s),
             ("端の幅", self.edge_strip_mm),
             ("端の刻み", self.edge_detent_mm),
+            ("アプリ切り替えの送り幅", self.app_switch_step_mm),
         ]
     }
 
     /// The TOML key of each entry of [`values`](Self::values), in the same order.
-    pub const FIELDS: [&'static str; 16] = [
+    pub const FIELDS: [&'static str; 17] = [
         "drag_gain",
         "window_gain",
         "resize_gain",
@@ -2205,6 +2248,7 @@ impl Sensitivity {
         "flick_mm_s",
         "edge_strip_mm",
         "edge_detent_mm",
+        "app_switch_step_mm",
     ];
 
     /// The Japanese name of the value stored under TOML key `field`.
@@ -2234,6 +2278,11 @@ impl Sensitivity {
         self.flick_mm_s = f(self.flick_mm_s, d.flick_mm_s, Self::FLICK);
         self.edge_strip_mm = f(self.edge_strip_mm, d.edge_strip_mm, Self::EDGE_STRIP);
         self.edge_detent_mm = f(self.edge_detent_mm, d.edge_detent_mm, Self::EDGE_DETENT);
+        self.app_switch_step_mm = f(
+            self.app_switch_step_mm,
+            d.app_switch_step_mm,
+            Self::APP_SWITCH_STEP,
+        );
     }
 }
 
@@ -4194,6 +4243,7 @@ enabled = true
             (Sensitivity::FLICK, r.flick_mm_s),
             (Sensitivity::EDGE_STRIP, r.edge_strip_mm),
             (Sensitivity::EDGE_DETENT, r.edge_detent_mm),
+            (Sensitivity::APP_SWITCH_STEP, r.app_switch_step_mm),
         ] {
             assert!((range.min..=range.max).contains(&v), "{v}");
         }
@@ -5593,5 +5643,60 @@ speed = 300
             "{:?}",
             big.warnings
         );
+    }
+
+    #[test]
+    fn app_switch_scrub_is_a_swipe_only_action_with_its_own_token() {
+        assert_eq!(Action::AppSwitchScrub.to_token(), "app_switch_scrub");
+        assert_eq!(
+            Action::from_token("app_switch_scrub"),
+            Action::AppSwitchScrub
+        );
+        let mut a = Action::None;
+        a.set_kind(ActionKind::AppSwitchScrub);
+        assert_eq!(a, Action::AppSwitchScrub);
+        assert_eq!(a.kind(), ActionKind::AppSwitchScrub);
+        assert_eq!(a.label(), "アプリ切り替え (なぞって選ぶ)");
+        assert_eq!(
+            ActionKind::AppSwitchScrub.group(),
+            ActionKind::AppSwitch.group()
+        );
+        assert!(ActionKind::SWIPE.contains(&ActionKind::AppSwitchScrub));
+        assert!(!ActionKind::ALL.contains(&ActionKind::AppSwitchScrub));
+        assert!(!ActionKind::PINCH.contains(&ActionKind::AppSwitchScrub));
+        // SWIPE is ALL plus the scrub, nothing else.
+        for k in ActionKind::ALL {
+            assert!(ActionKind::SWIPE.contains(&k), "{k:?}");
+        }
+        assert_eq!(ActionKind::SWIPE.len(), ActionKind::ALL.len() + 1);
+        // Through TOML, in a swipe slot.
+        let mut cfg = Config::default();
+        cfg.three.swipe_right = Action::AppSwitchScrub;
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(text.contains("app_switch_scrub"), "{text}");
+        let back = parse_text(&text).unwrap().config;
+        assert_eq!(back.three.swipe_right, Action::AppSwitchScrub);
+    }
+
+    #[test]
+    fn app_switch_step_defaults_loads_old_files_and_is_clamped() {
+        assert_eq!(Sensitivity::default().app_switch_step_mm, 10.0);
+        // An old file without the key keeps the default, with no warning.
+        let p = parse_text("schema_version = 2\n[sensitivity]\nswipe_mm = 9.0\n").unwrap();
+        assert_eq!(p.config.sensitivity.app_switch_step_mm, 10.0);
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        let load = |v: &str| {
+            parse_text(&format!(
+                "schema_version = 2\n[sensitivity]\napp_switch_step_mm = {v}\n"
+            ))
+            .unwrap()
+            .config
+            .sensitivity
+            .app_switch_step_mm
+        };
+        assert_eq!(load("1.0"), 4.0);
+        assert_eq!(load("80.0"), 25.0);
+        assert_eq!(load("nan"), 10.0);
+        assert_eq!(load("12.5"), 12.5);
     }
 }

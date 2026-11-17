@@ -379,7 +379,7 @@ impl Recognizer {
         }
         self.window.cancel(out);
         self.drag.cancel(out);
-        self.multi.finish(out);
+        self.multi.cancel(out);
         self.edge.release(out);
         self.corner.release(out, None);
         self.ring.cancel(out);

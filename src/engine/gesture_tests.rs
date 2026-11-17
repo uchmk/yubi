@@ -1925,3 +1925,195 @@ fn a_per_app_override_changes_the_flick_action() {
     let g = super::types::GestureCfg::from_config(&cfg, Some("b.exe"));
     assert_eq!(g.drag_flick.unwrap().up, config::Action::TaskView);
 }
+
+// ---- app switch scrub (Alt held, Tab / Shift+Tab with the fingers) ----
+
+fn scrub_cfg() -> Config {
+    let mut cfg = Config::default();
+    cfg.three.enabled = true;
+    cfg.three.swipe_right = config::Action::AppSwitchScrub;
+    cfg.three.swipe_left = config::Action::AppSwitchScrub;
+    cfg.three.swipe_up = config::Action::AppSwitchScrub;
+    cfg.three.swipe_down = config::Action::AppSwitchScrub;
+    cfg
+}
+
+/// What the scrub did, in order: B(egin), F / R (forward / reverse step), E (end), C (cancelled end).
+fn scrub_log(out: &[(u64, Action)]) -> String {
+    out.iter()
+        .filter_map(|(_, a)| match a {
+            Action::AppSwitchBegin => Some('B'),
+            Action::AppSwitchStep { forward: true } => Some('F'),
+            Action::AppSwitchStep { forward: false } => Some('R'),
+            Action::AppSwitchEnd { cancel: false } => Some('E'),
+            Action::AppSwitchEnd { cancel: true } => Some('C'),
+            _ => None,
+        })
+        .collect()
+}
+
+fn n_of(log: &str, c: char) -> usize {
+    log.chars().filter(|&x| x == c).count()
+}
+
+/// Three fingers rest, then glide by (dx, dy) in steps of at most 5 mm; returns the end positions.
+fn scrub_swipe(s: &mut Seq, dx: f32, dy: f32) -> Pts {
+    let p = row(3, 60.0, 50.0);
+    s.still(&p, 100);
+    let ms = ((dx.abs() + dy.abs()) * 6.0) as u64;
+    s.glide(&p, dx, dy, ms)
+}
+
+#[test]
+fn a_swipe_bound_to_the_scrub_begins_steps_forward_and_ends_at_the_lift() {
+    for (dx, dy) in [(60.0, 0.0), (-60.0, 0.0), (0.0, 40.0), (0.0, -40.0)] {
+        let mut s = Seq::default();
+        scrub_swipe(&mut s, dx, dy);
+        s.lift(0);
+        let out = s.run(&scrub_cfg());
+        let log = scrub_log(&out);
+        assert!(log.starts_with('B'), "{dx},{dy}: {log}");
+        assert!(log.ends_with('E'), "{dx},{dy}: {log}");
+        assert_eq!(n_of(&log, 'B'), 1, "{log}");
+        assert_eq!(n_of(&log, 'E'), 1, "{log}");
+        assert_eq!(n_of(&log, 'R') + n_of(&log, 'C'), 0, "{log}");
+        // The first Tab comes with the Begin; the rest of the travel adds one step per 10 mm.
+        let travel = dx.abs() + dy.abs() - 15.0;
+        let want = (travel / 10.0) as usize;
+        let got = n_of(&log, 'F');
+        assert!(
+            got + 1 >= want && got <= want + 1,
+            "{dx},{dy}: {got} steps for ~{travel} mm: {log}"
+        );
+        // It is the scrub, not a one-shot trigger.
+        assert!(triggers(&out).is_empty());
+    }
+}
+
+#[test]
+fn going_back_steps_the_other_way_with_at_most_one_step_of_dead_travel() {
+    let mut s = Seq::default();
+    let p = scrub_swipe(&mut s, 60.0, 0.0);
+    let log_before = scrub_log(&s.run(&scrub_cfg()));
+    // Less than one step back: nothing yet.
+    let p = s.glide(&p, -9.0, 0.0, 120);
+    let log_small = scrub_log(&s.run(&scrub_cfg()));
+    assert_eq!(n_of(&log_small, 'R'), 0, "{log_small}");
+    // Then on past one step in all (11 mm from the turning point): the first reverse step.
+    let p = s.glide(&p, -2.5, 0.0, 60);
+    let log_one = scrub_log(&s.run(&scrub_cfg()));
+    assert_eq!(n_of(&log_one, 'R'), 1, "{log_one}");
+    // Forward again straight away: it turns at once, one step of travel later.
+    let p = s.glide(&p, 13.0, 0.0, 120);
+    let log_fwd = scrub_log(&s.run(&scrub_cfg()));
+    assert_eq!(
+        n_of(&log_fwd, 'F'),
+        n_of(&log_before, 'F') + 1,
+        "{log_fwd} vs {log_before}"
+    );
+    assert_eq!(n_of(&log_fwd, 'R'), 1, "{log_fwd}");
+    s.glide(&p, 0.0, 0.0, 22);
+    s.lift(0);
+    assert!(scrub_log(&s.run(&scrub_cfg())).ends_with('E'));
+}
+
+#[test]
+fn a_slow_creep_adds_up_to_the_same_steps_as_a_fast_move() {
+    let steps = |ms: u64| {
+        let mut s = Seq::default();
+        let p = row(3, 60.0, 50.0);
+        s.still(&p, 100);
+        let p = s.glide(&p, 30.0, 0.0, 200);
+        s.glide(&p, 40.0, 0.0, ms);
+        s.lift(0);
+        n_of(&scrub_log(&s.run(&scrub_cfg())), 'F')
+    };
+    assert_eq!(steps(100), steps(3000));
+    assert!(steps(100) >= 3);
+}
+
+#[test]
+fn the_step_distance_follows_the_setting() {
+    let steps = |mm: f32| {
+        let mut cfg = scrub_cfg();
+        cfg.sensitivity.app_switch_step_mm = mm;
+        let mut s = Seq::default();
+        scrub_swipe(&mut s, 80.0, 0.0);
+        s.lift(0);
+        n_of(&scrub_log(&s.run(&cfg)), 'F')
+    };
+    assert!(steps(5.0) > steps(10.0) && steps(10.0) > steps(20.0));
+}
+
+#[test]
+fn a_finger_lifting_early_ends_the_scrub_once_and_does_not_cancel() {
+    let mut s = Seq::default();
+    let p = scrub_swipe(&mut s, 40.0, 0.0);
+    // One finger leaves, the other two stay on a while, then they leave too.
+    s.still(&p[..2], 150);
+    s.lift(0);
+    let log = scrub_log(&s.run(&scrub_cfg()));
+    assert_eq!(n_of(&log, 'E'), 1, "{log}");
+    assert_eq!(n_of(&log, 'C'), 0, "{log}");
+    assert!(log.ends_with('E'));
+}
+
+#[test]
+fn fingers_that_go_stale_cancel_the_scrub_so_nothing_switches() {
+    // The pad stops reporting with the fingers still down (no lift frame ever comes).
+    let mut s = Seq::default();
+    scrub_swipe(&mut s, 40.0, 0.0);
+    let log = scrub_log(&s.run(&scrub_cfg()));
+    assert_eq!(n_of(&log, 'B'), 1, "{log}");
+    assert!(log.ends_with('C'), "{log}");
+    assert_eq!(n_of(&log, 'E'), 0, "{log}");
+}
+
+#[test]
+fn a_frame_after_a_long_silence_cancels_the_scrub() {
+    let mut s = Seq::default();
+    let p = scrub_swipe(&mut s, 40.0, 0.0);
+    s.t += 2_000_000;
+    s.still(&p, 50);
+    s.lift(0);
+    let log = scrub_log(&s.run(&scrub_cfg()));
+    assert_eq!(n_of(&log, 'C'), 1, "{log}");
+    assert_eq!(n_of(&log, 'E'), 0, "{log}");
+    // Every Begin got exactly one end.
+    assert_eq!(n_of(&log, 'B'), 1, "{log}");
+}
+
+#[test]
+fn every_begin_is_closed_exactly_once() {
+    for lift_ms in [0u64, 50, 400] {
+        let mut s = Seq::default();
+        let p = scrub_swipe(&mut s, 50.0, 0.0);
+        s.still(&p, 100);
+        s.lift(lift_ms);
+        let log = scrub_log(&s.run(&scrub_cfg()));
+        assert_eq!(n_of(&log, 'B'), n_of(&log, 'E') + n_of(&log, 'C'), "{log}");
+    }
+}
+
+#[test]
+fn the_scrub_in_a_tap_or_pinch_slot_is_a_plain_trigger() {
+    let mut cfg = scrub_cfg();
+    cfg.three.tap = config::Action::AppSwitchScrub;
+    cfg.three.pinch_in = config::Action::AppSwitchScrub;
+    let mut s = Seq::default();
+    s.still(&row(3, 60.0, 50.0), 60);
+    s.lift(0);
+    let out = s.run(&cfg);
+    assert_eq!(triggers(&out), vec![config::Action::AppSwitchScrub]);
+    assert_eq!(scrub_log(&out), "");
+}
+
+#[test]
+fn an_unbound_direction_does_not_start_a_scrub() {
+    let mut cfg = scrub_cfg();
+    cfg.three.swipe_right = config::Action::None;
+    let mut s = Seq::default();
+    scrub_swipe(&mut s, 60.0, 0.0);
+    s.lift(0);
+    assert_eq!(scrub_log(&s.run(&cfg)), "");
+}

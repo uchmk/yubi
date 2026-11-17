@@ -366,7 +366,11 @@ impl DevShot {
                 reduced: false,
             })
             .collect();
-        for &(n, page) in &[("home", Page::Home), ("haptic", Page::Haptic)] {
+        for &(n, page) in &[
+            ("home", Page::Home),
+            ("haptic", Page::Haptic),
+            ("general", Page::General),
+        ] {
             shots.push(Shot {
                 name: format!("light-{n}"),
                 page,
@@ -412,6 +416,21 @@ impl DevShot {
                 page: Page::Sensitivity,
                 theme: ThemeChoice::Black,
                 size: Vec2::new(w, 1100.0),
+                fixture: Fixture::Keep,
+                profile: None,
+                fake: false,
+                practice: false,
+                anim_t: None,
+                reduced: false,
+            });
+        }
+        // The 全般 page tall enough to show the licence section at its foot, dark and light.
+        for (n, theme) in [("black", ThemeChoice::Black), ("light", ThemeChoice::Light)] {
+            shots.push(Shot {
+                name: format!("general-tall-{n}"),
+                page: Page::General,
+                theme,
+                size: Vec2::new(WIDE.x, 1900.0),
                 fixture: Fixture::Keep,
                 profile: None,
                 fake: false,

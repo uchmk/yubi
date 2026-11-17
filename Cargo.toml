@@ -3,6 +3,8 @@ name = "yubi"
 version = "0.1.0"
 edition = "2024"
 description = "Gesture engine and settings app for Apple Magic Trackpad on Windows"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/uchmk/yubi"
 publish = false
 default-run = "yubi"
 

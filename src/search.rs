@@ -393,6 +393,11 @@ const ROWS: &[Entry] = &[
     ),
     e(Page::General, "設定フォルダー", "設定ファイルの場所"),
     e(Page::General, "バージョン", "yubi のバージョン"),
+    e(
+        Page::General,
+        "ライセンス",
+        "MIT OR Apache-2.0・サードパーティのライセンス",
+    ),
 ];
 
 /// All pages (label + subtitle) followed by the rows.

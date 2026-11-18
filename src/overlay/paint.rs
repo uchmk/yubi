@@ -82,23 +82,67 @@ fn premul(c: Rgba) -> u32 {
     ((a * 255.0).round() as u32) << 24 | ch(c.0) << 16 | ch(c.1) << 8 | ch(c.2)
 }
 
+/// Per-slot highlight weights for a fixed `Highlight`: 1 for the selected slot (or the centre),
+/// 0 for the rest, and the flashed slot, which is painted with the flash colours at once.
+pub fn weights_for(hl: Highlight, n: usize) -> (Vec<f32>, f32, Option<usize>) {
+    let mut w = vec![0.0; n];
+    let mut set = |i: usize| {
+        if let Some(v) = w.get_mut(i) {
+            *v = 1.0;
+        }
+    };
+    let (centre, flash) = match hl {
+        Highlight::None => (0.0, None),
+        Highlight::Centre => (1.0, None),
+        Highlight::Selected(i) => {
+            set(i);
+            (0.0, None)
+        }
+        Highlight::Flash(i) => {
+            set(i);
+            (0.0, Some(i))
+        }
+    };
+    (w, centre, flash)
+}
+
 /// Draw the ring into `px` (`size` x `size`, cleared first).
 pub fn render_ring(px: &mut [u32], l: &Layout, hl: Highlight) {
+    let (w, centre, flash) = weights_for(hl, l.n);
+    render_ring_weighted(px, l, &w, centre, flash);
+}
+
+/// Draw the ring with a highlight weight (0 = normal, 1 = selected) per slot and for the centre
+/// disc; the colours are blended by the weight. `flash` is painted in the flash colours.
+pub fn render_ring_weighted(
+    px: &mut [u32],
+    l: &Layout,
+    weights: &[f32],
+    centre: f32,
+    flash: Option<usize>,
+) {
     let size = l.size as usize;
     assert!(px.len() >= size * size);
     px[..size * size].fill(0);
     let (cx, cy) = l.centre();
     let step = l.step();
     let n = l.n;
-    let hl_index = match hl {
-        Highlight::None | Highlight::Centre => None,
-        Highlight::Selected(i) | Highlight::Flash(i) => Some(i),
-    };
-    let (disc_fill, disc_border) = if hl == Highlight::Centre {
-        (PALETTE.sel_fill, PALETTE.sel_border)
-    } else {
-        (PALETTE.fill, PALETTE.border)
-    };
+    let disc_fill = PALETTE.fill.lerp(PALETTE.sel_fill, centre);
+    let disc_border = PALETTE.border.lerp(PALETTE.sel_border, centre);
+    // Colours per slot, once, not per pixel.
+    let slot_colours: Vec<(Rgba, Rgba)> = (0..n)
+        .map(|i| {
+            if flash == Some(i) {
+                (PALETTE.flash_fill, PALETTE.sel_border)
+            } else {
+                let w = weights.get(i).copied().unwrap_or(0.0);
+                (
+                    PALETTE.fill.lerp(PALETTE.sel_fill, w),
+                    PALETTE.border.lerp(PALETTE.sel_border, w),
+                )
+            }
+        })
+        .collect();
     let disc_r = l.inner - l.gap * 0.5;
 
     for y in 0..size {
@@ -136,11 +180,7 @@ pub fn render_ring(px: &mut [u32], l: &Layout, hl: Highlight) {
             if d <= -1.0 {
                 continue;
             }
-            let (fill, border) = match (hl_index == Some(idx), hl) {
-                (true, Highlight::Flash(_)) => (PALETTE.flash_fill, PALETTE.sel_border),
-                (true, _) => (PALETTE.sel_fill, PALETTE.sel_border),
-                _ => (PALETTE.fill, PALETTE.border),
-            };
+            let (fill, border) = slot_colours[idx];
             px[y * size + x] = shade(fill, border, d);
         }
     }
@@ -377,6 +417,24 @@ mod tests {
         assert_eq!(pixel(&px, &l, mid * a.sin(), -mid * a.cos()) >> 24, 0);
         // Centre disc is drawn.
         assert!(pixel(&px, &l, 0.0, 0.0) >> 24 > 200);
+    }
+
+    #[test]
+    fn half_weight_is_between_normal_and_selected() {
+        let l = Layout::new(8, 96);
+        let n = (l.size * l.size) as usize;
+        let (mut a, mut b, mut c) = (vec![0u32; n], vec![0u32; n], vec![0u32; n]);
+        let mut w = vec![0.0; 8];
+        render_ring_weighted(&mut a, &l, &w, 0.0, None);
+        w[0] = 0.5;
+        render_ring_weighted(&mut b, &l, &w, 0.0, None);
+        w[0] = 1.0;
+        render_ring_weighted(&mut c, &l, &w, 0.0, None);
+        let mid = (l.outer + l.inner) / 2.0;
+        let blue = |px: &[u32]| pixel(px, &l, 0.0, -mid) & 0xFF;
+        assert!(blue(&a) < blue(&b) && blue(&b) < blue(&c));
+        // The other sectors are untouched.
+        assert_eq!(pixel(&a, &l, -mid, 0.0), pixel(&b, &l, -mid, 0.0));
     }
 
     #[test]

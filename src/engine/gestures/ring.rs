@@ -5,12 +5,14 @@
 //!  * Idle: exactly N stable contacts (N is one of the finger counts whose long hold is set to
 //!    "ring menu", see `config::Config::ring_counts`) that moved less than the hold travel for the
 //!    hold time propose to open the ring.
-//!  * Open: the cursor and clicks are frozen; the centroid's offset from where the ring opened
-//!    picks a slot (centre = nothing). A new slot must persist for `SELECT_DWELL_US` first.
+//!  * Open: the cursor and clicks are frozen; the centroid's offset from a leashed anchor picks a
+//!    slot (centre = nothing). The anchor starts where the ring opened and is dragged along once
+//!    the hand is more than `LEASH_MM` from it, so a small move toward a neighbouring slot turns
+//!    the selection quickly. A new slot must persist for `SELECT_DWELL_US` first.
 //!  * Releasing: once the count falls below N the selection is frozen, and every finger must be
 //!    up within `RELEASE_US`; then the slot's action runs, exactly once.
 //!  * Cancels: a release that is not complete in time, the count coming back to N or above, a
-//!    changed set of contacts, Esc, a move further than `RADIUS_MM`, `TIMEOUT_US` open, an
+//!    changed set of contacts, Esc, a move further than `RADIUS_MM` from the open point, `TIMEOUT_US` open, an
 //!    interrupted touch, or lifting with the centre (nothing) selected.
 //!
 //! The selection uses the translation of the hand only; rotation is not read.
@@ -22,16 +24,18 @@ use crate::engine::arbitration::{Owner, Proposal};
 use crate::engine::types::{Action, Ctx, GestureCfg, Point, Suppress};
 
 /// The centroid must be this far from the anchor to select a slot.
-pub const ENTER_MM: f32 = 8.0;
+pub const ENTER_MM: f32 = 5.0;
 /// A selected slot clears when the centroid comes back inside this radius.
-pub const CLEAR_MM: f32 = 5.0;
+pub const CLEAR_MM: f32 = 3.0;
 /// A neighbouring slot is taken only this far (degrees) past the sector boundary.
-pub const HYSTERESIS_DEG: f32 = 8.0;
+pub const HYSTERESIS_DEG: f32 = 6.0;
 /// A new selection must hold this long before it is believed.
-pub const SELECT_DWELL_US: u64 = 60_000;
+pub const SELECT_DWELL_US: u64 = 35_000;
 /// After the first finger lifts, all must be up within this time.
 pub const RELEASE_US: u64 = 250_000;
-/// Moving the hand further than this from the anchor cancels the ring.
+/// The selection anchor trails the hand: it is never further than this from the centroid.
+pub const LEASH_MM: f32 = 10.0;
+/// Moving the hand further than this from the point where the ring opened cancels the ring.
 pub const RADIUS_MM: f32 = 45.0;
 /// An open ring that is not used closes after this long.
 pub const TIMEOUT_US: u64 = 5_000_000;
@@ -82,6 +86,9 @@ enum Phase {
     Open {
         /// The finger count that opened the ring.
         fingers: usize,
+        /// Where the ring opened; only the `RADIUS_MM` cancel is measured from here.
+        origin: Point,
+        /// The selection reference; trails the hand within `LEASH_MM`.
         anchor: Point,
         opened: u64,
         selected: Option<usize>,
@@ -186,6 +193,7 @@ impl RingState {
             .collect();
         self.phase = Phase::Open {
             fingers: ctx.raw,
+            origin: anchor,
             anchor,
             opened: ctx.now,
             selected: None,
@@ -203,7 +211,8 @@ impl RingState {
         match self.phase {
             Phase::Open {
                 fingers,
-                anchor,
+                origin,
+                mut anchor,
                 opened,
                 selected,
                 pending,
@@ -226,9 +235,15 @@ impl RingState {
                 let Some(c) = ctx.centroid else {
                     return;
                 };
-                let (dx, dy) = (c.0 - anchor.0, c.1 - anchor.1);
-                if dx.hypot(dy) > RADIUS_MM {
+                if (c.0 - origin.0).hypot(c.1 - origin.1) > RADIUS_MM {
                     return self.cancel(out);
+                }
+                let (mut dx, mut dy) = (c.0 - anchor.0, c.1 - anchor.1);
+                let dist = dx.hypot(dy);
+                if dist > LEASH_MM {
+                    let k = (dist - LEASH_MM) / dist;
+                    anchor = (anchor.0 + dx * k, anchor.1 + dy * k);
+                    (dx, dy) = (c.0 - anchor.0, c.1 - anchor.1);
                 }
                 let wanted = select(selected, dx, dy, cfg.items.len());
                 let (selected, pending) = if wanted == selected {
@@ -248,6 +263,7 @@ impl RingState {
                 };
                 self.phase = Phase::Open {
                     fingers,
+                    origin,
                     anchor,
                     opened,
                     selected,
@@ -443,11 +459,11 @@ mod tests {
 
     #[test]
     fn selection_needs_a_minimum_distance_and_clears_with_hysteresis() {
-        assert_eq!(select(None, 0.0, -7.0, 4), None);
-        assert_eq!(select(None, 0.0, -8.0, 4), Some(0));
+        assert_eq!(select(None, 0.0, -(ENTER_MM - 1.0), 4), None);
+        assert_eq!(select(None, 0.0, -ENTER_MM, 4), Some(0));
         // Once selected it stays until the hand is back inside the clear radius.
-        assert_eq!(select(Some(0), 0.0, -6.0, 4), Some(0));
-        assert_eq!(select(Some(0), 0.0, -4.0, 4), None);
+        assert_eq!(select(Some(0), 0.0, -(CLEAR_MM + 1.0), 4), Some(0));
+        assert_eq!(select(Some(0), 0.0, -(CLEAR_MM - 1.0), 4), None);
         assert_eq!(select(None, 0.0, 0.0, 4), None);
         assert_eq!(select(None, 10.0, 0.0, 0), None);
     }
@@ -464,7 +480,7 @@ mod tests {
         assert_eq!(select(None, x, y, 4), Some(1), "fresh: new slot");
         let (x, y) = at(57.0);
         assert_eq!(select(Some(0), x, y, 4), Some(1), "12 degrees past: switch");
-        let (x, y) = at(40.0);
+        let (x, y) = at(42.0);
         assert_eq!(select(Some(1), x, y, 4), Some(1), "5 degrees back: stay");
     }
 
@@ -473,6 +489,56 @@ mod tests {
         // 8 slots: slot 7 is up-left.
         assert_eq!(select(None, -14.0, -14.0, 8), Some(7));
         assert_eq!(select(Some(0), -5.0, -20.0, 8), Some(0));
+    }
+
+    #[test]
+    fn leash_lets_a_small_move_turn_to_a_neighbouring_slot() {
+        // 8 slots. Right 20 mm: slot 2. The anchor trails to x = 50; then up 8 mm makes the
+        // offset (10, -8), 51 degrees from up: slot 1. Without the leash it would be (20, -8),
+        // 68 degrees, which the hysteresis keeps on slot 2.
+        let mut c = cfg();
+        c.ring.items = (0..8)
+            .map(|i| RingItem {
+                label: format!("項目{i}"),
+                action: config::Action::Keys(format!("F{}", i + 1)),
+            })
+            .collect();
+        let mut rig = Rig::new(c);
+        rig.hold(700, &hand(5, 40.0, 60.0));
+        rig.hold(200, &hand(5, 60.0, 60.0));
+        assert!(rig.out.contains(&Action::RingSelect(Some(2))), "right");
+        rig.hold(200, &hand(5, 60.0, 52.0));
+        assert!(
+            rig.out.contains(&Action::RingSelect(Some(1))),
+            "{:?}",
+            rig.out
+        );
+    }
+
+    #[test]
+    fn the_cancel_radius_is_measured_from_the_open_point() {
+        let mut rig = open_rig();
+        // Far right in steps (the anchor trails), 46 mm from the open point: cancels.
+        rig.hold(100, &hand(5, 55.0, 60.0));
+        rig.hold(100, &hand(5, 70.0, 60.0));
+        assert!(
+            !rig.ring_actions()
+                .contains(&Action::RingClose { committed: None })
+        );
+        rig.hold(100, &hand(5, 40.0 + RADIUS_MM + 1.0, 60.0));
+        assert!(
+            rig.ring_actions()
+                .contains(&Action::RingClose { committed: None })
+        );
+    }
+
+    #[test]
+    fn five_mm_out_selects_and_four_does_not() {
+        let mut rig = open_rig();
+        rig.hold(200, &hand(5, 40.0 + ENTER_MM - 1.0, 60.0));
+        assert!(!rig.out.iter().any(|a| matches!(a, Action::RingSelect(_))));
+        rig.hold(200, &hand(5, 40.0 + ENTER_MM, 60.0));
+        assert!(rig.out.contains(&Action::RingSelect(Some(1))));
     }
 
     #[test]

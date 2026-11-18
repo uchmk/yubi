@@ -36,7 +36,7 @@ use windows::core::{PCWSTR, w};
 use super::geometry::{self, Area, Layout};
 use super::level::{LevelInfo, LevelLayout, LevelModel, NoticeModel};
 use super::model::{Effect, Model, OverlayCmd};
-use super::paint::{self, Highlight, PALETTE};
+use super::paint::{self, PALETTE};
 use super::{OverlayState, Shared};
 
 const WM_WAKE: u32 = WM_APP + 1;
@@ -47,6 +47,77 @@ const TICK_MS: u32 = 15;
 const FADE_IN_MS: u128 = 80;
 const FADE_OUT_MS: u128 = 100;
 const FLASH_MS: u128 = 120;
+/// The cross-fade when the highlight moves to another slot.
+const HIGHLIGHT_MS: u128 = 90;
+
+/// Highlight weights (0 normal .. 1 selected) per slot and for the centre disc.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Weights {
+    slots: Vec<f32>,
+    centre: f32,
+}
+
+impl Weights {
+    fn mix(&self, to: &Weights, t: f32) -> Weights {
+        let m = |a: f32, b: f32| a + (b - a) * t;
+        Weights {
+            slots: to
+                .slots
+                .iter()
+                .enumerate()
+                .map(|(i, &b)| m(self.slots.get(i).copied().unwrap_or(b), b))
+                .collect(),
+            centre: m(self.centre, to.centre),
+        }
+    }
+}
+
+/// Ease-out (cubic) of `t` in 0..=1.
+fn ease_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// The highlight glide: from the weights at `start` to `target` over `HIGHLIGHT_MS`.
+struct Glide {
+    from: Weights,
+    target: Weights,
+    start: Instant,
+}
+
+impl Glide {
+    fn new(target: Weights) -> Self {
+        Self {
+            from: target.clone(),
+            target,
+            start: Instant::now(),
+        }
+    }
+
+    fn now(&self) -> Weights {
+        let ms = self.start.elapsed().as_millis();
+        let t = (ms as f32 / HIGHLIGHT_MS as f32).min(1.0);
+        self.from.mix(&self.target, ease_out(t))
+    }
+
+    fn done(&self) -> bool {
+        self.start.elapsed().as_millis() >= HIGHLIGHT_MS
+    }
+
+    /// Aim at `target`: from the current weights, or at once.
+    fn aim(&mut self, target: Weights, animate: bool) {
+        if target == self.target {
+            return;
+        }
+        self.from = if animate && target.slots.len() == self.target.slots.len() {
+            self.now()
+        } else {
+            target.clone()
+        };
+        self.target = target;
+        self.start = Instant::now();
+    }
+}
 
 fn hwnd_of(v: isize) -> HWND {
     HWND(v as *mut c_void)
@@ -273,6 +344,9 @@ struct App {
     phase: Phase,
     phase_start: Instant,
     animate: bool,
+    glide: Glide,
+    /// False while the highlight glide still needs frames.
+    glide_settled: bool,
     layout: Layout,
     origin: (i32, i32),
     surface: Option<Surface>,
@@ -357,20 +431,70 @@ impl App {
         self.phase_start = Instant::now();
         match p {
             Phase::FadeIn | Phase::Flash | Phase::FadeOut | Phase::Level => {
-                // SAFETY: timer on our own window.
-                let ok = unsafe { SetTimer(Some(self.hwnd), TIMER_ID, TICK_MS, None) } != 0;
-                if !ok {
-                    // Without a timer nothing would end the animation: skip it.
-                    match p {
-                        Phase::FadeIn => {
-                            self.phase = self.settled();
-                            let _ = self.present(1.0);
-                        }
-                        _ => self.hide(),
-                    }
-                }
+                self.start_timer(p);
+            }
+            Phase::Shown if !self.glide_settled => {
+                self.start_timer(p);
             }
             _ => self.kill_timer(),
+        }
+    }
+
+    fn start_timer(&mut self, p: Phase) {
+        // SAFETY: timer on our own window.
+        let ok = unsafe { SetTimer(Some(self.hwnd), TIMER_ID, TICK_MS, None) } != 0;
+        if ok {
+            return;
+        }
+        // Without a timer nothing would end the animation: skip it.
+        match p {
+            Phase::FadeIn => {
+                self.phase = self.settled();
+                let _ = self.present(1.0);
+            }
+            Phase::Shown => {
+                // The glide cannot run: jump to the target.
+                self.glide.aim(self.target_weights(), false);
+                self.glide_settled = true;
+            }
+            _ => self.hide(),
+        }
+    }
+
+    /// The target highlight weights for the model as it is now.
+    fn target_weights(&self) -> Weights {
+        let n = self.model.items.len();
+        let mut slots = vec![0.0; n];
+        if let Some(w) = self.model.selected.and_then(|i| slots.get_mut(i)) {
+            *w = 1.0;
+        }
+        let centre = if self.model.selected.is_none() && self.model.centre {
+            1.0
+        } else {
+            0.0
+        };
+        Weights { slots, centre }
+    }
+
+    /// A ring opens: the weights start at the target, with no fade from the previous ring.
+    fn reset_glide(&mut self) {
+        self.glide = Glide::new(self.target_weights());
+        self.glide_settled = true;
+    }
+
+    /// Follow the model's selection; a change starts a glide.
+    fn update_glide(&mut self) {
+        let target = self.target_weights();
+        if target != self.glide.target {
+            self.glide.aim(target, self.animate);
+            self.glide_settled = !self.animate;
+        }
+    }
+
+    /// Keep the timer alive while the glide runs (the Shown phase has none of its own).
+    fn ensure_glide_timer(&mut self) {
+        if !self.glide_settled && self.phase == Phase::Shown {
+            self.start_timer(Phase::Shown);
         }
     }
 
@@ -572,6 +696,7 @@ impl App {
             });
         }
         let was_visible = matches!(self.phase, Phase::Shown | Phase::FadeIn);
+        self.reset_glide();
         let alpha = if self.animate && !was_visible {
             0.0
         } else {
@@ -607,6 +732,7 @@ impl App {
             return Ok(());
         }
         self.render()?;
+        self.ensure_glide_timer();
         self.present(alpha)
     }
 
@@ -644,16 +770,16 @@ impl App {
             return Ok(());
         }
         let layout = self.layout;
-        let hl = match (self.model.selected, self.phase) {
-            (Some(i), Phase::Flash | Phase::FadeOut) => Highlight::Flash(i),
-            (Some(i), _) if !self.model.open => Highlight::Flash(i),
-            (Some(i), _) => Highlight::Selected(i),
-            (None, _) if self.model.centre => Highlight::Centre,
-            (None, _) => Highlight::None,
+        let flash = match (self.model.selected, self.phase) {
+            (Some(i), Phase::Flash | Phase::FadeOut) => Some(i),
+            (Some(i), _) if !self.model.open => Some(i),
+            _ => None,
         };
+        self.update_glide();
+        let w = self.glide.now();
         let s = self.surface.as_mut().ok_or("no surface")?;
-        paint::render_ring(s.main.pixels(), &layout, hl);
-        draw_labels(s, &layout, &self.model, hl);
+        paint::render_ring_weighted(s.main.pixels(), &layout, &w.slots, w.centre, flash);
+        draw_labels(s, &layout, &self.model, &w.slots, w.centre, flash);
         Ok(())
     }
 
@@ -691,8 +817,26 @@ impl App {
         }
     }
 
+    /// While the highlight glides, draw the next frame (in the fade-in or shown phases).
+    fn glide_frame(&mut self) -> Result<(), String> {
+        if self.glide_settled || self.mode != Mode::Ring {
+            return Ok(());
+        }
+        if !matches!(self.phase, Phase::FadeIn | Phase::Shown) {
+            return Ok(());
+        }
+        self.render()?;
+        if self.glide.done() {
+            self.glide_settled = true;
+        }
+        Ok(())
+    }
+
     fn tick(&mut self) {
         let ms = self.phase_start.elapsed().as_millis();
+        if let Err(e) = self.glide_frame() {
+            return self.fail(e);
+        }
         let r = match self.phase {
             Phase::FadeIn => {
                 if ms >= FADE_IN_MS {
@@ -726,6 +870,13 @@ impl App {
                 }
                 Ok(())
             }
+            Phase::Shown if self.mode == Mode::Ring => {
+                // The glide frame was drawn above; show it, and stop when it is over.
+                if self.glide_settled {
+                    self.kill_timer();
+                }
+                self.present(1.0)
+            }
             _ => {
                 self.kill_timer();
                 Ok(())
@@ -739,11 +890,15 @@ impl App {
 
 /// Draw each slot's picture and label, and the centre's cross and caption, with GDI into the
 /// scratch DIB, then composite the coverage.
-fn draw_labels(s: &mut Surface, l: &Layout, model: &Model, hl: Highlight) {
-    let sel = match hl {
-        Highlight::None | Highlight::Centre => None,
-        Highlight::Selected(i) | Highlight::Flash(i) => Some(i),
-    };
+fn draw_labels(
+    s: &mut Surface,
+    l: &Layout,
+    model: &Model,
+    weights: &[f32],
+    centre: f32,
+    flash: Option<usize>,
+) {
+    let lit = |i: usize| flash == Some(i) || weights.get(i).is_some_and(|&w| w >= 0.5);
     let m = geometry::slot_metrics(l.n);
     let px = |v: f32| (v * l.scale).round() as i32;
     let bw = px(m.box_w);
@@ -759,7 +914,7 @@ fn draw_labels(s: &mut Surface, l: &Layout, model: &Model, hl: Highlight) {
             glyph.map(|_| m.icon_px)
         };
         let (icon_dy, label_dy) = m.rows(visual);
-        let color = if sel == Some(i) {
+        let color = if lit(i) {
             PALETTE.text_sel
         } else {
             PALETTE.text
@@ -801,7 +956,7 @@ fn draw_labels(s: &mut Surface, l: &Layout, model: &Model, hl: Highlight) {
             color,
         );
     }
-    draw_centre(s, l, hl == Highlight::Centre);
+    draw_centre(s, l, centre >= 0.5);
 }
 
 /// The cancel disc: a cross over the caption, dim until the hand is back in it.
@@ -1037,6 +1192,8 @@ pub(super) fn run(
             phase: Phase::Hidden,
             phase_start: Instant::now(),
             animate: true,
+            glide: Glide::new(Weights::default()),
+            glide_settled: true,
             layout: Layout::new(8, 96),
             origin: (0, 0),
             surface: None,
@@ -1066,7 +1223,7 @@ pub(super) fn run(
 #[cfg(test)]
 pub(super) fn snapshot(
     items: Vec<super::model::RingSlot>,
-    hl: Highlight,
+    hl: paint::Highlight,
     dpi: u32,
 ) -> Result<(i32, Vec<u32>), String> {
     let layout = Layout::new(items.len(), dpi);
@@ -1077,8 +1234,9 @@ pub(super) fn snapshot(
         fonts: Fonts::new(layout.scale, m.label_px, m.icon_px),
     };
     paint::render_ring(s.main.pixels(), &layout, hl);
+    let (w, centre, flash) = paint::weights_for(hl, layout.n);
     let mut model = Model::default();
     model.items = items;
-    draw_labels(&mut s, &layout, &model, hl);
+    draw_labels(&mut s, &layout, &model, &w, centre, flash);
     Ok((layout.size, s.main.pixels().to_vec()))
 }

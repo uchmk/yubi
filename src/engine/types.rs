@@ -389,9 +389,19 @@ pub enum Action {
         labels: Vec<String>,
         /// The action of each slot (same order), for the glyph / app icon.
         actions: Vec<config::Action>,
+        /// How fast the ring animates.
+        anim: config::RingAnimSpeed,
+        /// Whether the pointer dot is drawn.
+        pointer_dot: bool,
     },
     /// Highlight a slot (`None` = the centre).
     RingSelect(Option<usize>),
+    /// The hand's offset from the selection anchor (millimetres, after the leash), sent every
+    /// frame it changes while the ring is open. Only for the overlay's pointer: no haptics.
+    RingPoint {
+        dx: f32,
+        dy: f32,
+    },
     /// Hide the ring; `committed` flashes that slot first. The slot's action follows as `Trigger`.
     RingClose {
         committed: Option<usize>,
@@ -739,6 +749,10 @@ pub struct RingCfg {
     /// How long the fingers must rest before the ring opens.
     pub hold_us: u64,
     pub items: Vec<config::RingItem>,
+    /// How far the hand must move to select (the ring's travel setting).
+    pub travel: config::RingTravelValues,
+    pub anim: config::RingAnimSpeed,
+    pub pointer_dot: bool,
 }
 
 impl RingCfg {
@@ -918,6 +932,9 @@ impl GestureCfg {
                 .filter(|c| c.iter().any(|&on| on))
                 .map(|counts| RingCfg {
                     counts,
+                    travel: cfg.ring.travel.values(),
+                    anim: cfg.ring.anim_speed,
+                    pointer_dot: cfg.ring.pointer_dot,
                     hold_us: u64::from(cfg.sensitivity.hold_ms) * 1000,
                     items: cfg
                         .ring

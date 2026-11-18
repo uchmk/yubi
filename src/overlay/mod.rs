@@ -22,7 +22,7 @@ mod window;
 #[allow(unused_imports)]
 pub use level::{LevelInfo, LevelKind};
 #[allow(unused_imports)]
-pub use model::{OverlayCmd, RingImage, RingSlot};
+pub use model::{OverlayCmd, RingImage, RingSlot, RingStyle};
 
 /// Render a ring to memory (premultiplied pixels) for the screenshot test.
 #[cfg(all(test, windows))]

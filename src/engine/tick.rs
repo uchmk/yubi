@@ -135,7 +135,9 @@ mod tests {
         assert_eq!(
             RingEvent::of(&Action::RingOpen {
                 labels: vec![],
-                actions: vec![]
+                actions: vec![],
+                anim: Default::default(),
+                pointer_dot: true,
             }),
             Some(RingEvent::Open)
         );
@@ -144,6 +146,8 @@ mod tests {
             Some(RingEvent::Change)
         );
         assert_eq!(RingEvent::of(&Action::RingSelect(None)), None);
+        // The pointer position is not an event: no haptics.
+        assert_eq!(RingEvent::of(&Action::RingPoint { dx: 3.0, dy: 1.0 }), None);
         assert_eq!(
             RingEvent::of(&Action::RingClose { committed: Some(1) }),
             Some(RingEvent::Run)

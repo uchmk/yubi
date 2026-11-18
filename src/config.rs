@@ -1956,6 +1956,12 @@ pub struct Ring {
     pub items: Vec<RingItem>,
     /// Haptic ticks: when the ring opens, when the highlighted slot changes, when an item runs.
     pub haptic_ticks: bool,
+    /// How far the hand must move to pick a slot.
+    pub travel: RingTravel,
+    /// How fast the ring's highlight slides and its fades run.
+    pub anim_speed: RingAnimSpeed,
+    /// A small dot on the centre disc that points where the hand is going.
+    pub pointer_dot: bool,
 }
 
 impl Default for Ring {
@@ -1964,6 +1970,107 @@ impl Default for Ring {
             enabled: true,
             items: Vec::new(),
             haptic_ticks: true,
+            travel: RingTravel::default(),
+            anim_speed: RingAnimSpeed::default(),
+            pointer_dot: true,
+        }
+    }
+}
+
+/// How far the hand must move before the ring picks a slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RingTravel {
+    Small,
+    #[default]
+    Normal,
+    Large,
+}
+
+/// The numbers one `RingTravel` stands for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RingTravelValues {
+    /// The hand must be this far from the anchor to select a slot (mm).
+    pub enter_mm: f32,
+    /// A selected slot clears when the hand comes back inside this radius (mm).
+    pub clear_mm: f32,
+    /// The selection anchor is never further than this from the hand (mm).
+    pub leash_mm: f32,
+    /// A new selection must hold this long (microseconds).
+    pub dwell_us: u64,
+}
+
+impl RingTravel {
+    pub const ALL: [Self; 3] = [Self::Small, Self::Normal, Self::Large];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Small => "小さい",
+            Self::Normal => "標準（既定）",
+            Self::Large => "大きい",
+        }
+    }
+
+    pub fn values(self) -> RingTravelValues {
+        let (enter_mm, clear_mm, leash_mm, dwell_ms) = match self {
+            Self::Small => (3.5, 2.0, 7.0, 25),
+            Self::Normal => (5.0, 3.0, 10.0, 35),
+            Self::Large => (7.0, 4.5, 14.0, 50),
+        };
+        RingTravelValues {
+            enter_mm,
+            clear_mm,
+            leash_mm,
+            dwell_us: dwell_ms * 1000,
+        }
+    }
+}
+
+/// The speed of the ring's animations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RingAnimSpeed {
+    Fast,
+    #[default]
+    Normal,
+    Slow,
+}
+
+impl RingAnimSpeed {
+    pub const ALL: [Self; 3] = [Self::Fast, Self::Normal, Self::Slow];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fast => "速い",
+            Self::Normal => "標準（既定）",
+            Self::Slow => "ゆっくり",
+        }
+    }
+
+    /// Slide time of the highlight (ms).
+    pub fn slide_ms(self) -> u32 {
+        match self {
+            Self::Fast => 90,
+            Self::Normal => 140,
+            Self::Slow => 220,
+        }
+    }
+
+    /// Time constant of the pointer dot's follow (ms).
+    pub fn pointer_ms(self) -> u32 {
+        match self {
+            Self::Fast => 25,
+            Self::Normal => 40,
+            Self::Slow => 70,
+        }
+    }
+
+    /// Factor on the fade-in / fade-out times.
+    pub fn fade_scale(self) -> f32 {
+        match self {
+            Self::Fast => 0.75,
+            Self::Normal => 1.0,
+            Self::Slow => 1.5,
         }
     }
 }
@@ -4524,6 +4631,37 @@ enabled = true
         assert_eq!(back.ring.items[0].action, a);
         assert!(!back.ring.haptic_ticks);
         assert_eq!(back.ring, cfg.ring);
+        // The new ring settings: defaults for old files, and a round trip.
+        let d = Ring::default();
+        assert_eq!(d.travel, RingTravel::Normal);
+        assert_eq!(d.anim_speed, RingAnimSpeed::Normal);
+        assert!(d.pointer_dot);
+        assert_eq!(RingTravel::Normal.values().enter_mm, 5.0);
+        assert_eq!(RingTravel::Normal.values().dwell_us, 35_000);
+        let (f, n, sl) = (
+            RingAnimSpeed::Fast,
+            RingAnimSpeed::Normal,
+            RingAnimSpeed::Slow,
+        );
+        assert!(f.slide_ms() < n.slide_ms() && n.slide_ms() < sl.slide_ms());
+        assert!(f.pointer_ms() < n.pointer_ms() && n.pointer_ms() < sl.pointer_ms());
+        assert!(f.fade_scale() < 1.0 && n.fade_scale() == 1.0 && sl.fade_scale() > 1.0);
+        // An old file without the keys loads with the defaults.
+        let old: Config = toml::from_str(
+            "[ring]
+enabled = true
+",
+        )
+        .unwrap();
+        assert_eq!(old.ring.travel, RingTravel::Normal);
+        assert!(old.ring.pointer_dot);
+        cfg.ring.travel = RingTravel::Large;
+        cfg.ring.anim_speed = RingAnimSpeed::Slow;
+        cfg.ring.pointer_dot = false;
+        let again: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(again.ring.travel, RingTravel::Large);
+        assert_eq!(again.ring.anim_speed, RingAnimSpeed::Slow);
+        assert!(!again.ring.pointer_dot);
         // An older file without the key keeps the ticks on.
         let old = parse_text("schema_version = 2\n[ring]\nenabled = true\n").unwrap();
         assert!(old.config.ring.haptic_ticks && Ring::default().haptic_ticks);

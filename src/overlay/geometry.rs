@@ -3,7 +3,7 @@
 //! Angles are radians measured clockwise from "up" (screen -y). Slot 0 is centred on "up", slot
 //! `i` on `i * 2π / n`, so every sector is `2π / n` wide and symmetric around its slot angle.
 
-use std::f32::consts::TAU;
+use std::f32::consts::{PI, TAU};
 
 /// Ring radius at 96 DPI (outer edge of the sectors).
 pub const RADIUS_96: f32 = 140.0;
@@ -66,6 +66,178 @@ impl Layout {
         let (cx, cy) = self.centre();
         (cx + r * a.sin(), cy - r * a.cos())
     }
+}
+
+/// Pointer dot radius at 96 DPI.
+pub const DOT_R_96: f32 = 3.0;
+/// The hand's distance (mm) at which the pointer dot is fully visible (the engine's `ENTER_MM`).
+pub const POINTER_FULL_MM: f32 = 5.0;
+/// Time constant of the pointer dot's follow, in milliseconds.
+pub const POINTER_TAU_MS: f32 = 40.0;
+
+impl Layout {
+    pub fn dot_r(&self) -> f32 {
+        DOT_R_96 * self.scale
+    }
+
+    /// Window-local centre of the pointer dot for the direction `angle` (0 = up, clockwise): it
+    /// sits on the centre disc's rim side, just inside the gap.
+    pub fn dot_centre(&self, angle: f32) -> (f32, f32) {
+        let r = self.inner - self.gap - self.dot_r();
+        let (cx, cy) = self.centre();
+        (cx + r * angle.sin(), cy - r * angle.cos())
+    }
+}
+
+/// Shortest signed angle from `from` to `to`, in `(-π, π]`.
+pub fn angle_diff(from: f32, to: f32) -> f32 {
+    let d = (to - from).rem_euclid(TAU);
+    if d > PI { d - TAU } else { d }
+}
+
+/// `from` moved `t` (0..=1) of the way to `to` along the shorter arc, in `[0, 2π)`.
+pub fn lerp_angle(from: f32, to: f32, t: f32) -> f32 {
+    (from + angle_diff(from, to) * t).rem_euclid(TAU)
+}
+
+/// How visible the pointer dot is for a hand `dist_mm` from the anchor.
+pub fn pointer_alpha(dist_mm: f32) -> f32 {
+    (dist_mm / POINTER_FULL_MM).clamp(0.0, 1.0)
+}
+
+/// The pointer dot's direction, following the hand's with a short exponential lag.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PointerFollow {
+    pub angle: f32,
+    pub target: f32,
+}
+
+impl PointerFollow {
+    /// Aim at the hand offset (`dx`, `dy`); near the centre the direction is meaningless, so the
+    /// old aim stays.
+    pub fn aim(&mut self, dx: f32, dy: f32) {
+        if dx.hypot(dy) >= 0.3 {
+            self.target = angle_of(dx, dy);
+        }
+    }
+
+    /// Jump to the aim.
+    pub fn snap(&mut self) {
+        self.angle = self.target;
+    }
+
+    pub fn settled(&self) -> bool {
+        angle_diff(self.angle, self.target).abs() < 0.002
+    }
+
+    /// Advance by `dt_ms` with time constant `tau_ms` (frame-rate independent). True once settled.
+    pub fn step(&mut self, dt_ms: f32, tau_ms: f32) -> bool {
+        let k = 1.0 - (-dt_ms.max(0.0) / tau_ms.max(1.0)).exp();
+        let d = angle_diff(self.angle, self.target);
+        if d.abs() < 0.002 {
+            self.angle = self.target;
+            return true;
+        }
+        self.angle = (self.angle + d * k).rem_euclid(TAU);
+        self.settled()
+    }
+}
+
+/// Ease-out (cubic) of `t` in 0..=1.
+pub fn ease_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// The selection band's animation: it slides along the shorter arc from slot to slot, and fades
+/// in or out in place otherwise. The centre disc's light fades alongside. Time only advances
+/// through `step`, so it is deterministic.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BandAnim {
+    /// Centre of the band (0 = up, clockwise).
+    pub angle: f32,
+    /// 0 = invisible .. 1 = fully selected.
+    pub strength: f32,
+    /// How much the centre disc is lit.
+    pub centre: f32,
+    strength_to: f32,
+    centre_to: f32,
+    /// (from, to, elapsed ms) of a slide in flight.
+    slide: Option<(f32, f32, f32)>,
+}
+
+fn approach(v: f32, to: f32, d: f32) -> f32 {
+    if (to - v).abs() <= d {
+        to
+    } else {
+        v + d * (to - v).signum()
+    }
+}
+
+impl BandAnim {
+    /// Aim at the model's selection (`slot`, or the centre disc if `centre`), `n` slots in all.
+    /// Without `animate` everything jumps.
+    pub fn aim(&mut self, slot: Option<usize>, centre: bool, n: usize, animate: bool) {
+        self.centre_to = if slot.is_none() && centre { 1.0 } else { 0.0 };
+        match slot.filter(|&i| i < n) {
+            Some(i) => {
+                let to = i as f32 * TAU / n as f32;
+                if animate && self.strength > 0.5 && angle_diff(self.angle, to).abs() > 1e-4 {
+                    self.slide = Some((self.angle, to, 0.0));
+                } else {
+                    self.angle = to;
+                    self.slide = None;
+                }
+                self.strength_to = 1.0;
+            }
+            None => self.strength_to = 0.0,
+        }
+        if !animate {
+            self.finish();
+        }
+    }
+
+    /// Jump to the aim.
+    pub fn finish(&mut self) {
+        if let Some((_, to, _)) = self.slide.take() {
+            self.angle = to;
+        }
+        self.strength = self.strength_to;
+        self.centre = self.centre_to;
+    }
+
+    pub fn settled(&self) -> bool {
+        self.slide.is_none() && self.strength == self.strength_to && self.centre == self.centre_to
+    }
+
+    /// Advance by `dt_ms`: the slide takes `slide_ms`, the fades `fade_ms`.
+    pub fn step(&mut self, dt_ms: f32, slide_ms: f32, fade_ms: f32) {
+        let dt = dt_ms.max(0.0);
+        if let Some((from, to, el)) = self.slide {
+            let el = el + dt;
+            let t = (el / slide_ms.max(1.0)).min(1.0);
+            if t >= 1.0 {
+                self.angle = to;
+                self.slide = None;
+            } else {
+                self.angle = lerp_angle(from, to, ease_out(t));
+                self.slide = Some((from, to, el));
+            }
+        }
+        let d = dt / fade_ms.max(1.0);
+        self.strength = approach(self.strength, self.strength_to, d);
+        self.centre = approach(self.centre, self.centre_to, d);
+    }
+}
+
+/// The slot nearest to the band centre while the band is mostly on (its label turns to the
+/// selected colour).
+pub fn lit_slot(angle: f32, strength: f32, n: usize) -> Option<usize> {
+    if n == 0 || strength < 0.5 {
+        return None;
+    }
+    let step = TAU / n as f32;
+    Some((((angle + step / 2.0) / step).floor() as usize) % n)
 }
 
 /// Largest slot count a ring can have.
@@ -192,6 +364,108 @@ pub fn clamp_origin(anchor: (i32, i32), size: i32, work: Area) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slide_takes_the_shorter_arc() {
+        // Slot 0 to slot 2 of 8: the midpoint lies at slot 1's angle.
+        let step8 = TAU / 8.0;
+        let mid = lerp_angle(0.0, 2.0 * step8, 0.5);
+        assert!((mid - step8).abs() < 1e-4, "{mid}");
+        // Slot 0 to slot 7 of 8 goes backwards through 360 to 315 degrees.
+        let to = 7.0 * step8;
+        let q = lerp_angle(0.0, to, 0.5);
+        assert!((q - 337.5f32.to_radians()).abs() < 1e-4, "{q}");
+        assert!((lerp_angle(0.0, to, 1.0) - 315f32.to_radians()).abs() < 1e-4);
+        assert!(angle_diff(0.0, to) < 0.0);
+    }
+
+    #[test]
+    fn pointer_dot_sits_on_the_rim_side() {
+        let l = Layout::new(8, 96);
+        let (cx, cy) = l.centre();
+        let r = l.inner - l.gap - l.dot_r();
+        for a in [0.0f32, 1.0, 2.5, 4.0, 5.9] {
+            let (x, y) = l.dot_centre(a);
+            assert!(((x - cx).hypot(y - cy) - r).abs() < 1e-3);
+            assert!((angle_of(x - cx, y - cy) - a).abs() < 1e-3, "angle {a}");
+        }
+        // 0 = up, 90 degrees = right.
+        let (x, y) = l.dot_centre(0.0);
+        assert!(y < cy && (x - cx).abs() < 1e-3);
+        let (x, y) = l.dot_centre(PI / 2.0);
+        assert!(x > cx && (y - cy).abs() < 1e-3);
+    }
+
+    #[test]
+    fn pointer_follow_is_frame_rate_independent() {
+        let mut a = PointerFollow::default();
+        let mut b = a;
+        a.aim(10.0, 0.0);
+        b.aim(10.0, 0.0);
+        a.step(16.0, 40.0);
+        a.step(16.0, 40.0);
+        b.step(32.0, 40.0);
+        assert!((a.angle - b.angle).abs() < 1e-4);
+        // It goes the short way round (from 350 to 10 degrees through 0).
+        let mut p = PointerFollow {
+            angle: 350f32.to_radians(),
+            target: 10f32.to_radians(),
+        };
+        p.step(10.0, 40.0);
+        assert!(p.angle > 350f32.to_radians() || p.angle < 10f32.to_radians());
+        for _ in 0..100 {
+            p.step(16.0, 40.0);
+        }
+        assert!(p.settled());
+        // Invisible at the centre, full at 5 mm.
+        assert_eq!(pointer_alpha(0.0), 0.0);
+        assert_eq!(pointer_alpha(9.0), 1.0);
+    }
+
+    #[test]
+    fn band_slides_the_short_way_and_fades_in_place() {
+        let step = TAU / 8.0;
+        // Nothing -> slot 0: it appears in place.
+        let mut b = BandAnim::default();
+        b.aim(Some(0), false, 8, true);
+        assert_eq!((b.angle, b.strength), (0.0, 0.0));
+        for _ in 0..10 {
+            b.step(16.0, 140.0, 100.0);
+        }
+        assert_eq!(b.strength, 1.0);
+        // Slot 0 -> 2: half way in time is past slot 1 (ease-out), and it ends on slot 2.
+        b.aim(Some(2), false, 8, true);
+        b.step(70.0, 140.0, 100.0);
+        assert!(b.angle > step && b.angle < 2.0 * step);
+        assert_eq!(b.strength, 1.0);
+        b.step(100.0, 140.0, 100.0);
+        assert!((b.angle - 2.0 * step).abs() < 1e-5 && b.settled());
+        // Slot 2 -> 7 of 8 wraps through 360: the angle stays close to 0 / 315 on the way.
+        b.aim(Some(0), false, 8, false);
+        b.aim(Some(7), false, 8, true);
+        b.step(40.0, 140.0, 100.0);
+        assert!(b.angle > 7.0 * step || b.angle < 0.2, "{}", b.angle);
+        b.step(200.0, 140.0, 100.0);
+        assert!((b.angle - 7.0 * step).abs() < 1e-5);
+        // Slot -> centre: the band fades out where it is, the disc lights up.
+        let at = b.angle;
+        b.aim(None, true, 8, true);
+        b.step(50.0, 140.0, 100.0);
+        assert_eq!(b.angle, at);
+        assert!((b.strength - 0.5).abs() < 1e-5 && (b.centre - 0.5).abs() < 1e-5);
+        b.step(100.0, 140.0, 100.0);
+        assert!(b.settled() && b.strength == 0.0 && b.centre == 1.0);
+        // Animations off: jumps.
+        b.aim(Some(3), false, 8, false);
+        assert!(b.settled() && b.strength == 1.0 && b.centre == 0.0);
+        assert!((b.angle - 3.0 * step).abs() < 1e-5);
+        // Labels light at the nearest slot once the band is mostly on.
+        assert_eq!(lit_slot(1.4 * step, 1.0, 8), Some(1));
+        assert_eq!(lit_slot(1.6 * step, 1.0, 8), Some(2));
+        assert_eq!(lit_slot(1.6 * step, 0.4, 8), None);
+        assert_eq!(lit_slot(7.4 * step, 1.0, 8), Some(7));
+        assert_eq!(lit_slot(7.6 * step, 1.0, 8), Some(0));
+    }
 
     #[test]
     fn sectors_eight() {

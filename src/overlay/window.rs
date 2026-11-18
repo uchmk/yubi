@@ -2,12 +2,13 @@
 
 use std::cell::RefCell;
 use std::ffi::c_void;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::Instant;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
     BLENDFUNCTION, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection, CreateFontW,
@@ -33,89 +34,90 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 
-use super::geometry::{self, Area, Layout};
+use super::geometry::{self, Area, BandAnim, Layout, PointerFollow};
 use super::level::{LevelInfo, LevelLayout, LevelModel, NoticeModel};
 use super::model::{Effect, Model, OverlayCmd};
-use super::paint::{self, PALETTE};
+use super::paint::{self, Band, PALETTE, Pointer};
 use super::{OverlayState, Shared};
 
 const WM_WAKE: u32 = WM_APP + 1;
 const WM_STOP: u32 = WM_APP + 2;
+/// One frame of the frame clock.
+const WM_FRAME: u32 = WM_APP + 3;
+/// The timer that ends the level HUD / notice (it needs no frames, only a late wake-up).
 const TIMER_ID: usize = 1;
 const TICK_MS: u32 = 15;
 
-const FADE_IN_MS: u128 = 80;
-const FADE_OUT_MS: u128 = 100;
-const FLASH_MS: u128 = 120;
-/// The cross-fade when the highlight moves to another slot.
-const HIGHLIGHT_MS: u128 = 90;
+const FADE_IN_MS: f32 = 80.0;
+const FADE_OUT_MS: f32 = 100.0;
+const FLASH_MS: f32 = 120.0;
+/// The fade of the band and of the centre disc's light (the slide time comes from the style).
+const BAND_FADE_MS: f32 = 100.0;
 
-/// Highlight weights (0 normal .. 1 selected) per slot and for the centre disc.
-#[derive(Clone, Debug, Default, PartialEq)]
-struct Weights {
-    slots: Vec<f32>,
-    centre: f32,
+/// Paces the animation: while `on`, a thread waits for the display's vertical blank
+/// (`DwmFlush`, else a short sleep) and posts one `WM_FRAME`. It parks when `on` is cleared, and
+/// a frame is posted only after the previous one was handled (`pending`), so frames never queue.
+struct Clock {
+    on: Mutex<bool>,
+    cv: Condvar,
+    stop: AtomicBool,
+    pending: AtomicBool,
 }
 
-impl Weights {
-    fn mix(&self, to: &Weights, t: f32) -> Weights {
-        let m = |a: f32, b: f32| a + (b - a) * t;
-        Weights {
-            slots: to
-                .slots
-                .iter()
-                .enumerate()
-                .map(|(i, &b)| m(self.slots.get(i).copied().unwrap_or(b), b))
-                .collect(),
-            centre: m(self.centre, to.centre),
-        }
+impl Clock {
+    fn new() -> Arc<Clock> {
+        Arc::new(Clock {
+            on: Mutex::new(false),
+            cv: Condvar::new(),
+            stop: AtomicBool::new(false),
+            pending: AtomicBool::new(false),
+        })
     }
-}
 
-/// Ease-out (cubic) of `t` in 0..=1.
-fn ease_out(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    1.0 - (1.0 - t).powi(3)
-}
-
-/// The highlight glide: from the weights at `start` to `target` over `HIGHLIGHT_MS`.
-struct Glide {
-    from: Weights,
-    target: Weights,
-    start: Instant,
-}
-
-impl Glide {
-    fn new(target: Weights) -> Self {
-        Self {
-            from: target.clone(),
-            target,
-            start: Instant::now(),
+    fn set(&self, on: bool) {
+        if let Ok(mut g) = self.on.lock()
+            && *g != on
+        {
+            *g = on;
+            if on {
+                self.cv.notify_all();
+            }
         }
     }
 
-    fn now(&self) -> Weights {
-        let ms = self.start.elapsed().as_millis();
-        let t = (ms as f32 / HIGHLIGHT_MS as f32).min(1.0);
-        self.from.mix(&self.target, ease_out(t))
-    }
-
-    fn done(&self) -> bool {
-        self.start.elapsed().as_millis() >= HIGHLIGHT_MS
-    }
-
-    /// Aim at `target`: from the current weights, or at once.
-    fn aim(&mut self, target: Weights, animate: bool) {
-        if target == self.target {
-            return;
+    fn stop(&self) {
+        if let Ok(_g) = self.on.lock() {
+            self.stop.store(true, Ordering::SeqCst);
+            self.cv.notify_all();
         }
-        self.from = if animate && target.slots.len() == self.target.slots.len() {
-            self.now()
-        } else {
-            target.clone()
-        };
-        self.target = target;
-        self.start = Instant::now();
+    }
+
+    fn run(&self, hwnd: isize) {
+        loop {
+            {
+                let Ok(mut g) = self.on.lock() else { return };
+                while !*g && !self.stop.load(Ordering::SeqCst) {
+                    g = match self.cv.wait(g) {
+                        Ok(g) => g,
+                        Err(_) => return,
+                    };
+                }
+            }
+            if self.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            // SAFETY: plain wait for the next composition; no pointers.
+            if unsafe { DwmFlush() }.is_err() {
+                std::thread::sleep(Duration::from_millis(8));
+            }
+            if !self.on.lock().map(|g| *g).unwrap_or(false) {
+                continue;
+            }
+            if !self.pending.swap(true, Ordering::SeqCst) && !post(hwnd, WM_FRAME) {
+                // The window is gone.
+                return;
+            }
+        }
     }
 }
 
@@ -344,9 +346,20 @@ struct App {
     phase: Phase,
     phase_start: Instant,
     animate: bool,
-    glide: Glide,
-    /// False while the highlight glide still needs frames.
-    glide_settled: bool,
+    /// The selection band and the centre disc's light.
+    band: BandAnim,
+    /// The pointer dot's direction.
+    pointer: PointerFollow,
+    /// The ring changed since it was last drawn.
+    dirty: bool,
+    /// The previous frame (for the step of the animations).
+    last_frame: Instant,
+    /// Frames were wanted at the last `sync_clock` (a clock that starts again begins its steps
+    /// from now, not from the last frame before it stopped).
+    frames_on: bool,
+    /// Paces the frames; `None` if its thread could not start (the timer then does it).
+    clock: Option<Arc<Clock>>,
+    timer_on: bool,
     layout: Layout,
     origin: (i32, i32),
     surface: Option<Surface>,
@@ -416,7 +429,7 @@ impl App {
     fn fail(&mut self, msg: String) {
         self.failed = true;
         self.phase = Phase::Hidden;
-        self.kill_timer();
+        self.sync_clock();
         // SAFETY: hiding our own window.
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
@@ -429,72 +442,70 @@ impl App {
     fn set_phase(&mut self, p: Phase) {
         self.phase = p;
         self.phase_start = Instant::now();
-        match p {
-            Phase::FadeIn | Phase::Flash | Phase::FadeOut | Phase::Level => {
-                self.start_timer(p);
-            }
-            Phase::Shown if !self.glide_settled => {
-                self.start_timer(p);
-            }
-            _ => self.kill_timer(),
+        self.last_frame = Instant::now();
+        self.sync_clock();
+    }
+
+    /// The factor on the ring's fade times (the HUD is not scaled).
+    fn fade_scale(&self) -> f32 {
+        if self.mode == Mode::Ring {
+            self.model.style.fade_scale
+        } else {
+            1.0
         }
     }
 
-    fn start_timer(&mut self, p: Phase) {
-        // SAFETY: timer on our own window.
-        let ok = unsafe { SetTimer(Some(self.hwnd), TIMER_ID, TICK_MS, None) } != 0;
-        if ok {
+    /// The ring's animations (band, centre light, pointer) are all at rest.
+    fn ring_settled(&self) -> bool {
+        self.band.settled() && (!self.pointer_on() || self.pointer.settled())
+    }
+
+    fn pointer_on(&self) -> bool {
+        self.model.open && self.model.style.pointer_dot
+    }
+
+    /// Whether frames are needed: a fade or flash is running, or the shown ring still moves.
+    fn needs_frames(&self) -> bool {
+        match self.phase {
+            Phase::FadeIn | Phase::Flash | Phase::FadeOut => true,
+            Phase::Shown => self.mode == Mode::Ring && !self.ring_settled(),
+            Phase::Hidden | Phase::Level => false,
+        }
+    }
+
+    /// Start or stop the frame clock and the HUD timer to match what is animating. The clock
+    /// thread parks as soon as nothing needs frames.
+    fn sync_clock(&mut self) {
+        let frames = !self.failed && self.needs_frames();
+        if frames && !self.frames_on {
+            // The animations were at rest: the first step must not cover the idle time, or a
+            // new slide would land in one frame.
+            self.last_frame = Instant::now();
+        }
+        self.frames_on = frames;
+        if let Some(c) = &self.clock {
+            c.set(frames);
+        }
+        let want_timer =
+            !self.failed && (self.phase == Phase::Level || (frames && self.clock.is_none()));
+        if want_timer == self.timer_on {
             return;
         }
-        // Without a timer nothing would end the animation: skip it.
-        match p {
-            Phase::FadeIn => {
-                self.phase = self.settled();
-                let _ = self.present(1.0);
+        if want_timer {
+            // SAFETY: timer on our own window.
+            let ok = unsafe { SetTimer(Some(self.hwnd), TIMER_ID, TICK_MS, None) } != 0;
+            if ok {
+                self.timer_on = true;
+            } else if self.phase != Phase::Hidden {
+                // Without a timer nothing would end the card: drop it.
+                self.hide();
             }
-            Phase::Shown => {
-                // The glide cannot run: jump to the target.
-                self.glide.aim(self.target_weights(), false);
-                self.glide_settled = true;
-            }
-            _ => self.hide(),
-        }
-    }
-
-    /// The target highlight weights for the model as it is now.
-    fn target_weights(&self) -> Weights {
-        let n = self.model.items.len();
-        let mut slots = vec![0.0; n];
-        if let Some(w) = self.model.selected.and_then(|i| slots.get_mut(i)) {
-            *w = 1.0;
-        }
-        let centre = if self.model.selected.is_none() && self.model.centre {
-            1.0
         } else {
-            0.0
-        };
-        Weights { slots, centre }
-    }
-
-    /// A ring opens: the weights start at the target, with no fade from the previous ring.
-    fn reset_glide(&mut self) {
-        self.glide = Glide::new(self.target_weights());
-        self.glide_settled = true;
-    }
-
-    /// Follow the model's selection; a change starts a glide.
-    fn update_glide(&mut self) {
-        let target = self.target_weights();
-        if target != self.glide.target {
-            self.glide.aim(target, self.animate);
-            self.glide_settled = !self.animate;
-        }
-    }
-
-    /// Keep the timer alive while the glide runs (the Shown phase has none of its own).
-    fn ensure_glide_timer(&mut self) {
-        if !self.glide_settled && self.phase == Phase::Shown {
-            self.start_timer(Phase::Shown);
+            // SAFETY: as above.
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_ID);
+            }
+            self.timer_on = false;
         }
     }
 
@@ -510,13 +521,8 @@ impl App {
         self.epoch.elapsed().as_millis() as u64
     }
 
-    fn kill_timer(&self) {
-        // SAFETY: as above.
-        unsafe {
-            let _ = KillTimer(Some(self.hwnd), TIMER_ID);
-        }
-    }
-
+    /// Take in every queued command. This only updates state; the ring is drawn once per frame
+    /// (by the frame clock), or once here at the end if nothing is animating.
     fn drain(&mut self) {
         while let Ok(cmd) = self.rx.try_recv() {
             if self.failed {
@@ -549,15 +555,36 @@ impl App {
                 }
                 _ => {}
             }
-            let anchor_open = matches!(cmd, OverlayCmd::Open { .. });
             let effect = self.model.apply(cmd);
             let r = match effect {
                 Effect::None => Ok(()),
-                Effect::Open => self.on_open(anchor_open),
-                Effect::Redraw => self.redraw(1.0),
+                Effect::Open => self.on_open(),
+                Effect::Redraw => {
+                    // The selection changed: the band slides, fades or jumps.
+                    self.band.aim(
+                        self.model.selected,
+                        self.model.centre,
+                        self.model.items.len(),
+                        self.animate,
+                    );
+                    self.dirty = true;
+                    Ok(())
+                }
+                Effect::Point => {
+                    let (dx, dy) = self.model.point;
+                    self.pointer.aim(dx, dy);
+                    if !self.animate {
+                        self.pointer.snap();
+                    }
+                    self.dirty = true;
+                    Ok(())
+                }
                 Effect::Flash => {
+                    // The flash on a commit is immediate.
+                    self.band
+                        .aim(self.model.selected, false, self.model.items.len(), false);
                     self.set_phase(Phase::Flash);
-                    self.redraw(1.0)
+                    self.paint_frame(1.0)
                 }
                 Effect::Hide => {
                     self.begin_fade_out();
@@ -568,6 +595,18 @@ impl App {
                 self.fail(e);
             }
         }
+        if self.failed {
+            return;
+        }
+        // Nothing animates, so no frame is coming: draw what changed now.
+        if self.dirty
+            && self.phase == Phase::Shown
+            && self.mode == Mode::Ring
+            && let Err(e) = self.paint_frame(1.0)
+        {
+            return self.fail(e);
+        }
+        self.sync_clock();
     }
 
     fn begin_fade_out(&mut self) {
@@ -669,7 +708,7 @@ impl App {
         Ok(())
     }
 
-    fn on_open(&mut self, _fresh: bool) -> Result<(), String> {
+    fn on_open(&mut self) -> Result<(), String> {
         // The ring takes over the window from the level HUD.
         self.level.hide();
         self.notice.hide();
@@ -696,13 +735,15 @@ impl App {
             });
         }
         let was_visible = matches!(self.phase, Phase::Shown | Phase::FadeIn);
-        self.reset_glide();
+        // No band, and no carry-over from the previous ring.
+        self.band = BandAnim::default();
+        self.pointer = PointerFollow::default();
         let alpha = if self.animate && !was_visible {
             0.0
         } else {
             1.0
         };
-        self.redraw(alpha)?;
+        self.render()?;
         // SAFETY: showing our own window without activating it, keeping it topmost.
         unsafe {
             SetWindowPos(
@@ -726,17 +767,16 @@ impl App {
         Ok(())
     }
 
-    /// Re-render the ring and show it with `alpha`.
-    fn redraw(&mut self, alpha: f32) -> Result<(), String> {
-        if self.phase == Phase::Hidden && !self.model.open && self.mode == Mode::Ring {
-            return Ok(());
+    /// Draw the ring if it changed, and show it with `alpha`.
+    fn paint_frame(&mut self, alpha: f32) -> Result<(), String> {
+        if self.mode == Mode::Ring && (self.dirty || !self.ring_settled()) {
+            self.render()?;
         }
-        self.render()?;
-        self.ensure_glide_timer();
         self.present(alpha)
     }
 
     fn render(&mut self) -> Result<(), String> {
+        self.dirty = false;
         if self.mode == Mode::Notice {
             let text = self.notice.text().ok_or("no notice")?.to_owned();
             let l = self.level_layout;
@@ -775,11 +815,22 @@ impl App {
             (Some(i), _) if !self.model.open => Some(i),
             _ => None,
         };
-        self.update_glide();
-        let w = self.glide.now();
+        let band = Band {
+            angle: self.band.angle,
+            strength: self.band.strength,
+        };
+        let pointer = self.pointer_on().then(|| {
+            let (dx, dy) = self.model.point;
+            Pointer {
+                angle: self.pointer.angle,
+                alpha: geometry::pointer_alpha(dx.hypot(dy)),
+            }
+        });
+        let centre = self.band.centre;
+        let lit = flash.or_else(|| geometry::lit_slot(band.angle, band.strength, layout.n));
         let s = self.surface.as_mut().ok_or("no surface")?;
-        paint::render_ring_weighted(s.main.pixels(), &layout, &w.slots, w.centre, flash);
-        draw_labels(s, &layout, &self.model, &w.slots, w.centre, flash);
+        paint::render_ring_band(s.main.pixels(), &layout, band, centre, flash, pointer);
+        draw_labels(s, &layout, &self.model, lit, centre);
         Ok(())
     }
 
@@ -817,48 +868,47 @@ impl App {
         }
     }
 
-    /// While the highlight glides, draw the next frame (in the fade-in or shown phases).
-    fn glide_frame(&mut self) -> Result<(), String> {
-        if self.glide_settled || self.mode != Mode::Ring {
-            return Ok(());
-        }
-        if !matches!(self.phase, Phase::FadeIn | Phase::Shown) {
-            return Ok(());
-        }
-        self.render()?;
-        if self.glide.done() {
-            self.glide_settled = true;
-        }
-        Ok(())
-    }
-
+    /// One frame (from the clock) or one timer beat (the HUD): step the animations, draw, and
+    /// see whether more frames are needed.
     fn tick(&mut self) {
-        let ms = self.phase_start.elapsed().as_millis();
-        if let Err(e) = self.glide_frame() {
-            return self.fail(e);
+        if self.failed {
+            return;
         }
+        let now = Instant::now();
+        let dt = (now.duration_since(self.last_frame).as_secs_f32() * 1000.0).min(100.0);
+        self.last_frame = now;
+        if self.mode == Mode::Ring && self.phase != Phase::Hidden {
+            let style = self.model.style;
+            self.band
+                .step(dt, style.slide_ms as f32, BAND_FADE_MS * style.fade_scale);
+            if self.pointer_on() {
+                self.pointer.step(dt, style.pointer_ms);
+            }
+        }
+        let k = self.fade_scale();
+        let ms = self.phase_start.elapsed().as_secs_f32() * 1000.0;
         let r = match self.phase {
             Phase::FadeIn => {
-                if ms >= FADE_IN_MS {
+                if ms >= FADE_IN_MS * k {
                     let next = self.settled();
                     self.set_phase(next);
-                    self.present(1.0)
+                    self.paint_frame(1.0)
                 } else {
-                    self.present(ms as f32 / FADE_IN_MS as f32)
+                    self.paint_frame(ms / (FADE_IN_MS * k))
                 }
             }
             Phase::Flash => {
-                if ms >= FLASH_MS {
+                if ms >= FLASH_MS * k {
                     self.begin_fade_out();
                 }
                 Ok(())
             }
             Phase::FadeOut => {
-                if ms >= FADE_OUT_MS {
+                if ms >= FADE_OUT_MS * k {
                     self.hide();
                     Ok(())
                 } else {
-                    self.present(1.0 - ms as f32 / FADE_OUT_MS as f32)
+                    self.paint_frame(1.0 - ms / (FADE_OUT_MS * k))
                 }
             }
             Phase::Level => {
@@ -871,34 +921,25 @@ impl App {
                 Ok(())
             }
             Phase::Shown if self.mode == Mode::Ring => {
-                // The glide frame was drawn above; show it, and stop when it is over.
-                if self.glide_settled {
-                    self.kill_timer();
+                if self.dirty || !self.ring_settled() {
+                    self.paint_frame(1.0)
+                } else {
+                    Ok(())
                 }
-                self.present(1.0)
             }
-            _ => {
-                self.kill_timer();
-                Ok(())
-            }
+            Phase::Shown | Phase::Hidden => Ok(()),
         };
-        if let Err(e) = r {
-            self.fail(e);
+        match r {
+            Ok(()) => self.sync_clock(),
+            Err(e) => self.fail(e),
         }
     }
 }
 
 /// Draw each slot's picture and label, and the centre's cross and caption, with GDI into the
 /// scratch DIB, then composite the coverage.
-fn draw_labels(
-    s: &mut Surface,
-    l: &Layout,
-    model: &Model,
-    weights: &[f32],
-    centre: f32,
-    flash: Option<usize>,
-) {
-    let lit = |i: usize| flash == Some(i) || weights.get(i).is_some_and(|&w| w >= 0.5);
+fn draw_labels(s: &mut Surface, l: &Layout, model: &Model, lit_slot: Option<usize>, centre: f32) {
+    let lit = |i: usize| lit_slot == Some(i);
     let m = geometry::slot_metrics(l.n);
     let px = |v: f32| (v * l.scale).round() as i32;
     let bw = px(m.box_w);
@@ -1099,7 +1140,17 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
     match msg {
         WM_NCHITTEST => return LRESULT(HTTRANSPARENT as isize),
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
-        WM_WAKE | WM_TIMER | WM_STOP => {
+        WM_WAKE | WM_TIMER | WM_STOP | WM_FRAME => {
+            if msg == WM_FRAME {
+                // Handled (or dropped) either way: the clock may post the next frame.
+                APP.with(|a| {
+                    if let Ok(g) = a.try_borrow()
+                        && let Some(c) = g.as_ref().and_then(|app| app.clock.clone())
+                    {
+                        c.pending.store(false, Ordering::SeqCst);
+                    }
+                });
+            }
             // Re-entrant calls (messages sent while we call Win32) fall through harmlessly.
             APP.with(|a| {
                 if let Ok(mut g) = a.try_borrow_mut()
@@ -1107,8 +1158,11 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 {
                     match msg {
                         WM_WAKE => app.drain(),
-                        WM_TIMER => app.tick(),
+                        WM_TIMER | WM_FRAME => app.tick(),
                         _ => {
+                            if let Some(c) = &app.clock {
+                                c.stop();
+                            }
                             app.surface = None;
                             // SAFETY: destroying our own window from its thread.
                             unsafe {
@@ -1183,6 +1237,16 @@ pub(super) fn run(
         }
     };
     shared.hwnd.store(hwnd.0 as isize, Ordering::SeqCst);
+    let clock = Clock::new();
+    let clock_thread = {
+        let c = clock.clone();
+        let h = hwnd.0 as isize;
+        std::thread::Builder::new()
+            .name("yubi-overlay-frames".into())
+            .spawn(move || c.run(h))
+            .ok()
+    };
+    let clock = clock_thread.is_some().then_some(clock);
     APP.with(|a| {
         *a.borrow_mut() = Some(App {
             hwnd,
@@ -1192,8 +1256,13 @@ pub(super) fn run(
             phase: Phase::Hidden,
             phase_start: Instant::now(),
             animate: true,
-            glide: Glide::new(Weights::default()),
-            glide_settled: true,
+            band: BandAnim::default(),
+            pointer: PointerFollow::default(),
+            dirty: false,
+            last_frame: Instant::now(),
+            frames_on: false,
+            clock,
+            timer_on: false,
             layout: Layout::new(8, 96),
             origin: (0, 0),
             surface: None,
@@ -1216,7 +1285,16 @@ pub(super) fn run(
         }
     }
     shared.hwnd.store(0, Ordering::SeqCst);
-    APP.with(|a| *a.borrow_mut() = None);
+    // The window is gone: the clock thread ends on its next beat.
+    APP.with(|a| {
+        if let Some(c) = a.borrow().as_ref().and_then(|app| app.clock.as_ref()) {
+            c.stop();
+        }
+        *a.borrow_mut() = None;
+    });
+    if let Some(t) = clock_thread {
+        let _ = t.join();
+    }
 }
 
 /// Render one ring into memory (no window), for the screenshot test.
@@ -1234,9 +1312,9 @@ pub(super) fn snapshot(
         fonts: Fonts::new(layout.scale, m.label_px, m.icon_px),
     };
     paint::render_ring(s.main.pixels(), &layout, hl);
-    let (w, centre, flash) = paint::weights_for(hl, layout.n);
+    let (_, centre, _) = paint::look_for(hl, layout.n);
     let mut model = Model::default();
     model.items = items;
-    draw_labels(&mut s, &layout, &model, &w, centre, flash);
+    draw_labels(&mut s, &layout, &model, paint::lit_for(hl), centre);
     Ok((layout.size, s.main.pixels().to_vec()))
 }

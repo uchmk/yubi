@@ -7,7 +7,7 @@ mod overlay;
 
 use std::time::Duration;
 
-use overlay::{LevelInfo, LevelKind, Overlay, OverlayCmd, RingSlot};
+use overlay::{LevelInfo, LevelKind, Overlay, OverlayCmd, RingSlot, RingStyle};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -84,9 +84,21 @@ fn main() {
         anchor_px: (at.x, at.y),
         items,
         generation,
+        style: RingStyle::default(),
     })
     .unwrap();
     std::thread::sleep(Duration::from_millis(400));
+    // The hand drifts out to the right and round in a circle (the pointer dot follows it).
+    for k in 0..40 {
+        let a = k as f32 * 0.15;
+        ov.send(OverlayCmd::Point {
+            dx: 8.0 * a.sin(),
+            dy: -8.0 * a.cos(),
+            generation,
+        })
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(16));
+    }
     for i in 0..8usize {
         ov.send(OverlayCmd::Select {
             index: Some(i),

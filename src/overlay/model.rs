@@ -21,8 +21,32 @@ pub struct RingSlot {
     pub image: Option<RingImage>,
 }
 
+/// Per-ring look settings, carried on `Open`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RingStyle {
+    /// Time of the highlight's slide (ms).
+    pub slide_ms: u32,
+    /// Time constant of the pointer dot's follow (ms).
+    pub pointer_ms: f32,
+    /// Factor on the fade-in / fade-out times.
+    pub fade_scale: f32,
+    /// Draw the pointer dot.
+    pub pointer_dot: bool,
+}
+
+impl Default for RingStyle {
+    fn default() -> Self {
+        Self {
+            slide_ms: 140,
+            pointer_ms: 40.0,
+            fade_scale: 1.0,
+            pointer_dot: true,
+        }
+    }
+}
+
 /// Messages the engine sends. The overlay has no gesture logic of its own.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum OverlayCmd {
     /// Show a ring centred near `anchor_px`. These are physical screen pixels (not DPI-scaled
     /// logical ones): the engine must pass physical coordinates.
@@ -30,12 +54,16 @@ pub enum OverlayCmd {
         anchor_px: (i32, i32),
         items: Vec<RingSlot>,
         generation: u64,
+        style: RingStyle,
     },
     /// Highlight a sector (`None` = the centre / cancel zone).
     Select {
         index: Option<usize>,
         generation: u64,
     },
+    /// The hand's offset from the selection anchor in millimetres (x right, y down). Only moves
+    /// the pointer dot; never changes the selection.
+    Point { dx: f32, dy: f32, generation: u64 },
     /// Hide the ring. With `committed`, flash that sector for 120 ms first.
     Close {
         committed: Option<usize>,
@@ -58,6 +86,8 @@ pub enum Effect {
     None,
     Open,
     Redraw,
+    /// Only the pointer moved.
+    Point,
     /// Flash the committed sector, then fade out.
     Flash,
     /// Fade out (cancel).
@@ -76,6 +106,9 @@ pub struct Model {
     pub selected: Option<usize>,
     /// The hand went back to the centre after pointing at a slot: the cancel disc lights up.
     pub centre: bool,
+    /// The hand's offset in millimetres, for the pointer dot.
+    pub point: (f32, f32),
+    pub style: RingStyle,
 }
 
 impl Model {
@@ -85,6 +118,7 @@ impl Model {
                 anchor_px,
                 items,
                 generation,
+                style,
             } => {
                 // Older generations are stale; a closed generation cannot be re-opened.
                 if generation < self.generation
@@ -100,6 +134,8 @@ impl Model {
                 self.items = items;
                 self.selected = None;
                 self.centre = false;
+                self.point = (0.0, 0.0);
+                self.style = style;
                 Effect::Open
             }
             OverlayCmd::Select { index, generation } => {
@@ -114,6 +150,13 @@ impl Model {
                 self.centre = index.is_none();
                 self.selected = index;
                 Effect::Redraw
+            }
+            OverlayCmd::Point { dx, dy, generation } => {
+                if !self.open || generation != self.generation || (dx, dy) == self.point {
+                    return Effect::None;
+                }
+                self.point = (dx, dy);
+                Effect::Point
             }
             OverlayCmd::Close {
                 committed,
@@ -156,6 +199,7 @@ mod tests {
             anchor_px: (10, 20),
             items: items(8),
             generation: g,
+            style: RingStyle::default(),
         }
     }
 
@@ -214,12 +258,30 @@ mod tests {
     }
 
     #[test]
+    fn point_moves_only_the_pointer() {
+        let mut m = Model::default();
+        m.apply(open(1));
+        let pt = |dx, dy, generation| OverlayCmd::Point { dx, dy, generation };
+        assert_eq!(m.apply(pt(1.0, 2.0, 0)), Effect::None, "stale");
+        assert_eq!(m.apply(pt(1.0, 2.0, 1)), Effect::Point);
+        assert_eq!(m.point, (1.0, 2.0));
+        assert_eq!(m.apply(pt(1.0, 2.0, 1)), Effect::None, "unchanged");
+        assert_eq!(m.selected, None);
+        m.apply(OverlayCmd::Close {
+            committed: None,
+            generation: 1,
+        });
+        assert_eq!(m.apply(pt(3.0, 3.0, 1)), Effect::None, "closed");
+    }
+
+    #[test]
     fn empty_ring_is_refused() {
         let mut m = Model::default();
         let c = OverlayCmd::Open {
             anchor_px: (0, 0),
             items: vec![],
             generation: 1,
+            style: RingStyle::default(),
         };
         assert_eq!(m.apply(c), Effect::None);
         assert!(!m.open);

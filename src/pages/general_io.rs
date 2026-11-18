@@ -520,6 +520,9 @@ fn setting_label(path: &str) -> String {
         "window.flick_snap" => "フリックでスナップ",
         "window.corner_resize" => "対角を固定してサイズ変更",
         "ring.items" => "リングメニューの項目",
+        "ring.travel" => "選択に必要な移動量",
+        "ring.anim_speed" => "アニメーションの速さ",
+        "ring.pointer_dot" => "指の方向の印",
         "profiles" => "アプリ設定",
         other => {
             if let Some(l) = drag_row_label(other) {

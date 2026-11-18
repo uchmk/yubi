@@ -440,12 +440,16 @@ impl DevShot {
             });
         }
         // The ring page with a full ring (eight items), tall enough to show every row.
-        for (n, w) in [("wide", WIDE.x), ("narrow", NARROW.x)] {
+        for (n, w, theme) in [
+            ("wide", WIDE.x, ThemeChoice::Black),
+            ("narrow", NARROW.x, ThemeChoice::Black),
+            ("light-wide", WIDE.x, ThemeChoice::Light),
+        ] {
             shots.push(Shot {
                 name: format!("ringfull-{n}"),
                 page: Page::Ring,
-                theme: ThemeChoice::Black,
-                size: Vec2::new(w, 1500.0),
+                theme,
+                size: Vec2::new(w, 2000.0),
                 fixture: Fixture::RingFull,
                 profile: None,
                 fake: false,

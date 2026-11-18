@@ -372,6 +372,8 @@ struct RingUi {
     failed_now: bool,
     generation: u64,
     open: bool,
+    /// The open ring draws the pointer dot (so the positions are worth sending).
+    pointer_dot: bool,
     /// The window is gone for good: the HUD stops (the failure also cancels the ring, since both
     /// share the window). A single refused send does not set this.
     #[cfg(all(windows, not(test)))]
@@ -444,8 +446,15 @@ impl RingUi {
     }
 
     #[cfg(all(windows, not(test)))]
-    fn show(&mut self, anchor: (i32, i32), labels: &[String], actions: &[config::Action]) {
-        use crate::overlay::{OverlayCmd, RingSlot};
+    fn show(
+        &mut self,
+        anchor: (i32, i32),
+        labels: &[String],
+        actions: &[config::Action],
+        anim: config::RingAnimSpeed,
+        pointer_dot: bool,
+    ) {
+        use crate::overlay::{OverlayCmd, RingSlot, RingStyle};
         self.warm();
         if !self.ready() {
             self.failed_now = true;
@@ -453,6 +462,7 @@ impl RingUi {
         }
         self.generation += 1;
         self.open = true;
+        self.pointer_dot = pointer_dot;
         let items = labels
             .iter()
             .enumerate()
@@ -477,6 +487,12 @@ impl RingUi {
             anchor_px: anchor,
             items,
             generation,
+            style: RingStyle {
+                slide_ms: anim.slide_ms(),
+                pointer_ms: anim.pointer_ms() as f32,
+                fade_scale: anim.fade_scale(),
+                pointer_dot,
+            },
         });
     }
 
@@ -529,9 +545,17 @@ impl RingUi {
     fn level_hide(&mut self) {}
 
     #[cfg(not(all(windows, not(test))))]
-    fn show(&mut self, _anchor: (i32, i32), _labels: &[String], _actions: &[config::Action]) {
+    fn show(
+        &mut self,
+        _anchor: (i32, i32),
+        _labels: &[String],
+        _actions: &[config::Action],
+        _anim: config::RingAnimSpeed,
+        pointer_dot: bool,
+    ) {
         self.generation += 1;
         self.open = true;
+        self.pointer_dot = pointer_dot;
     }
 
     #[cfg(all(windows, not(test)))]
@@ -544,6 +568,21 @@ impl RingUi {
 
     #[cfg(not(all(windows, not(test))))]
     fn select(&mut self, _index: Option<usize>) {}
+
+    #[cfg(all(windows, not(test)))]
+    fn point(&mut self, dx: f32, dy: f32) {
+        let generation = self.generation;
+        // A pointer position is droppable: a full queue is not a failure of the overlay.
+        if self.open
+            && self.pointer_dot
+            && let Some(o) = &self.overlay
+        {
+            let _ = o.send(crate::overlay::OverlayCmd::Point { dx, dy, generation });
+        }
+    }
+
+    #[cfg(not(all(windows, not(test))))]
+    fn point(&mut self, _dx: f32, _dy: f32) {}
 
     #[cfg(all(windows, not(test)))]
     fn close(&mut self, committed: Option<usize>) {
@@ -901,6 +940,10 @@ impl Dispatcher {
                 self.ring.select(*i);
                 None
             }
+            Action::RingPoint { dx, dy } => {
+                self.ring.point(*dx, *dy);
+                None
+            }
             Action::RingClose { committed } => {
                 self.ring.close(*committed);
                 if committed.is_some() {
@@ -911,7 +954,12 @@ impl Dispatcher {
             _ if self.blocked || self.dry_run => None,
             Action::Suppress(s) => self.suppression.set(*s),
             Action::EdgeStep { side, outs, .. } => self.edge_step(*side, outs, ex),
-            Action::RingOpen { labels, actions } => {
+            Action::RingOpen {
+                labels,
+                actions,
+                anim,
+                pointer_dot,
+            } => {
                 let Some(anchor) = cursor() else {
                     // No position: do not open the ring at the corner. Let go of the freeze and
                     // let the engine cancel the ring through the "overlay failed" path.
@@ -922,7 +970,7 @@ impl Dispatcher {
                 // Consume a stale "pressed since last call" Esc bit: an Esc from before the ring
                 // must not cancel it.
                 let _ = escape_down();
-                self.ring.show(anchor, labels, actions);
+                self.ring.show(anchor, labels, actions, *anim, *pointer_dot);
                 self.ring.failed_now.then(|| RING_FAILED_NOTE.to_owned())
             }
             Action::DragBegin => {
@@ -2557,6 +2605,8 @@ mod tests {
         let open = Action::RingOpen {
             labels: vec!["a".into()],
             actions: vec![config::Action::None],
+            anim: config::RingAnimSpeed::Normal,
+            pointer_dot: true,
         };
         let note = d.handle(&open, &mut ex, &th, || None);
         assert_eq!(note.as_deref(), Some(NO_CURSOR_NOTE));

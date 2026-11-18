@@ -7,8 +7,9 @@
 //!    hold time propose to open the ring.
 //!  * Open: the cursor and clicks are frozen; the centroid's offset from a leashed anchor picks a
 //!    slot (centre = nothing). The anchor starts where the ring opened and is dragged along once
-//!    the hand is more than `LEASH_MM` from it, so a small move toward a neighbouring slot turns
-//!    the selection quickly. A new slot must persist for `SELECT_DWELL_US` first.
+//!    the hand is more than the leash from it, so a small move toward a neighbouring slot turns
+//!    the selection quickly. A new slot must persist for the dwell time first. The enter / clear /
+//!    leash distances and the dwell come from the `RingTravel` setting.
 //!  * Releasing: once the count falls below N the selection is frozen, and every finger must be
 //!    up within `RELEASE_US`; then the slot's action runs, exactly once.
 //!  * Cancels: a release that is not complete in time, the count coming back to N or above, a
@@ -19,22 +20,14 @@
 
 use std::f32::consts::TAU;
 
-use crate::config;
+use crate::config::{self, RingTravelValues};
 use crate::engine::arbitration::{Owner, Proposal};
 use crate::engine::types::{Action, Ctx, GestureCfg, Point, Suppress};
 
-/// The centroid must be this far from the anchor to select a slot.
-pub const ENTER_MM: f32 = 5.0;
-/// A selected slot clears when the centroid comes back inside this radius.
-pub const CLEAR_MM: f32 = 3.0;
 /// A neighbouring slot is taken only this far (degrees) past the sector boundary.
 pub const HYSTERESIS_DEG: f32 = 6.0;
-/// A new selection must hold this long before it is believed.
-pub const SELECT_DWELL_US: u64 = 35_000;
 /// After the first finger lifts, all must be up within this time.
 pub const RELEASE_US: u64 = 250_000;
-/// The selection anchor trails the hand: it is never further than this from the centroid.
-pub const LEASH_MM: f32 = 10.0;
 /// Moving the hand further than this from the point where the ring opened cancels the ring.
 pub const RADIUS_MM: f32 = 45.0;
 /// An open ring that is not used closes after this long.
@@ -54,15 +47,21 @@ fn sector_of(dx: f32, dy: f32, n: usize) -> usize {
 /// The slot picked by the offset (`dx`, `dy`) of the hand from the ring centre, given the slot
 /// picked before (`prev`). Slot 0 is up, then clockwise. Pure; the hysteresis makes the choice
 /// steady at the sector boundaries.
-pub fn select(prev: Option<usize>, dx: f32, dy: f32, n: usize) -> Option<usize> {
+pub fn select(
+    prev: Option<usize>,
+    dx: f32,
+    dy: f32,
+    n: usize,
+    tv: &RingTravelValues,
+) -> Option<usize> {
     if n == 0 {
         return None;
     }
     let r = dx.hypot(dy);
     let Some(prev) = prev.filter(|&p| p < n) else {
-        return (r >= ENTER_MM).then(|| sector_of(dx, dy, n));
+        return (r >= tv.enter_mm).then(|| sector_of(dx, dy, n));
     };
-    if r < CLEAR_MM {
+    if r < tv.clear_mm {
         return None;
     }
     let step = TAU / n as f32;
@@ -88,12 +87,14 @@ enum Phase {
         fingers: usize,
         /// Where the ring opened; only the `RADIUS_MM` cancel is measured from here.
         origin: Point,
-        /// The selection reference; trails the hand within `LEASH_MM`.
+        /// The selection reference; trails the hand within the leash.
         anchor: Point,
         opened: u64,
         selected: Option<usize>,
         /// A different slot that is waiting for its dwell: (slot, since).
         pending: Option<(Option<usize>, u64)>,
+        /// The last offset sent as `RingPoint`.
+        point: (f32, f32),
     },
     Releasing {
         fingers: usize,
@@ -119,6 +120,7 @@ impl RingState {
 
     /// Time of the next thing that needs a timer, if any.
     pub fn deadline(&self, g: &GestureCfg) -> Option<u64> {
+        let dwell_us = g.ring.as_ref().map_or(0, |c| c.travel.dwell_us);
         match self.phase {
             Phase::Idle => {
                 let cfg = g.ring.as_ref()?;
@@ -129,7 +131,7 @@ impl RingState {
             } => Some(
                 [
                     Some(opened + TIMEOUT_US),
-                    pending.map(|(_, t)| t + SELECT_DWELL_US),
+                    pending.map(|(_, t)| t + dwell_us),
                 ]
                 .into_iter()
                 .flatten()
@@ -198,9 +200,15 @@ impl RingState {
             opened: ctx.now,
             selected: None,
             pending: None,
+            point: (0.0, 0.0),
         };
         out.push(Action::Suppress(Suppress::CursorAndClicks));
-        out.push(Action::RingOpen { labels, actions });
+        out.push(Action::RingOpen {
+            labels,
+            actions,
+            anim: cfg.anim,
+            pointer_dot: cfg.pointer_dot,
+        });
     }
 
     /// Move the selection with the hand, freeze it on release and enforce the cancels.
@@ -216,6 +224,7 @@ impl RingState {
                 opened,
                 selected,
                 pending,
+                point,
             } => {
                 if ctx.now.saturating_sub(opened) >= TIMEOUT_US || ctx.raw > fingers {
                     return self.cancel(out);
@@ -240,18 +249,25 @@ impl RingState {
                 }
                 let (mut dx, mut dy) = (c.0 - anchor.0, c.1 - anchor.1);
                 let dist = dx.hypot(dy);
-                if dist > LEASH_MM {
-                    let k = (dist - LEASH_MM) / dist;
+                let tv = cfg.travel;
+                if dist > tv.leash_mm {
+                    let k = (dist - tv.leash_mm) / dist;
                     anchor = (anchor.0 + dx * k, anchor.1 + dy * k);
                     (dx, dy) = (c.0 - anchor.0, c.1 - anchor.1);
                 }
-                let wanted = select(selected, dx, dy, cfg.items.len());
+                let point = if (dx, dy) != point {
+                    out.push(Action::RingPoint { dx, dy });
+                    (dx, dy)
+                } else {
+                    point
+                };
+                let wanted = select(selected, dx, dy, cfg.items.len(), &tv);
                 let (selected, pending) = if wanted == selected {
                     (selected, None)
                 } else {
                     match pending {
                         Some((p, since)) if p == wanted => {
-                            if ctx.now.saturating_sub(since) >= SELECT_DWELL_US {
+                            if ctx.now.saturating_sub(since) >= tv.dwell_us {
                                 out.push(Action::RingSelect(wanted));
                                 (wanted, None)
                             } else {
@@ -268,6 +284,7 @@ impl RingState {
                     opened,
                     selected,
                     pending,
+                    point,
                 };
             }
             Phase::Releasing { fingers, since, .. } => {
@@ -336,7 +353,14 @@ impl RingState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, RingItem};
+    use crate::config::{Config, RingItem, RingTravel};
+
+    const NORMAL: RingTravelValues = RingTravelValues {
+        enter_mm: 5.0,
+        clear_mm: 3.0,
+        leash_mm: 10.0,
+        dwell_us: 35_000,
+    };
     use crate::engine::Frame;
     use crate::engine::recognizer::Recognizer;
     use crate::input::Contact;
@@ -451,21 +475,30 @@ mod tests {
     #[test]
     fn selection_picks_slot_by_direction() {
         // 4 slots: up, right, down, left.
-        assert_eq!(select(None, 0.0, -20.0, 4), Some(0));
-        assert_eq!(select(None, 20.0, 0.0, 4), Some(1));
-        assert_eq!(select(None, 0.0, 20.0, 4), Some(2));
-        assert_eq!(select(None, -20.0, 0.0, 4), Some(3));
+        assert_eq!(select(None, 0.0, -20.0, 4, &NORMAL), Some(0));
+        assert_eq!(select(None, 20.0, 0.0, 4, &NORMAL), Some(1));
+        assert_eq!(select(None, 0.0, 20.0, 4, &NORMAL), Some(2));
+        assert_eq!(select(None, -20.0, 0.0, 4, &NORMAL), Some(3));
     }
 
     #[test]
     fn selection_needs_a_minimum_distance_and_clears_with_hysteresis() {
-        assert_eq!(select(None, 0.0, -(ENTER_MM - 1.0), 4), None);
-        assert_eq!(select(None, 0.0, -ENTER_MM, 4), Some(0));
+        assert_eq!(
+            select(None, 0.0, -(NORMAL.enter_mm - 1.0), 4, &NORMAL),
+            None
+        );
+        assert_eq!(select(None, 0.0, -NORMAL.enter_mm, 4, &NORMAL), Some(0));
         // Once selected it stays until the hand is back inside the clear radius.
-        assert_eq!(select(Some(0), 0.0, -(CLEAR_MM + 1.0), 4), Some(0));
-        assert_eq!(select(Some(0), 0.0, -(CLEAR_MM - 1.0), 4), None);
-        assert_eq!(select(None, 0.0, 0.0, 4), None);
-        assert_eq!(select(None, 10.0, 0.0, 0), None);
+        assert_eq!(
+            select(Some(0), 0.0, -(NORMAL.clear_mm + 1.0), 4, &NORMAL),
+            Some(0)
+        );
+        assert_eq!(
+            select(Some(0), 0.0, -(NORMAL.clear_mm - 1.0), 4, &NORMAL),
+            None
+        );
+        assert_eq!(select(None, 0.0, 0.0, 4, &NORMAL), None);
+        assert_eq!(select(None, 10.0, 0.0, 0, &NORMAL), None);
     }
 
     #[test]
@@ -476,19 +509,31 @@ mod tests {
             (a.sin() * 20.0, -a.cos() * 20.0)
         };
         let (x, y) = at(50.0);
-        assert_eq!(select(Some(0), x, y, 4), Some(0), "5 degrees past: stay");
-        assert_eq!(select(None, x, y, 4), Some(1), "fresh: new slot");
+        assert_eq!(
+            select(Some(0), x, y, 4, &NORMAL),
+            Some(0),
+            "5 degrees past: stay"
+        );
+        assert_eq!(select(None, x, y, 4, &NORMAL), Some(1), "fresh: new slot");
         let (x, y) = at(57.0);
-        assert_eq!(select(Some(0), x, y, 4), Some(1), "12 degrees past: switch");
+        assert_eq!(
+            select(Some(0), x, y, 4, &NORMAL),
+            Some(1),
+            "12 degrees past: switch"
+        );
         let (x, y) = at(42.0);
-        assert_eq!(select(Some(1), x, y, 4), Some(1), "5 degrees back: stay");
+        assert_eq!(
+            select(Some(1), x, y, 4, &NORMAL),
+            Some(1),
+            "5 degrees back: stay"
+        );
     }
 
     #[test]
     fn selection_wraps_around_the_top() {
         // 8 slots: slot 7 is up-left.
-        assert_eq!(select(None, -14.0, -14.0, 8), Some(7));
-        assert_eq!(select(Some(0), -5.0, -20.0, 8), Some(0));
+        assert_eq!(select(None, -14.0, -14.0, 8, &NORMAL), Some(7));
+        assert_eq!(select(Some(0), -5.0, -20.0, 8, &NORMAL), Some(0));
     }
 
     #[test]
@@ -535,10 +580,53 @@ mod tests {
     #[test]
     fn five_mm_out_selects_and_four_does_not() {
         let mut rig = open_rig();
-        rig.hold(200, &hand(5, 40.0 + ENTER_MM - 1.0, 60.0));
+        rig.hold(200, &hand(5, 40.0 + NORMAL.enter_mm - 1.0, 60.0));
         assert!(!rig.out.iter().any(|a| matches!(a, Action::RingSelect(_))));
-        rig.hold(200, &hand(5, 40.0 + ENTER_MM, 60.0));
+        rig.hold(200, &hand(5, 40.0 + NORMAL.enter_mm, 60.0));
         assert!(rig.out.contains(&Action::RingSelect(Some(1))));
+    }
+
+    #[test]
+    fn travel_settings_scale_the_distances() {
+        assert_eq!(RingTravel::Normal.values(), NORMAL);
+        let (s, l) = (RingTravel::Small.values(), RingTravel::Large.values());
+        assert!(s.enter_mm < NORMAL.enter_mm && NORMAL.enter_mm < l.enter_mm);
+        assert!(s.dwell_us < NORMAL.dwell_us && NORMAL.dwell_us < l.dwell_us);
+        assert_eq!(select(None, 0.0, -4.0, 4, &s), Some(0));
+        assert_eq!(select(None, 0.0, -6.0, 4, &l), None);
+        assert_eq!(select(None, 0.0, -7.0, 4, &l), Some(0));
+        // Through the engine: Large needs 7 mm.
+        let mut c = cfg();
+        c.ring.travel = RingTravel::Large;
+        let mut rig = Rig::new(c);
+        rig.hold(700, &hand(5, 40.0, 60.0));
+        rig.hold(200, &hand(5, 46.0, 60.0));
+        assert!(!rig.out.iter().any(|a| matches!(a, Action::RingSelect(_))));
+        rig.hold(200, &hand(5, 47.0, 60.0));
+        assert!(rig.out.contains(&Action::RingSelect(Some(1))));
+    }
+
+    #[test]
+    fn the_hand_offset_is_sent_when_it_changes() {
+        let mut rig = open_rig();
+        let points = |rig: &Rig| {
+            rig.out
+                .iter()
+                .filter(|a| matches!(a, Action::RingPoint { .. }))
+                .count()
+        };
+        assert_eq!(points(&rig), 0);
+        rig.hold(100, &hand(5, 43.0, 60.0));
+        assert_eq!(points(&rig), 1, "one change, one point");
+        rig.hold(100, &hand(5, 43.0, 60.0));
+        assert_eq!(points(&rig), 1, "still: nothing new");
+        rig.hold(100, &hand(5, 44.0, 60.0));
+        assert_eq!(points(&rig), 2);
+        let last = rig.out.iter().rev().find_map(|a| match a {
+            Action::RingPoint { dx, dy } => Some((*dx, *dy)),
+            _ => None,
+        });
+        assert!(last.is_some_and(|(dx, dy)| dx > 3.0 && dy.abs() < 0.5));
     }
 
     #[test]

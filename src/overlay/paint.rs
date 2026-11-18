@@ -3,7 +3,7 @@
 
 use std::f32::consts::{PI, TAU};
 
-use super::geometry::{Layout, angle_of};
+use super::geometry::{Layout, angle_diff, angle_of};
 use super::level::{LevelInfo, LevelLayout};
 
 /// Straight (non-premultiplied) RGBA, 0..=255 floats.
@@ -82,44 +82,63 @@ fn premul(c: Rgba) -> u32 {
     ((a * 255.0).round() as u32) << 24 | ch(c.0) << 16 | ch(c.1) << 8 | ch(c.2)
 }
 
-/// Per-slot highlight weights for a fixed `Highlight`: 1 for the selected slot (or the centre),
-/// 0 for the rest, and the flashed slot, which is painted with the flash colours at once.
-pub fn weights_for(hl: Highlight, n: usize) -> (Vec<f32>, f32, Option<usize>) {
-    let mut w = vec![0.0; n];
-    let mut set = |i: usize| {
-        if let Some(v) = w.get_mut(i) {
-            *v = 1.0;
-        }
+/// The selection band: a sector-wide highlight centred on `angle` (0 = up, clockwise), shown
+/// with `strength` (0 = invisible .. 1 = fully selected).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Band {
+    pub angle: f32,
+    pub strength: f32,
+}
+
+/// The pointer dot: direction `angle` (0 = up, clockwise) and opacity `alpha`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pointer {
+    pub angle: f32,
+    pub alpha: f32,
+}
+
+/// The band, the centre weight and the flashed slot for a fixed `Highlight`.
+pub fn look_for(hl: Highlight, n: usize) -> (Band, f32, Option<usize>) {
+    let at = |i: usize| Band {
+        angle: i as f32 * TAU / n.max(1) as f32,
+        strength: if i < n { 1.0 } else { 0.0 },
     };
-    let (centre, flash) = match hl {
-        Highlight::None => (0.0, None),
-        Highlight::Centre => (1.0, None),
-        Highlight::Selected(i) => {
-            set(i);
-            (0.0, None)
-        }
-        Highlight::Flash(i) => {
-            set(i);
-            (0.0, Some(i))
-        }
+    let none = Band {
+        angle: 0.0,
+        strength: 0.0,
     };
-    (w, centre, flash)
+    match hl {
+        Highlight::None => (none, 0.0, None),
+        Highlight::Centre => (none, 1.0, None),
+        Highlight::Selected(i) => (at(i), 0.0, None),
+        Highlight::Flash(i) => (at(i), 0.0, Some(i)),
+    }
+}
+
+/// The slot lit by a fixed `Highlight` (for the label colours).
+pub fn lit_for(hl: Highlight) -> Option<usize> {
+    match hl {
+        Highlight::Selected(i) | Highlight::Flash(i) => Some(i),
+        _ => None,
+    }
 }
 
 /// Draw the ring into `px` (`size` x `size`, cleared first).
 pub fn render_ring(px: &mut [u32], l: &Layout, hl: Highlight) {
-    let (w, centre, flash) = weights_for(hl, l.n);
-    render_ring_weighted(px, l, &w, centre, flash);
+    let (band, centre, flash) = look_for(hl, l.n);
+    render_ring_band(px, l, band, centre, flash, None);
 }
 
-/// Draw the ring with a highlight weight (0 = normal, 1 = selected) per slot and for the centre
-/// disc; the colours are blended by the weight. `flash` is painted in the flash colours.
-pub fn render_ring_weighted(
+/// Draw the ring with the selection `band` sliding over the sectors (per-pixel coverage, 1 px
+/// soft edges, under the sector-gap mask), the centre disc lit by `centre` (0..=1), the `flash`
+/// slot in the flash colours and an optional pointer dot on the centre disc.
+pub fn render_ring_band(
     px: &mut [u32],
     l: &Layout,
-    weights: &[f32],
+    band: Band,
     centre: f32,
     flash: Option<usize>,
+    pointer: Option<Pointer>,
 ) {
     let size = l.size as usize;
     assert!(px.len() >= size * size);
@@ -129,20 +148,6 @@ pub fn render_ring_weighted(
     let n = l.n;
     let disc_fill = PALETTE.fill.lerp(PALETTE.sel_fill, centre);
     let disc_border = PALETTE.border.lerp(PALETTE.sel_border, centre);
-    // Colours per slot, once, not per pixel.
-    let slot_colours: Vec<(Rgba, Rgba)> = (0..n)
-        .map(|i| {
-            if flash == Some(i) {
-                (PALETTE.flash_fill, PALETTE.sel_border)
-            } else {
-                let w = weights.get(i).copied().unwrap_or(0.0);
-                (
-                    PALETTE.fill.lerp(PALETTE.sel_fill, w),
-                    PALETTE.border.lerp(PALETTE.sel_border, w),
-                )
-            }
-        })
-        .collect();
     let disc_r = l.inner - l.gap * 0.5;
 
     for y in 0..size {
@@ -180,8 +185,45 @@ pub fn render_ring_weighted(
             if d <= -1.0 {
                 continue;
             }
-            let (fill, border) = slot_colours[idx];
+            let (fill, border) = if flash == Some(idx) {
+                (PALETTE.flash_fill, PALETTE.sel_border)
+            } else {
+                // Soft window (1 px in arc length) around the band angle.
+                let cov = if n < 2 {
+                    1.0
+                } else {
+                    ((step / 2.0 - angle_diff(band.angle, a).abs()) * r + 0.5).clamp(0.0, 1.0)
+                } * band.strength;
+                (
+                    PALETTE.fill.lerp(PALETTE.sel_fill, cov),
+                    PALETTE.border.lerp(PALETTE.sel_border, cov),
+                )
+            };
             px[y * size + x] = shade(fill, border, d);
+        }
+    }
+    if let Some(p) = pointer {
+        draw_dot(px, size, l, p);
+    }
+}
+
+/// The anti-aliased pointer dot over the centre disc.
+fn draw_dot(px: &mut [u32], size: usize, l: &Layout, p: Pointer) {
+    if p.alpha <= 0.0 {
+        return;
+    }
+    let (dx, dy) = l.dot_centre(p.angle);
+    let r = l.dot_r();
+    let src = premul(Rgba(PALETTE.bar.0, PALETTE.bar.1, PALETTE.bar.2, 1.0));
+    let x0 = (dx - r - 1.0).floor().max(0.0) as usize;
+    let x1 = (dx + r + 1.0).ceil() as usize;
+    let y0 = (dy - r - 1.0).floor().max(0.0) as usize;
+    let y1 = (dy + r + 1.0).ceil() as usize;
+    for y in y0..y1.min(size) {
+        for x in x0..x1.min(size) {
+            let dist = ((x as f32 + 0.5 - dx).powi(2) + (y as f32 + 0.5 - dy).powi(2)).sqrt();
+            let cov = (r - dist + 0.5).clamp(0.0, 1.0) * p.alpha.clamp(0.0, 1.0);
+            blend_premul(&mut px[y * size + x], src, cov);
         }
     }
 }
@@ -420,21 +462,80 @@ mod tests {
     }
 
     #[test]
-    fn half_weight_is_between_normal_and_selected() {
+    fn half_strength_is_between_normal_and_selected() {
         let l = Layout::new(8, 96);
         let n = (l.size * l.size) as usize;
         let (mut a, mut b, mut c) = (vec![0u32; n], vec![0u32; n], vec![0u32; n]);
-        let mut w = vec![0.0; 8];
-        render_ring_weighted(&mut a, &l, &w, 0.0, None);
-        w[0] = 0.5;
-        render_ring_weighted(&mut b, &l, &w, 0.0, None);
-        w[0] = 1.0;
-        render_ring_weighted(&mut c, &l, &w, 0.0, None);
+        let band = |strength| Band {
+            angle: 0.0,
+            strength,
+        };
+        render_ring_band(&mut a, &l, band(0.0), 0.0, None, None);
+        render_ring_band(&mut b, &l, band(0.5), 0.0, None, None);
+        render_ring_band(&mut c, &l, band(1.0), 0.0, None, None);
         let mid = (l.outer + l.inner) / 2.0;
         let blue = |px: &[u32]| pixel(px, &l, 0.0, -mid) & 0xFF;
         assert!(blue(&a) < blue(&b) && blue(&b) < blue(&c));
         // The other sectors are untouched.
         assert_eq!(pixel(&a, &l, -mid, 0.0), pixel(&b, &l, -mid, 0.0));
+    }
+
+    #[test]
+    fn band_slides_between_sectors() {
+        let l = Layout::new(8, 96);
+        let n = (l.size * l.size) as usize;
+        let mid = (l.outer + l.inner) / 2.0;
+        // The blue channel at `at` sectors round (1.0 = the centre of slot 1).
+        let blue = |px: &[u32], at: f32| {
+            let a = at * l.step();
+            pixel(px, &l, mid * a.sin(), -mid * a.cos()) & 0xFF
+        };
+        let render = |angle: f32| {
+            let mut px = vec![0u32; n];
+            let band = Band {
+                angle,
+                strength: 1.0,
+            };
+            render_ring_band(&mut px, &l, band, 0.0, None, None);
+            px
+        };
+        // On slot 1: only slot 1 is lit.
+        let on = render(l.step());
+        assert!(blue(&on, 1.0) > 0xE0 && blue(&on, 0.0) < 0x40 && blue(&on, 2.0) < 0x40);
+        // Half way between slots 1 and 2: the near halves of both are lit, the others are not.
+        let between = render(l.step() * 1.5);
+        assert!(blue(&between, 1.2) > 0xE0 && blue(&between, 1.8) > 0xE0);
+        assert!(blue(&between, 0.8) < 0x40 && blue(&between, 2.2) < 0x40);
+        assert!(blue(&between, 0.0) < 0x40 && blue(&between, 3.0) < 0x40);
+        // The gap between them stays transparent.
+        let a = l.step() * 1.5;
+        assert_eq!(pixel(&between, &l, mid * a.sin(), -mid * a.cos()) >> 24, 0);
+    }
+
+    #[test]
+    fn pointer_dot_is_drawn_on_the_disc_and_fades() {
+        let l = Layout::new(8, 96);
+        let n = (l.size * l.size) as usize;
+        let band = Band {
+            angle: 0.0,
+            strength: 0.0,
+        };
+        let draw = |alpha| {
+            let mut px = vec![0u32; n];
+            let p = Pointer {
+                angle: std::f32::consts::FRAC_PI_2,
+                alpha,
+            };
+            render_ring_band(&mut px, &l, band, 0.0, None, Some(p));
+            px
+        };
+        let (x, y) = l.dot_centre(std::f32::consts::FRAC_PI_2);
+        let at = |px: &[u32]| px[y as usize * l.size as usize + x as usize];
+        let off = draw(0.0);
+        let on = draw(1.0);
+        assert!((at(&on) & 0xFF) > 0xE0 && ((at(&on) >> 16) & 0xFF) < 0xA0);
+        assert!((at(&off) & 0xFF) < 0x40);
+        assert!((at(&draw(0.5)) & 0xFF) > (at(&off) & 0xFF));
     }
 
     #[test]

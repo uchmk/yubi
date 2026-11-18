@@ -5,7 +5,7 @@ use eframe::egui::{self, Align, Layout, RichText, Ui};
 
 use crate::config::{
     Action, ActionKind, Combo, Config, DragAction, DragRow, DragStart, EdgeKind, EdgeTarget,
-    Finger, HoldCombos, HoldTrigger, Ring, RingItem,
+    Finger, HoldCombos, HoldTrigger, Ring, RingAnimSpeed, RingItem, RingTravel,
 };
 use crate::howto::{self, Mini, Side};
 use crate::howto_scenes;
@@ -1140,8 +1140,33 @@ pub fn ring(ui: &mut Ui, t: &Tokens, cfg: &mut Config) -> Option<Cmd> {
                     .color(t.text_muted),
             );
         }
+        section_header(ui, t, "動き");
+        group(ui, t, |g| {
+            g.combo_row(
+                "選択に必要な移動量",
+                "項目を選ぶために、指をどれだけ動かすかです。小さいほど少し動かすだけで選べますが、意図しない選択も増えます。",
+                "ring-travel",
+                &mut cfg.ring.travel,
+                &RingTravel::ALL,
+                RingTravel::label,
+            );
+            g.combo_row(
+                "アニメーションの速さ",
+                "選択の帯が動く速さと、現れる・消える速さです。Windows のアニメーション効果がオフのときは、常にすぐ切り替わります。",
+                "ring-anim-speed",
+                &mut cfg.ring.anim_speed,
+                &RingAnimSpeed::ALL,
+                RingAnimSpeed::label,
+            );
+        });
         section_header(ui, t, "フィードバック");
         group(ui, t, |g| {
+            g.toggle_row(
+                None,
+                "指の方向の印",
+                "中央の円の縁に小さな点を出し、指が動いている方向を示します。",
+                &mut cfg.ring.pointer_dot,
+            );
             g.toggle_row(
                 None,
                 "触覚で知らせる",
